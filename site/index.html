@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>f/uno — the fastest first pass in photography</title>
+<meta name="description" content="f/uno is a Mac-native photo culling app. No import, no catalog — click a folder and cull. Face and focus triage, Lightroom-ready XMP, built for working photographers.">
+<style>
+  :root{
+    --bg:#161719; --bg2:#1b1c1f; --card:#1e2023; --line:#33363b;
+    --tx:#e8e6e1; --tx2:#8b8e94; --brass:#C9962F; --red:#CC181E;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sys:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --serif:Georgia,"Times New Roman",serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--bg);color:var(--tx);font-family:var(--sys);-webkit-font-smoothing:antialiased;}
+  a{color:inherit;}
+  .wrap{max-width:980px;margin:0 auto;padding:0 28px;}
+
+  /* ---------- nav ---------- */
+  nav{display:flex;justify-content:space-between;align-items:center;padding:26px 0;}
+  .mark{font-family:var(--serif);font-style:italic;font-size:22px;color:var(--brass);text-decoration:none;}
+  .mark span{font-family:var(--mono);font-style:normal;font-size:18px;color:var(--tx);}
+  nav .links{display:flex;gap:26px;font-size:13px;color:var(--tx2);}
+  nav .links a{text-decoration:none;}
+  nav .links a:hover{color:var(--tx);}
+
+  /* ---------- hero ---------- */
+  header{padding:88px 0 40px;text-align:center;}
+  h1{font-size:clamp(38px,6vw,58px);font-weight:250;letter-spacing:-.01em;line-height:1.08;}
+  h1 .f{font-family:var(--serif);font-style:italic;font-weight:500;}
+  h1 .slash{color:var(--brass);}
+  h1 .uno{font-family:var(--mono);font-weight:400;font-size:.9em;}
+  .tag{margin-top:18px;font-size:clamp(17px,2.6vw,21px);color:var(--tx);font-weight:400;}
+  .sub{margin-top:10px;font-size:15px;color:var(--tx2);}
+  .cta{margin-top:38px;display:flex;gap:14px;justify-content:center;align-items:center;flex-wrap:wrap;}
+  .btn{background:var(--brass);color:#171310;font-weight:600;font-size:15px;text-decoration:none;
+       padding:13px 26px;border-radius:8px;letter-spacing:.01em;}
+  .btn:hover{filter:brightness(1.08);}
+  .cta small{display:block;font-family:var(--mono);font-size:11.5px;color:var(--tx2);}
+
+  /* ---------- f-stop scale ---------- */
+  .scale{margin:76px auto 0;max-width:760px;display:flex;justify-content:space-between;
+         font-family:var(--mono);font-size:clamp(11px,1.8vw,15px);user-select:none;}
+  .stop{text-align:center;color:var(--tx2);}
+  .stop i{display:block;font-style:normal;height:14px;border-left:1.5px solid #4a4d53;width:0;margin:0 auto 7px;}
+  .stop.hot{color:var(--red);font-weight:700;position:relative;}
+  .stop.hot i{border-color:var(--red);}
+  .stop.hot em{position:absolute;top:-30px;left:50%;transform:translateX(-50%);
+               font-family:var(--serif);font-style:italic;font-size:22px;color:var(--red);}
+  .stop:nth-child(2){opacity:.85}.stop:nth-child(3){opacity:.7}.stop:nth-child(4){opacity:.6}
+  .stop:nth-child(5){opacity:.5}.stop:nth-child(6){opacity:.42}.stop:nth-child(7){opacity:.34}
+  .stop:nth-child(8){opacity:.26}.stop:nth-child(9){opacity:.18}.stop:nth-child(10){opacity:.12}
+
+  /* ---------- thesis ---------- */
+  .thesis{margin:90px 0 0;border-top:1px solid var(--line);padding-top:70px;text-align:center;}
+  .thesis p{max-width:640px;margin:0 auto;font-size:clamp(18px,2.8vw,24px);font-weight:300;line-height:1.5;}
+  .thesis b{color:var(--brass);font-weight:500;}
+
+  /* ---------- features ---------- */
+  section.features{padding:80px 0 10px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;margin-top:34px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px 22px;}
+  .card h3{font-size:15px;font-weight:600;margin-bottom:9px;}
+  .card h3 .k{font-family:var(--mono);color:var(--brass);font-size:13px;margin-right:6px;}
+  .card p{font-size:13.5px;color:var(--tx2);line-height:1.6;}
+  .eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--tx2);font-weight:700;}
+
+  /* ---------- safety strip ---------- */
+  .safety{margin:70px 0 0;background:var(--bg2);border:1px solid var(--line);border-radius:14px;
+          padding:30px 30px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:22px;}
+  .safety div h4{font-size:13px;font-weight:600;margin-bottom:6px;color:var(--tx);}
+  .safety div h4::before{content:"—";color:var(--red);margin-right:8px;}
+  .safety div p{font-size:12.5px;color:var(--tx2);line-height:1.55;}
+
+  /* ---------- keys ---------- */
+  .keys{margin-top:70px;text-align:center;}
+  .keyrow{margin-top:22px;display:flex;justify-content:center;gap:22px;flex-wrap:wrap;font-size:12.5px;color:var(--tx2);}
+  kbd{font-family:var(--mono);font-size:11px;color:var(--tx);background:#26282c;border:1px solid var(--line);
+      border-radius:4px;padding:2.5px 7px;margin-right:5px;}
+
+  /* ---------- download ---------- */
+  #download{margin:90px 0 0;border-top:1px solid var(--line);padding:70px 0 20px;text-align:center;}
+  #download h2{font-size:26px;font-weight:300;}
+  #download .fine{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--tx2);line-height:2;}
+
+  footer{margin-top:80px;border-top:1px solid var(--line);padding:30px 0 50px;
+         display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;
+         font-size:12.5px;color:var(--tx2);}
+  footer .fm{font-family:var(--serif);font-style:italic;color:#4a4d53;font-size:16px;}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav>
+    <a class="mark" href="#">ƒ/<span>uno</span></a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#download">Download</a>
+      <a href="https://instagram.com/funo.photo" rel="noopener">@funo.photo</a>
+    </div>
+  </nav>
+
+  <header>
+    <h1><span class="f">ƒ</span><span class="slash">/</span><span class="uno">uno</span></h1>
+    <p class="tag">The fastest first pass in photography.</p>
+    <p class="sub">No import. No catalog. The folder <em>is</em> the catalog.</p>
+    <div class="cta">
+      <div>
+        <a class="btn" href="Funo-0.9.0.dmg" download>Download for Mac</a>
+        <small style="margin-top:10px">beta 0.9.0 · macOS 13+ · free during beta</small>
+      </div>
+    </div>
+
+    <div class="scale" aria-hidden="true">
+      <div class="stop hot"><em>ƒ</em><i></i>1.0</div>
+      <div class="stop"><i></i>1.2</div>
+      <div class="stop"><i></i>1.4</div>
+      <div class="stop"><i></i>2</div>
+      <div class="stop"><i></i>2.8</div>
+      <div class="stop"><i></i>4</div>
+      <div class="stop"><i></i>5.6</div>
+      <div class="stop"><i></i>8</div>
+      <div class="stop"><i></i>11</div>
+      <div class="stop"><i></i>16</div>
+    </div>
+  </header>
+
+  <div class="thesis">
+    <p>Click a folder of 2,000 RAWs and start culling <b>immediately</b> —
+       while catalog apps are still importing, f/uno is already on frame forty.</p>
+  </div>
+
+  <section class="features" id="features">
+    <span class="eyebrow">Cull</span>
+    <div class="grid">
+      <div class="card"><h3><span class="k">01</span>Instant open</h3>
+        <p>No import step, no indexing, no database. Thumbnails stream from embedded previews the moment a folder is clicked — local drive or external SSD.</p></div>
+      <div class="card"><h3><span class="k">02</span>Keyboard rhythm</h3>
+        <p>Stars, color labels, and rejects on the keys, with auto-advance. Rate a frame, you're already looking at the next one. Lightroom-matched filters: at least / exactly / at most.</p></div>
+      <div class="card"><h3><span class="k">03</span>Survey mode</h3>
+        <p>Compare up to four near-identical frames with synchronized zoom — scroll on one and all four magnify the same eye. The sharpest frame wears the crown.</p></div>
+      <div class="card"><h3><span class="k">04</span>Face triage</h3>
+        <p>Every face cropped and graded: eyes open, squinting, or closed — smile-aware, so a laughing kid doesn't sink the frame. Click a face to inspect it at 1:1. All on-device.</p></div>
+      <div class="card"><h3><span class="k">05</span>Focus score</h3>
+        <p>Sharpness measured on the subject's face, not the whole frame. A crisp portrait against creamy bokeh scores high. A busy back-focused frame doesn't fake it.</p></div>
+      <div class="card"><h3><span class="k">06</span>Hand off</h3>
+        <p>Selects ship straight to Lightroom's import dialog or open in Photoshop, ratings and labels intact. Folder templates build your shoot structure in one click.</p></div>
+    </div>
+
+    <div class="safety">
+      <div><h4>Originals untouched</h4><p>Ratings live in standard XMP sidecars. Lightroom, Capture One, and Photo Mechanic read them natively.</p></div>
+      <div><h4>Cards are read-only</h4><p>Ingest copies from memory cards — never moves, never modifies. The card stays exactly as shot.</p></div>
+      <div><h4>Rejects go to Trash</h4><p>Nothing is ever deleted in place. Every file operation is undoable.</p></div>
+      <div><h4>No lock-in, ever</h4><p>Quit f/uno and your work is still in your folders and sidecars, readable by everything. There is no catalog to lose.</p></div>
+    </div>
+
+    <div class="keys">
+      <span class="eyebrow">The whole workflow fits under your fingers</span>
+      <div class="keyrow">
+        <span><kbd>1–5</kbd>rate</span>
+        <span><kbd>⌃1–5</kbd>color</span>
+        <span><kbd>X</kbd>reject</span>
+        <span><kbd>Space</kbd>preview</span>
+        <span><kbd>S</kbd>survey</span>
+        <span><kbd>Z</kbd>100%</span>
+        <span><kbd>F</kbd>faces</span>
+        <span><kbd>`</kbd>color-first</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="download">
+    <h2>Cull tonight's shoot with it.</h2>
+    <div class="cta">
+      <div>
+        <a class="btn" href="Funo-0.9.0.dmg" download>Download f/uno 0.9.0</a>
+        <small style="margin-top:10px">signed &amp; notarized · macOS 13 or later</small>
+      </div>
+    </div>
+    <p class="fine">
+      Beta — free while we tune it with working photographers.<br>
+      Feedback: <a href="mailto:beta@funophoto.com" style="color:var(--brass)">beta@funophoto.com</a>
+    </p>
+  </section>
+
+  <footer>
+    <span>© 2026 funophoto.com</span>
+    <span class="fm">ƒ/</span>
+    <span><a href="https://instagram.com/funo.photo" rel="noopener" style="text-decoration:none">@funo.photo</a></span>
+  </footer>
+</div>
+
+</body>
+</html>

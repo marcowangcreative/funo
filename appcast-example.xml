@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>f/uno updates</title>
+    <item>
+      <title>0.9.1</title>
+      <pubDate>Thu, 17 Jul 2026 12:00:00 -0500</pubDate>
+      <sparkle:version>202607171200</sparkle:version>
+      <sparkle:shortVersionString>0.9.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>What changed, in one or two lines.</li></ul>]]></description>
+      <enclosure url="https://funophoto.com/updates/Funo-0.9.1.dmg"
+                 sparkle:edSignature="PASTE_OUTPUT_OF_sign_update_HERE"
+                 length="FILE_SIZE_BYTES"
+                 type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

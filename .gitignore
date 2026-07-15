@@ -1,0 +1,7 @@
+.build/
+dist/
+_to_delete/
+.DS_Store
+*.xcodeproj
+.swiftpm/
+# DMGs in site/ ARE tracked deliberately — they're the download the site serves.
