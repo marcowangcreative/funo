@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>f/uno — features</title>
+<meta name="description" content="Every f/uno feature: instant no-import opens, face and focus triage, survey mode with synced zoom, XMP-native ratings, safe file operations.">
+<style>
+  :root{
+    --bg:#161719; --bg2:#1b1c1f; --card:#1e2023; --line:#33363b;
+    --tx:#e8e6e1; --tx2:#8b8e94; --brass:#C9962F; --red:#CC181E;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sys:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --serif:Georgia,"Times New Roman",serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--bg);color:var(--tx);font-family:var(--sys);-webkit-font-smoothing:antialiased;}
+  a{color:inherit;}
+  .wrap{max-width:980px;margin:0 auto;padding:0 28px;}
+
+  /* ---------- nav ---------- */
+  nav{display:flex;justify-content:space-between;align-items:center;padding:26px 0;}
+  .mark{font-family:var(--serif);font-style:italic;font-size:22px;color:var(--brass);text-decoration:none;}
+  .mark span{font-family:var(--mono);font-style:normal;font-size:18px;color:var(--tx);}
+  nav .links{display:flex;gap:26px;font-size:13px;color:var(--tx2);}
+  nav .links a{text-decoration:none;}
+  nav .links a:hover{color:var(--tx);}
+
+  /* ---------- hero ---------- */
+  header{padding:88px 0 40px;text-align:center;}
+  h1{font-size:clamp(38px,6vw,58px);font-weight:250;letter-spacing:-.01em;line-height:1.08;}
+  h1 .f{font-family:var(--serif);font-style:italic;font-weight:500;}
+  h1 .slash{color:var(--brass);}
+  h1 .uno{font-family:var(--mono);font-weight:400;font-size:.9em;}
+  .tag{margin-top:18px;font-size:clamp(17px,2.6vw,21px);color:var(--tx);font-weight:400;}
+  .sub{margin-top:10px;font-size:15px;color:var(--tx2);}
+  .cta{margin-top:38px;display:flex;gap:14px;justify-content:center;align-items:center;flex-wrap:wrap;}
+  .btn{display:inline-block;background:var(--brass);color:#171310;font-weight:600;font-size:15px;text-decoration:none;
+       padding:13px 26px;border-radius:8px;letter-spacing:.01em;}
+  .btn:hover{filter:brightness(1.08);}
+  .cta small{display:block;margin-top:12px;font-family:var(--mono);font-size:11.5px;color:var(--tx2);}
+
+  /* ---------- f-stop scale ---------- */
+  .scale{margin:76px auto 0;max-width:760px;display:flex;justify-content:space-between;
+         font-family:var(--mono);font-size:clamp(11px,1.8vw,15px);user-select:none;}
+  .stop{text-align:center;color:var(--tx2);}
+  .stop i{display:block;font-style:normal;height:14px;border-left:1.5px solid #4a4d53;width:0;margin:0 auto 7px;}
+  .stop.hot{color:var(--red);font-weight:700;position:relative;}
+  .stop.hot i{border-color:var(--red);}
+  .stop.hot em{position:absolute;top:-30px;left:50%;transform:translateX(-50%);
+               font-family:var(--serif);font-style:italic;font-size:22px;color:var(--red);}
+  .stop:nth-child(2){opacity:.85}.stop:nth-child(3){opacity:.7}.stop:nth-child(4){opacity:.6}
+  .stop:nth-child(5){opacity:.5}.stop:nth-child(6){opacity:.42}.stop:nth-child(7){opacity:.34}
+  .stop:nth-child(8){opacity:.26}.stop:nth-child(9){opacity:.18}.stop:nth-child(10){opacity:.12}
+
+  /* ---------- thesis ---------- */
+  .thesis{margin:90px 0 0;border-top:1px solid var(--line);padding-top:70px;text-align:center;}
+  .thesis p{max-width:640px;margin:0 auto;font-size:clamp(18px,2.8vw,24px);font-weight:300;line-height:1.5;}
+  .thesis b{color:var(--brass);font-weight:500;}
+
+  /* ---------- features ---------- */
+  section.features{padding:80px 0 10px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;margin-top:34px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px 22px;}
+  .card h3{font-size:15px;font-weight:600;margin-bottom:9px;}
+  .card h3 .k{font-family:var(--mono);color:var(--brass);font-size:13px;margin-right:6px;}
+  .card p{font-size:13.5px;color:var(--tx2);line-height:1.6;}
+  .eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--tx2);font-weight:700;}
+
+  /* ---------- safety strip ---------- */
+  .safety{margin:70px 0 0;background:var(--bg2);border:1px solid var(--line);border-radius:14px;
+          padding:30px 30px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:22px;}
+  .safety div h4{font-size:13px;font-weight:600;margin-bottom:6px;color:var(--tx);}
+  .safety div h4::before{content:"—";color:var(--red);margin-right:8px;}
+  .safety div p{font-size:12.5px;color:var(--tx2);line-height:1.55;}
+
+  /* ---------- full feature list ---------- */
+  .full{margin-top:80px;}
+  .full .group{margin-top:44px;}
+  .full .rows{margin-top:16px;border-top:1px solid var(--line);}
+  .frow{display:grid;grid-template-columns:220px 1fr;gap:18px;padding:13px 0;border-bottom:1px solid var(--line);}
+  .frow b{font-size:13.5px;font-weight:600;color:var(--tx);}
+  .frow span{font-size:13px;color:var(--tx2);line-height:1.55;}
+  @media (max-width:640px){.frow{grid-template-columns:1fr;gap:4px;}}
+
+  /* ---------- keys ---------- */
+  .keys{margin-top:70px;text-align:center;}
+  .keyrow{margin-top:22px;display:flex;justify-content:center;gap:22px;flex-wrap:wrap;font-size:12.5px;color:var(--tx2);}
+  kbd{font-family:var(--mono);font-size:11px;color:var(--tx);background:#26282c;border:1px solid var(--line);
+      border-radius:4px;padding:2.5px 7px;margin-right:5px;}
+
+  /* ---------- download ---------- */
+  #download{margin:90px 0 0;border-top:1px solid var(--line);padding:70px 0 20px;text-align:center;}
+  #download h2{font-size:26px;font-weight:300;}
+  #download .fine{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--tx2);line-height:2;}
+
+  footer{margin-top:80px;border-top:1px solid var(--line);padding:30px 0 50px;
+         display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;
+         font-size:12.5px;color:var(--tx2);}
+  footer .fm{font-family:var(--serif);font-style:italic;color:#4a4d53;font-size:16px;}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav>
+    <a class="mark" href="index.html">ƒ/<span>uno</span></a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="index.html#download">Download</a>
+      <a href="https://instagram.com/funo.photo" rel="noopener">@funo.photo</a>
+    </div>
+  </nav>
+
+  <header style="padding:56px 0 10px;">
+    <h1 style="font-size:clamp(28px,4.5vw,40px);">Features</h1>
+    <p class="sub">Everything in the beta, enumerated. No roadmap padding — if it's listed, it ships.</p>
+  </header>
+
+  <section class="features" style="padding-top:10px;">
+    <div class="full">
+      <span class="eyebrow">The full list</span>
+
+      <div class="group">
+        <span class="eyebrow" style="color:var(--brass)">Open &amp; browse</span>
+        <div class="rows">
+          <div class="frow"><b>Instant open</b><span>Click any folder and the grid appears immediately — no import, no indexing, no database build. Thumbnails stream from embedded previews.</span></div>
+          <div class="frow"><b>Folder-native</b><span>Your folder structure is the organization. Browse drives and folders exactly as they exist on disk, local or external.</span></div>
+          <div class="frow"><b>Browser-style tabs</b><span>Multiple contact sheets at once. ⌘T new, ⌘W close, ⌘1–9 jump, ⌘←/→ cycle. Background tabs freeze — zero work until activated.</span></div>
+          <div class="frow"><b>RAW+JPEG pairing</b><span>Same-name pairs collapse to one grid item, badged R+J.</span></div>
+          <div class="frow"><b>CR3-aware decoding</b><span>Full-resolution embedded JPEGs pulled straight from Canon CR3s. External drives get dedicated decode lanes; memory cards are treated gently.</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <span class="eyebrow" style="color:var(--brass)">Cull</span>
+        <div class="rows">
+          <div class="frow"><b>Keyboard-first rhythm</b><span>1–5 stars, ⌃1–5 color labels, X reject, 0 clear. In expanded view every rating auto-advances to the next frame.</span></div>
+          <div class="frow"><b>Color-first mode</b><span>Press ` to flip the scheme: 1–5 become color labels, ⌃1–5 become stars.</span></div>
+          <div class="frow"><b>Lightroom-matched filters</b><span>Star threshold with at least / exactly / at most, color-label filters including "no label," rejects view. Same vocabulary, zero translation.</span></div>
+          <div class="frow"><b>Expanded view</b><span>Full-window preview: Z to 100%, scroll zoom, drag pan, resizable filmstrip, RGB histogram with clipping warnings, full EXIF.</span></div>
+          <div class="frow"><b>Survey mode</b><span>S compares 2–4 frames side by side with synchronized zoom — scroll on one and all zoom to the same spot. The sharpest frame wears the crown.</span></div>
+          <div class="frow"><b>Selection-scoped review</b><span>Select ten photos, hit Space — expanded view contains exactly those ten. Arrows and filmstrip never leave your set.</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <span class="eyebrow" style="color:var(--brass)">See what the camera saw</span>
+        <div class="rows">
+          <div class="frow"><b>Face triage</b><span>Every face cropped and graded — eyes open, squinting, or closed. Smile-aware, so a laughing kid doesn't torpedo the frame. Click any face to zoom to it at 1:1.</span></div>
+          <div class="frow"><b>Group-shot rescue</b><span>Small faces in big groups get a second high-resolution analysis pass — back-row eyes graded from real detail, not noise.</span></div>
+          <div class="frow"><b>Focus score</b><span>Sharpness measured on the subject's face, not the whole frame. A crisp portrait against creamy bokeh scores high.</span></div>
+          <div class="frow"><b>All on-device</b><span>Every analysis runs locally. Your photos never leave your Mac.</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <span class="eyebrow" style="color:var(--brass)">Files, safely</span>
+        <div class="rows">
+          <div class="frow"><b>Originals never touched</b><span>Ratings and labels write to standard XMP sidecars — Lightroom, Capture One, and Photo Mechanic read them natively. Culls made elsewhere are adopted on open. Foreign sidecars are never overwritten.</span></div>
+          <div class="frow"><b>Finder-grade file ops</b><span>⌘C/⌘X/⌘V photos between folders — sidecars travel too. Drag selections onto sidebar folders to move. Copies and moves carry their ratings. Everything undoable.</span></div>
+          <div class="frow"><b>Rejects go to Trash</b><span>Never deleted in place. Rename in-grid, rotate losslessly with [ and ].</span></div>
+          <div class="frow"><b>Card ingest</b><span>Memory cards are read-only to f/uno. Ingest copies to your drive — the card is never modified.</span></div>
+          <div class="frow"><b>Folder templates</b><span>One click builds your standard shoot structure (RAW / selects / exports / …) exactly the way you like it.</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <span class="eyebrow" style="color:var(--brass)">Hand off</span>
+        <div class="rows">
+          <div class="frow"><b>→ Lightroom</b><span>Selects open in Lightroom's import dialog, pre-selected, ratings and labels intact via XMP.</span></div>
+          <div class="frow"><b>→ Photoshop</b><span>Selects open directly in Photoshop — installation auto-discovered.</span></div>
+        </div>
+      </div>
+    </div>
+
+
+  </section>
+
+  <section id="download" style="margin-top:70px;">
+    <div class="cta">
+      <div>
+        <a class="btn" href="Funo-0.9.0.dmg" download>Download f/uno 0.9.0</a>
+        <small>signed &amp; notarized · macOS 13 or later · free during beta</small>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>© 2026 funophoto.com</span>
+    <span class="fm">ƒ/</span>
+    <span><a href="https://instagram.com/funo.photo" rel="noopener" style="text-decoration:none">@funo.photo</a></span>
+  </footer>
+</div>
+
+</body>
+</html>
