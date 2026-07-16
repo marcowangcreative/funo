@@ -44,6 +44,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowDidChangeScreen(_ notification: Notification) { clampWindowToScreen() }
 
+    func windowWillClose(_ notification: Notification) {
+        // Closing the MAIN window must not strand the License window — with
+        // it open, the main window isn't "the last window", so the app kept
+        // running with a lone activation dialog floating in space. Take it
+        // down too; then the last-window-closed rule quits normally.
+        // (window.close() skips windowShouldClose, so the expired-gate
+        // terminate path can't recurse — and quitting IS what the gate
+        // wants anyway.)
+        guard (notification.object as? NSWindow) === window else { return }
+        LicenseWindowController.shared.window?.close()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if updaterAvailable { updaterController.startUpdater() }
         #if DEBUG
