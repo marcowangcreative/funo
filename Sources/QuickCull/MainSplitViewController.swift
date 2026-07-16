@@ -17,7 +17,10 @@ final class MainSplitViewController: NSSplitViewController {
         let palette = SearchPaletteView(frame: container.bounds)
         palette.photoSource = { [weak self] in self?.grid.searchablePhotos() ?? [] }
         palette.onJumpToPhoto = { [weak self] index in self?.grid.select(index: index) }
-        palette.onOpenFolder = { [weak self] url, newTab in self?.tabs.open(url, inNewTab: newTab) }
+        palette.onOpenFolder = { [weak self] url, newTab in
+            self?.tabs.open(url, inNewTab: newTab)
+            self?.sidebar.reveal(url)   // the tree shows where you landed
+        }
         palette.onDismiss = { [weak self] in
             self?.searchPalette = nil
             self?.view.window?.makeFirstResponder(self?.grid.view)

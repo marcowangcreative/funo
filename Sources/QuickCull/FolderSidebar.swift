@@ -360,6 +360,39 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         }
     }
 
+    /// Expand the tree down to `url`, scroll to it, select it — so a folder
+    /// opened by ⌘F is also SHOWN in the nav, not just teleported to. The
+    /// walk loads at most path-depth directory listings; the prefetch queue
+    /// usually has them cached already.
+    func reveal(_ url: URL) {
+        // Deepest top-level node whose path contains the target.
+        var topNodes: [FolderNode] = []
+        for group in roots {
+            topNodes.append(contentsOf: placesGroupChildren[ObjectIdentifier(group)] ?? [])
+        }
+        var best: FolderNode?
+        for node in topNodes {
+            let base = node.url.path
+            if url.path == base || url.path.hasPrefix(base.hasSuffix("/") ? base : base + "/") {
+                if best == nil || base.count > (best?.url.path.count ?? 0) { best = node }
+            }
+        }
+        guard var current = best else { return }
+        var hops = 0
+        while current.url.path != url.path, hops < 32 {
+            outlineView.expandItem(current)
+            guard let next = children(of: current).first(where: {
+                url.path == $0.url.path || url.path.hasPrefix($0.url.path + "/")
+            }) else { break }
+            current = next
+            hops += 1
+        }
+        let row = outlineView.row(forItem: current)
+        guard row >= 0 else { return }
+        outlineView.scrollRowToVisible(row)
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
     // MARK: - Drop target (drag photos onto a folder to move them)
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo,
