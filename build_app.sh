@@ -98,7 +98,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>SUFeedURL</key><string>https://funophoto.com/updates/appcast.xml</string>
+    <key>SUFeedURL</key><string>https://www.funo.photo/updates/appcast.xml</string>
     <key>SUEnableAutomaticChecks</key><true/>
     $SPARKLE_KEY_ENTRY
     $ICON_KEY

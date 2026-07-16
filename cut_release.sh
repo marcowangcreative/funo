@@ -27,7 +27,7 @@ cp "$DMG" "$UPDATES/"
 echo "▸ [3/3] Regenerating appcast.xml…"
 # --download-url-prefix makes the <enclosure> URLs absolute to your host.
 "$SPARKLE_BIN/generate_appcast" \
-  --download-url-prefix "https://funophoto.com/updates/" \
+  --download-url-prefix "https://www.funo.photo/updates/" \
   "$UPDATES"
 
 echo
