@@ -15,7 +15,9 @@ cd "$(dirname "$0")"
 # FILESYSTEM sees it (a literal / in bundle or volume names breaks paths).
 PRODUCT_NAME="QuickCull"                 # swift build product (internal)
 APP_NAME="Funo"                          # .app bundle + executable name
-DISPLAY_NAME="f/uno"                     # menu bar, Finder, About panel
+DISPLAY_NAME="Funo"   # Plain ASCII everywhere the SYSTEM sees a name (Finder,
+                   # Dock, Sparkle download dirs — a "/" here broke every OTA
+                   # download). The f/uno brand lives in UI copy and the site.
 VERSION="${VERSION:-0.9.0}"
 BUNDLE_ID="${BUNDLE_ID:-com.funophoto.funo}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-quickcull-notary}"

@@ -96,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Never lose the last second of culling to the debounce windows.
         RatingsStore.shared.flushForTermination()
