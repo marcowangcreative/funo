@@ -122,6 +122,11 @@ if [ -d "$FW" ]; then
   codesign -f -o runtime --timestamp -s "$IDENTITY" "$FW/Versions/B/Updater.app" 2>/dev/null || true
   codesign -f -o runtime --timestamp -s "$IDENTITY" "$FW"
 fi
+# Normalize permissions BEFORE signing: assets written by tools can arrive
+# 0600, and generate_appcast (rightly) complains about non-world-readable
+# resources inside the bundle.
+chmod -R u+rwX,go+rX,go-w "$APP"
+
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 

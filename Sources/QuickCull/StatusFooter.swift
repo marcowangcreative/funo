@@ -92,19 +92,15 @@ final class StatusFooterView: NSView {
         // Adobe's artwork; asking the system for an app's icon is how the
         // Dock and Finder do it). Title stays for clarity; icon leads.
         func handoffButton(_ title: String, _ action: Selector, tip: String,
-                           appURL: URL?) -> NSButton {
+                           chip: String) -> NSButton {
             let b = NSButton(title: "", target: self, action: action)
             b.attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: Theme.accent,
                 .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold)
             ])
-            if let appURL {
-                let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-                icon.size = NSSize(width: 16, height: 16)
-                b.image = icon
-                b.imagePosition = .imageLeading
-                b.imageHugsTitle = true
-            }
+            b.image = Self.appChip(chip)
+            b.imagePosition = .imageLeading
+            b.imageHugsTitle = true
             b.isBordered = false
             b.setButtonType(.momentaryChange)
             b.toolTip = tip
@@ -116,12 +112,12 @@ final class StatusFooterView: NSView {
         if PhotoshopBridge.isAvailable {
             handoffButtons.append(handoffButton("Photoshop", #selector(sendPS(_:)),
                                                 tip: "Open the selected photos in Photoshop (Camera Raw)",
-                                                appURL: PhotoshopBridge.appURL()))
+                                                chip: "Ps"))
         }
         if LightroomBridge.isAvailable {
             handoffButtons.append(handoffButton("Lightroom", #selector(sendLR(_:)),
                                                 tip: "Send the selected photos to Lightroom's import",
-                                                appURL: LightroomBridge.appURL()))
+                                                chip: "Lr"))
         }
 
         NSLayoutConstraint.activate([
@@ -180,4 +176,31 @@ final class StatusFooterView: NSView {
 
     @objc private func sendLR(_ sender: Any?) { onSendLightroom?() }
     @objc private func sendPS(_ sender: Any?) { onSendPhotoshop?() }
+
+    /// Uniform graphite app chips — a filled rounded tile with the two-letter
+    /// mark, drawn to match the keycap hints beside them. Identical treatment
+    /// for both apps (Adobe's own icons don't match EACH OTHER: LrC is an
+    /// outline, Ps a filled tile) and no Adobe artwork in our bundle.
+    private static func appChip(_ letters: String) -> NSImage {
+        let side: CGFloat = 16
+        return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            let r = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                                 xRadius: 3.5, yRadius: 3.5)
+            NSColor(calibratedWhite: 0.16, alpha: 1).setFill()
+            r.fill()
+            NSColor(calibratedWhite: 0.32, alpha: 1).setStroke()
+            r.lineWidth = 1
+            r.stroke()
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+                .foregroundColor: NSColor(calibratedWhite: 0.82, alpha: 1)
+            ]
+            let text = NSAttributedString(string: letters, attributes: attrs)
+            let ts = text.size()
+            text.draw(at: NSPoint(x: rect.midX - ts.width / 2,
+                                  y: rect.midY - ts.height / 2))
+            return true
+        }
+    }
+
 }
