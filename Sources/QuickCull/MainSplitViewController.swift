@@ -7,8 +7,18 @@ final class MainSplitViewController: NSSplitViewController {
 
     private let sidebar = FolderSidebarViewController()
     private let tabs = TabbedContactSheetController()
-    private var previewOverlay: PreviewOverlayView?
-    private var surveyOverlay: SurveyOverlay?
+    private var previewOverlay: PreviewOverlayView? { didSet { refreshWindowTitle() } }
+    private var surveyOverlay: SurveyOverlay? { didSet { refreshWindowTitle() } }
+    private var titleFolderURL: URL?
+
+    /// Lightroom-style title: "Folder - f/uno - Grid|Expanded|Survey".
+    /// Centralized so folder changes AND mode changes both repaint it.
+    private func refreshWindowTitle() {
+        guard let window = view.window else { return }
+        let mode = previewOverlay != nil ? "Expanded" : (surveyOverlay != nil ? "Survey" : "Grid")
+        window.title = titleFolderURL.map { "\($0.lastPathComponent) - f/uno - \(mode)" } ?? "f/uno"
+        window.representedURL = titleFolderURL   // feeds the ⌘-click path menu
+    }
     private var keyMonitor: Any?
 
     /// The window-level status footer (owned by RootViewController).
@@ -100,7 +110,8 @@ final class MainSplitViewController: NSSplitViewController {
             }
         }
         tabs.onActiveFolderChanged = { [weak self] url in
-            self?.view.window?.title = url.map { "f/uno — \($0.lastPathComponent)" } ?? "f/uno"
+            self?.titleFolderURL = url
+            self?.refreshWindowTitle()
         }
 
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)

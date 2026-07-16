@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private weak var colorFirstMenuItem: NSMenuItem?
     private weak var clearCachesMenuItem: NSMenuItem?
+    private var titleLabel: NSTextField?
+    private var titleObservation: NSKeyValueObservation?
+    private let titlePathMenu = PathMenuPresenter()
 
     /// THE fix: a hard ceiling the window server enforces BELOW autolayout.
     /// Every prior attempt was reactive — let the window grow, then shove it
@@ -68,6 +71,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.setFrameAutosaveName("QuickCullMainWindow")
         window.minSize = NSSize(width: 900, height: 600)
         window.delegate = self
+
+        // Centered title, Lightroom-style. Modern macOS leading-aligns the
+        // system title next to the traffic lights; there is no alignment
+        // knob, so we hide it and center our own label in the title bar.
+        // The label MIRRORS window.title via KVO — everything else keeps
+        // setting window.title normally (Mission Control and accessibility
+        // still read it; only the drawing is ours).
+        window.titleVisibility = .hidden
+        if let titlebar = window.standardWindowButton(.closeButton)?.superview {
+            // [folder icon] Folder Name - f/uno, centered as ONE unit —
+            // the proxy-icon look, hand-rolled because the system title is
+            // leading-aligned on modern macOS and has no centering knob.
+            let icon = TitleBarPathIcon()
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
+
+            let label = TitleBarPathLabel(labelWithString: window.title)
+            label.font = NSFont.titleBarFont(ofSize: NSFont.systemFontSize(for: .regular))
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingMiddle
+            label.alignment = .center
+
+            let stack = NSStackView(views: [icon, label])
+            stack.orientation = .horizontal
+            stack.spacing = 5
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            titlebar.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: titlebar.centerXAnchor),
+                stack.centerYAnchor.constraint(equalTo: titlebar.centerYAnchor),
+                // Never collide with the traffic lights on long names.
+                stack.leadingAnchor.constraint(greaterThanOrEqualTo: titlebar.leadingAnchor, constant: 80),
+                stack.trailingAnchor.constraint(lessThanOrEqualTo: titlebar.trailingAnchor, constant: -80)
+            ])
+            titlePathMenu.urlProvider = { [weak window] in window?.representedURL }
+            titlePathMenu.onOpenFolder = { [weak self] url in self?.mainController.showFolder(url) }
+            label.pathMenu = titlePathMenu
+            icon.pathMenu = titlePathMenu
+            titleLabel = label
+            titleObservation = window.observe(\.title, options: [.initial, .new]) { [weak label] win, _ in
+                label?.stringValue = win.title
+            }
+            // Our own mark leads the lockup (Lightroom shows ITS icon, not a
+            // folder). Static — the app icon doesn't change with the folder.
+            let appIcon = NSApp.applicationIconImage ?? NSImage()
+            appIcon.size = NSSize(width: 16, height: 16)
+            icon.image = appIcon
+        }
         window.center()
         // First launch on a small display: 1440×900 is wider than a 13"
         // laptop's usable area. The clamp already exists for screen changes —
@@ -374,5 +426,64 @@ extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard let item = clearCachesMenuItem, menu === item.menu else { return }
         item.isHidden = !NSEvent.modifierFlags.contains(.option)
+    }
+}
+
+/// ⌘-click on the title lockup — the app icon OR the text — pops the folder
+/// path hierarchy, Lightroom-style. Because f/uno IS the folder browser,
+/// choosing an ancestor opens it here, not in Finder.
+final class PathMenuPresenter: NSObject {
+    var urlProvider: (() -> URL?)?
+    var onOpenFolder: ((URL) -> Void)?
+
+    func popUp(from view: NSView) {
+        guard let url = urlProvider?() else { return }
+        let menu = NSMenu()
+        var current: URL? = url
+        while let u = current {
+            let item = NSMenuItem(title: FileManager.default.displayName(atPath: u.path),
+                                  action: #selector(openPathComponent(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = u
+            let icon = NSWorkspace.shared.icon(forFile: u.path)
+            icon.size = NSSize(width: 16, height: 16)
+            item.image = icon
+            menu.addItem(item)
+            let parent = u.deletingLastPathComponent()
+            current = parent.path != u.path ? parent : nil
+            if u.path == "/" { current = nil }
+        }
+        menu.popUp(positioning: menu.items.first,
+                   at: NSPoint(x: view.bounds.midX, y: view.bounds.minY - 4), in: view)
+    }
+
+    @objc private func openPathComponent(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              isDir.boolValue else { return }
+        onOpenFolder?(url)
+    }
+}
+
+final class TitleBarPathLabel: NSTextField {
+    var pathMenu: PathMenuPresenter?
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), let pathMenu {
+            pathMenu.popUp(from: self)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+}
+
+final class TitleBarPathIcon: NSImageView {
+    var pathMenu: PathMenuPresenter?
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), let pathMenu {
+            pathMenu.popUp(from: self)
+        } else {
+            super.mouseDown(with: event)
+        }
     }
 }

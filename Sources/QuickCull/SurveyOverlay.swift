@@ -242,8 +242,8 @@ final class SurveyOverlay: NSView {
 }
 
 /// One surveyed frame: aspect-fit image (zoomable via contentsRect), a color
-/// strip along the top when labeled, and a tidy footer — filename, stars,
-/// focus %. Amber ring when focused; "sharpest" crown on the winner.
+/// footer band — filename, stars, focus % (tinted when color-labeled).
+/// Amber ring when focused; the winner's focus readout turns brass.
 private final class SurveyCell: NSView {
 
     let asset: PhotoAsset
@@ -254,10 +254,9 @@ private final class SurveyCell: NSView {
 
     private let imageHost = NSView()
     private let colorStrip = NSView()
-    private let footer = NSTextField(labelWithString: "")
+    private let nameLabel = NSTextField(labelWithString: "")
     private let starsLabel = NSTextField(labelWithString: "")
     private let focusLabel = NSTextField(labelWithString: "")
-    private let crown = PaddedLabel()
     private var isSharpest = false
     private var dragged = false
 
@@ -273,17 +272,18 @@ private final class SurveyCell: NSView {
         imageHost.layer?.contentsGravity = .resizeAspect
         addSubview(imageHost)
 
-        // Color label shows as a strip along the TOP of the image — a real
-        // highlight on the frame, not a floaty dot tacked into the footer.
+        // Color label tints the FOOTER band — same visual language as the
+        // grid's tinted cards. (It used to be a strip across the TOP of the
+        // frame, which sat right against the amber focus ring and clashed.)
         colorStrip.wantsLayer = true
         colorStrip.isHidden = true
         addSubview(colorStrip)
 
-        footer.font = Theme.mono(11)
-        footer.textColor = Theme.tx1
-        footer.lineBreakMode = .byTruncatingMiddle
-        footer.alignment = .center
-        addSubview(footer)
+        nameLabel.stringValue = asset.filename
+        nameLabel.font = Theme.mono(10.5)
+        nameLabel.textColor = Theme.tx2
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(nameLabel)
 
         starsLabel.alignment = .center
         addSubview(starsLabel)
@@ -292,13 +292,6 @@ private final class SurveyCell: NSView {
         focusLabel.textColor = Theme.tx2
         focusLabel.alignment = .right
         addSubview(focusLabel)
-
-        crown.stringValue = "SHARPEST"
-        crown.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        crown.textColor = Theme.accentText
-        crown.backgroundFill = Theme.accent
-        crown.isHidden = true
-        addSubview(crown)
 
         refreshCull()
     }
@@ -311,39 +304,60 @@ private final class SurveyCell: NSView {
 
     func setFocus(fraction: Double) {
         focusLabel.stringValue = "focus \(Int(fraction * 100))%"
+        applyFocusStyle()
     }
 
+    /// The sharpest frame's focus readout turns brass — a quiet crown.
+    /// (It used to be an amber "SHARPEST" pill floating on the photo;
+    /// nothing in this app should stamp badges over someone's image.)
     func setSharpest(_ sharpest: Bool) {
         isSharpest = sharpest
-        crown.isHidden = !sharpest
+        applyFocusStyle()
+    }
+
+    private func applyFocusStyle() {
+        focusLabel.textColor = isSharpest ? Theme.accent : Theme.tx2
     }
 
     func refreshCull() {
         let store = RatingsStore.shared
         let rating = store.rating(for: asset.id)
+        let centered = NSMutableParagraphStyle()
+        centered.alignment = .center
         if store.isRejected(asset.id) {
-            starsLabel.attributedStringValue = NSAttributedString(string: "✕ REJECT", attributes: [
+            starsLabel.attributedStringValue = NSAttributedString(string: "✕", attributes: [
                 .foregroundColor: Theme.red,
-                .font: NSFont.systemFont(ofSize: 11, weight: .bold), .kern: 1.0
+                .font: NSFont.systemFont(ofSize: 11, weight: .bold), .kern: 1.0,
+                .paragraphStyle: centered
             ])
         } else {
-            starsLabel.attributedStringValue = Theme.stars(rating, size: 13)
+            // The attributed string's own paragraph style overrides the
+            // field's alignment — without this the stars hug the left edge.
+            let stars = NSMutableAttributedString(attributedString: Theme.stars(rating, size: 13))
+            stars.addAttribute(.paragraphStyle, value: centered,
+                               range: NSRange(location: 0, length: stars.length))
+            starsLabel.attributedStringValue = stars
         }
         let label = store.colorLabel(for: asset.id)
         colorStrip.isHidden = label == 0
-        if label > 0 { colorStrip.layer?.backgroundColor = Theme.labelColors[label].cgColor }
+        if label > 0 {
+            let tint = Theme.bg2.blended(withFraction: 0.42, of: Theme.labelColors[label]) ?? Theme.bg2
+            colorStrip.layer?.backgroundColor = tint.cgColor
+        }
     }
 
     override func layout() {
         super.layout()
         let footerHeight: CGFloat = 38
         imageHost.frame = NSRect(x: 0, y: footerHeight, width: bounds.width, height: bounds.height - footerHeight)
-        colorStrip.frame = NSRect(x: 0, y: bounds.height - 5, width: bounds.width, height: 5)
-        footer.frame = NSRect(x: 10, y: 20, width: bounds.width - 20, height: 15)
-        starsLabel.frame = NSRect(x: 0, y: 3, width: bounds.width, height: 16)
-        focusLabel.frame = NSRect(x: bounds.width - 96, y: 4, width: 86, height: 13)
-        let cw = crown.intrinsicContentSize.width
-        crown.frame = NSRect(x: (bounds.width - cw) / 2, y: bounds.height - 28, width: cw, height: 18)
+        colorStrip.frame = NSRect(x: 0, y: 0, width: bounds.width, height: footerHeight)
+        // One row, all vertically centered in the band: filename left,
+        // stars dead-center, focus % right. The filename keeps to the left
+        // third so a long name can never crowd the centered stars.
+        nameLabel.frame = NSRect(x: 10, y: (footerHeight - 14) / 2,
+                                 width: bounds.width * 0.3, height: 14)
+        starsLabel.frame = NSRect(x: 0, y: (footerHeight - 16) / 2, width: bounds.width, height: 16)
+        focusLabel.frame = NSRect(x: bounds.width - 96, y: (footerHeight - 13) / 2, width: 86, height: 13)
     }
 
     override func mouseDown(with event: NSEvent) { dragged = false }
@@ -359,44 +373,4 @@ private final class SurveyCell: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) { onScroll?(event.scrollingDeltaY) }
-}
-
-/// A label with interior padding and a rounded fill — used for the crown so
-/// its text is properly centered inside the pill (a bare NSTextField's fill
-/// hugged the glyphs unevenly).
-private final class PaddedLabel: NSTextField {
-    var backgroundFill: NSColor = .clear { didSet { needsDisplay = true } }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        cell = VCenterTextFieldCell()
-        isEditable = false; isBordered = false; isBezeled = false
-        drawsBackground = false
-        alignment = .center
-    }
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override var intrinsicContentSize: NSSize {
-        var s = super.intrinsicContentSize
-        s.width += 20; s.height += 6
-        return s
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        backgroundFill.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2).fill()
-        super.draw(dirtyRect)
-    }
-}
-
-/// Text-field cell that vertically centers its single line of text — the
-/// vertical-centering hook lives on the cell, not the field.
-private final class VCenterTextFieldCell: NSTextFieldCell {
-    override func drawingRect(forBounds rect: NSRect) -> NSRect {
-        let base = super.drawingRect(forBounds: rect)
-        let textHeight = cellSize(forBounds: rect).height
-        guard textHeight < base.height else { return base }
-        let dy = (base.height - textHeight) / 2
-        return NSRect(x: base.minX, y: base.minY + dy, width: base.width, height: textHeight)
-    }
 }
