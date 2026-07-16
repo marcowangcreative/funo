@@ -9,6 +9,17 @@
          Empty channel = "you're up to date". Do not hand-edit; re-run the
          release script and it rewrites this file with signed enclosures. -->
         <item>
+            <title>0.9.2</title>
+            <pubDate>Wed, 15 Jul 2026 23:20:53 -0500</pubDate>
+            <sparkle:version>202607152320</sparkle:version>
+            <sparkle:shortVersionString>0.9.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://funophoto.com/updates/Funo-0.9.2.dmg" length="4715817" type="application/octet-stream" sparkle:edSignature="vg2b+WBJREK2qo+/Z0xVVu6b/86CuXTAvGdcGi3dJqok7rtJlrlF3b3I09rbcwXhSWVxEygdGZCNnL9aC/6LDQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://funophoto.com/updates/Funo202607152320-202607152306.delta" sparkle:deltaFrom="202607152306" length="1796894" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="aSH0el3S9JqbFM3UvTU1CfNHJNJVU4H9uRb3/CkyKHcBpTb97nGZA/tLc2XIxBh5pKKapRNAAw9JdsZIHDwxDw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>0.9.1</title>
             <pubDate>Wed, 15 Jul 2026 21:42:06 -0500</pubDate>
             <sparkle:version>202607152306</sparkle:version>

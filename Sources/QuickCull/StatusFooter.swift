@@ -87,12 +87,24 @@ final class StatusFooterView: NSView {
 
         // Hand-off is the END of every cull — visible buttons, not buried
         // context-menu items. Only installed apps appear.
-        func handoffButton(_ title: String, _ action: Selector, tip: String) -> NSButton {
+        // The hand-off buttons wear the REAL app icons, fetched at runtime
+        // from the installed apps via NSWorkspace (never bundled — that's
+        // Adobe's artwork; asking the system for an app's icon is how the
+        // Dock and Finder do it). Title stays for clarity; icon leads.
+        func handoffButton(_ title: String, _ action: Selector, tip: String,
+                           appURL: URL?) -> NSButton {
             let b = NSButton(title: "", target: self, action: action)
             b.attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: Theme.accent,
                 .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold)
             ])
+            if let appURL {
+                let icon = NSWorkspace.shared.icon(forFile: appURL.path)
+                icon.size = NSSize(width: 16, height: 16)
+                b.image = icon
+                b.imagePosition = .imageLeading
+                b.imageHugsTitle = true
+            }
             b.isBordered = false
             b.setButtonType(.momentaryChange)
             b.toolTip = tip
@@ -102,12 +114,14 @@ final class StatusFooterView: NSView {
         }
         var handoffButtons: [NSButton] = []
         if PhotoshopBridge.isAvailable {
-            handoffButtons.append(handoffButton("→ Photoshop", #selector(sendPS(_:)),
-                                                tip: "Open the selected photos in Photoshop (Camera Raw)"))
+            handoffButtons.append(handoffButton("Photoshop", #selector(sendPS(_:)),
+                                                tip: "Open the selected photos in Photoshop (Camera Raw)",
+                                                appURL: PhotoshopBridge.appURL()))
         }
         if LightroomBridge.isAvailable {
-            handoffButtons.append(handoffButton("→ Lightroom", #selector(sendLR(_:)),
-                                                tip: "Send the selected photos to Lightroom's import"))
+            handoffButtons.append(handoffButton("Lightroom", #selector(sendLR(_:)),
+                                                tip: "Send the selected photos to Lightroom's import",
+                                                appURL: LightroomBridge.appURL()))
         }
 
         NSLayoutConstraint.activate([

@@ -65,8 +65,10 @@ else
   echo "WARNING: Sparkle.framework not found in .build — updates disabled in this build"
 fi
 
-# Sparkle EdDSA public key: run the one-time generate_keys tool and pass it
-# via  SPARKLE_ED_KEY="base64key" ./build_app.sh  (or hardcode it here).
+# Sparkle EdDSA public key. Pairs with the private key in the login Keychain
+# (from `generate_keys`). Public — it ships in every build's Info.plist.
+# Override per-build with  SPARKLE_ED_KEY="..." ./build_app.sh  if you rotate it.
+SPARKLE_ED_KEY="${SPARKLE_ED_KEY:-tZKIxxv+AEBnNuXJHgP/BlG/7rw2lo+/T78fTduDj68=}"
 SPARKLE_KEY_ENTRY=""
 if [ -n "${SPARKLE_ED_KEY:-}" ]; then
   SPARKLE_KEY_ENTRY="<key>SUPublicEDKey</key><string>$SPARKLE_ED_KEY</string>"

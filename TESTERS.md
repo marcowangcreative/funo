@@ -61,6 +61,9 @@ and your RAW files are never modified.
 - Rejecting (X) only marks a photo. Actually deleting is ⌘⌫ → macOS Trash
   (recoverable). Moves/renames support ⌘Z undo.
 - Cards are read-only to QuickCull — ingest copies, never moves.
+- **This beta runs through Sept 15, 2026.** After that the build asks for a
+  license before it'll keep culling — that's how the free beta window closes,
+  not a surprise. There'll be a new build (and a way to buy) before then.
 - First browse of a big folder decodes thumbnails once; after that it's
   instant (cached). Face scanning runs in the background and never slows
   the grid — and the faces panel IS the switch: close it (**F** in full
