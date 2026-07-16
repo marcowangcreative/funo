@@ -253,8 +253,17 @@ final class ThumbnailLoader {
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, embeddedOptions as CFDictionary) {
             let biggestSide = CGFloat(max(cg.width, cg.height))
-            // Accept the embedded preview if it's reasonably close to what we asked for.
-            if biggestSide >= min(maxPixel, 480) * 0.5 {
+            // Acceptance bar scales with the COST of rejecting:
+            // · JPEG/HEIC: pass 2 is a cheap direct decode, so demand at
+            //   least half the requested size. (The old flat 240px bar let
+            //   a JPEG's 320px EXIF thumbnail stand in for a 3200px screen
+            //   preview — "perfectly fine JPEGs render blurry.")
+            // · RAW: pass 2 is a full develop (seconds on some formats) —
+            //   accept any real preview ≥1280px; a 2× upscale beats a
+            //   beach ball, and face-aware focus judges sharpness anyway.
+            let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
+            let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
+            if biggestSide >= bar {
                 return NSImage(cgImage: cg, size: .zero)
             }
         }

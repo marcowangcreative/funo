@@ -233,15 +233,12 @@ final class RatingsStore {
         }
     }
 
-    /// Quit-time flush, SYNCHRONOUS. The debounced JSON save and the XMP
-    /// writer both lose the last ~1 s of culling if the process exits before
-    /// their timers/queues run — which read as "ratings pop in late" on the
-    /// next launch, when the sidecar adoption pass restored them. Called
-    /// from applicationWillTerminate (and safe to call any time on main).
-    func flushForTermination() {
+    /// SYNCHRONOUS sidecar drain — every pending XMP hits disk before this
+    /// returns. Called before hand-offs (→ Lightroom/Photoshop import the
+    /// files IMMEDIATELY; the 0.8 s debounce meant rate-then-send lost the
+    /// last edits — "my red labels aren't in Lightroom") and at quit.
+    func flushXMPNow() {
         assert(Thread.isMainThread)
-        // 1. Pending sidecars — write them NOW, inline. Small batch (only
-        //    what changed in the last 0.8 s); at quit there is no UI to jank.
         let batch = xmpDirty.map { id in
             (id, rating(for: id), colorLabel(for: id), rotation(for: id))
         }
@@ -260,6 +257,11 @@ final class RatingsStore {
             }
             XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
         }
+    }
+
+    /// Quit-time flush: pending sidecars + the JSON store, synchronously.
+    func flushForTermination() {
+        flushXMPNow()
         // 2. The JSON store, synchronously.
         let snap = Snapshot(ratings: ratings, rejected: Array(rejected),
                             colorLabels: colorLabels, rotations: rotations,

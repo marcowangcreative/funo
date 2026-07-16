@@ -18,15 +18,13 @@ final class LicenseManager {
     /// While this placeholder remains, no license validates (trial still runs).
     private static let publicKeyBase64 = "p2I2hjfO51WYeggyspDuzu/yoKOLTVmCf+2PsLd2wdY="
 
-    static let trialDays = 30
+    static let trialDays = 14
 
-    /// Hard beta cutoff. This build is time-limited: after this date an
-    /// UNLICENSED copy stops culling and prompts for a license — licensed
-    /// users are unaffected. This is disclosed to testers (see TESTERS.md),
-    /// NOT a hidden kill switch. Bump the date in each new beta build; set to
-    /// nil for the paid release so purchased copies never expire.
-    static let betaExpiry: Date? = Calendar(identifier: .gregorian)
-        .date(from: DateComponents(year: 2026, month: 9, day: 15))
+    /// Optional hard cutoff for time-limited builds (disclosed, not a hidden
+    /// kill switch). RETIRED in favor of the per-user 14-day demo — every
+    /// install gates itself, no calendar cliff needed. Keep nil unless a
+    /// build ever needs a fleet-wide end date again.
+    static let betaExpiry: Date? = nil
 
     static var betaExpired: Bool {
         guard let cutoff = betaExpiry else { return false }
@@ -59,7 +57,10 @@ final class LicenseManager {
 
     var status: Status {
         if let email = validLicenseEmail() { return .licensed(email: email) }
-        if Self.betaExpired { return .expired }   // beta window closed → must license
+        if let display = polarLicenseDisplay() { return .licensed(email: display) }
+        // Fleet-wide cutoff, if a build ever sets one (nil today — the
+        // per-user demo below is the whole gating model).
+        if let cutoff = Self.betaExpiry, Date() > cutoff { return .expired }
         let days = trialDaysLeft()
         return days > 0 ? .trial(daysLeft: days) : .expired
     }
@@ -71,14 +72,26 @@ final class LicenseManager {
 
     // MARK: - Activation
 
-    /// Validate and persist a key. Returns the licensed email on success.
-    @discardableResult
-    func activate(_ rawKey: String) -> String? {
+    /// Validate and persist a key — completion always on the MAIN thread.
+    /// Two key families coexist:
+    ///   FUNO.payload.sig — our Ed25519 keys, verified OFFLINE, instant.
+    ///   FUNO-XXXX-…      — Polar-issued keys, validated against Polar's API
+    ///                      (org-scoped, no secrets involved).
+    func activate(_ rawKey: String, completion: @escaping (_ display: String?, _ error: String?) -> Void) {
         let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let email = Self.verify(key) else { return nil }
-        try? Data(key.utf8).write(to: licenseFile)
-        UserDefaults.standard.set(key, forKey: "QuickCullLicense")
-        return email
+        if key.hasPrefix("FUNO.") {
+            guard let email = Self.verify(key) else {
+                completion(nil, "That key didn't validate. Check for missing characters.")
+                return
+            }
+            try? Data(key.utf8).write(to: licenseFile)
+            UserDefaults.standard.set(key, forKey: "QuickCullLicense")
+            completion(email, nil)
+        } else if key.hasPrefix("FUNO-") {
+            polarActivate(key, completion: completion)
+        } else {
+            completion(nil, "Keys start with FUNO. or FUNO- — paste the whole thing from your receipt.")
+        }
     }
 
     private func validLicenseEmail() -> String? {
@@ -101,6 +114,114 @@ final class LicenseManager {
               let payload = try? JSONDecoder().decode(Payload.self, from: payloadData)
         else { return nil }
         return payload.email
+    }
+
+    // MARK: - Polar (store-issued keys)
+
+    /// Organization ID from the Polar dashboard (Settings → General).
+    /// PUBLIC — it only scopes lookups so keys from other orgs can't collide.
+    private static let polarOrgID = "1abc1d85-c2d9-400c-8aa7-d746fb2a46ce"
+    private static let polarAPI = "https://api.polar.sh/v1/customer-portal/license-keys"
+
+    private struct PolarState: Codable {
+        var key: String
+        var activationID: String?
+        var display: String
+        var lastValidated: Date
+    }
+    private var polarFile: URL { dir.appendingPathComponent("polar-license.json") }
+
+    private func loadPolarState() -> PolarState? {
+        guard let data = try? Data(contentsOf: polarFile) else { return nil }
+        return try? JSONDecoder().decode(PolarState.self, from: data)
+    }
+    private func savePolarState(_ state: PolarState?) {
+        if let state, let data = try? JSONEncoder().encode(state) {
+            try? data.write(to: polarFile, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: polarFile)
+        }
+        UserDefaults.standard.set(state?.key, forKey: "QuickCullPolarKey")
+    }
+
+    /// Licensed display string if a Polar license is on file. Deliberately
+    /// NETWORK-OPTIMISTIC: a stored license stays valid on pure silence
+    /// (photographers work offline for weeks on location) — only a
+    /// DEFINITIVE revocation from Polar clears it (see revalidate below,
+    /// fired on every launch). A pirate who firewalls api.polar.sh forever
+    /// beats revocation; he was never going to pay, and he loses updates.
+    private func polarLicenseDisplay() -> String? {
+        loadPolarState()?.display
+    }
+
+    /// POST helper — both endpoints take the same JSON shape.
+    private func polarRequest(_ endpoint: String, body: [String: Any],
+                              completion: @escaping (Int?, [String: Any]?) -> Void) {
+        guard let url = URL(string: "\(Self.polarAPI)/\(endpoint)") else { completion(nil, nil); return }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            let code = (response as? HTTPURLResponse)?.statusCode
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async { completion(code, json) }
+        }.resume()
+    }
+
+    private func polarActivate(_ key: String, completion: @escaping (String?, String?) -> Void) {
+        guard Self.polarOrgID != "REPLACE_WITH_POLAR_ORG_ID" else {
+            completion(nil, "Store keys aren't enabled in this build yet.")
+            return
+        }
+        let label = Host.current().localizedName ?? "Mac"
+        polarRequest("activate", body: ["key": key, "organization_id": Self.polarOrgID, "label": label]) { [weak self] code, json in
+            guard let self else { return }
+            switch code {
+            case .some(200...299):
+                let activationID = json?["id"] as? String
+                let licenseKey = json?["license_key"] as? [String: Any]
+                let customer = licenseKey?["customer"] as? [String: Any]
+                let display = (customer?["email"] as? String) ?? "\(key.prefix(14))…"
+                self.savePolarState(PolarState(key: key, activationID: activationID,
+                                               display: display, lastValidated: Date()))
+                completion(display, nil)
+            case .some(403):
+                completion(nil, "This key is already active on its limit of Macs. Deactivate one in your Polar purchase portal, then retry.")
+            case .some(404), .some(400...499):
+                completion(nil, "That key didn't validate. Paste the whole key from your receipt.")
+            default:
+                completion(nil, "Couldn't reach the license server — check your connection and try again.")
+            }
+        }
+    }
+
+    /// Fire-and-forget, called at launch: refresh the stored Polar license.
+    /// Success bumps the timestamp; a definitive "gone" (revoked/refunded)
+    /// clears it; network silence changes nothing.
+    func revalidateInBackground() {
+        guard let state = loadPolarState(), Self.polarOrgID != "REPLACE_WITH_POLAR_ORG_ID" else { return }
+        var body: [String: Any] = ["key": state.key, "organization_id": Self.polarOrgID]
+        if let id = state.activationID { body["activation_id"] = id }
+        polarRequest("validate", body: body) { [weak self] code, json in
+            guard let self else { return }
+            switch code {
+            case .some(200...299):
+                var refreshed = state
+                refreshed.lastValidated = Date()
+                if let licenseKey = json?["license_key"] as? [String: Any],
+                   let customer = licenseKey["customer"] as? [String: Any],
+                   let email = customer["email"] as? String {
+                    refreshed.display = email
+                }
+                self.savePolarState(refreshed)
+            case .some(404), .some(403):
+                // Definitively dead: revoked, refunded, or deactivated.
+                self.savePolarState(nil)
+            default:
+                break // offline / server hiccup — keep the license
+            }
+        }
     }
 
     // MARK: - Trial

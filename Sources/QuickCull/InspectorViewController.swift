@@ -422,32 +422,33 @@ final class InspectorViewController: NSViewController {
         }
     }
 
-    /// Shared with the expanded view's INFO card.
-    /// One-line shooting summary for the expanded-view footer:
-    /// "1/250   ƒ/2.8   ISO 400   85mm   RF24-70mm F2.8".
-    static func exifSummary(for url: URL) -> String {
+    /// One-line shooting summary for the expanded-view footer, as
+    /// (key, value) pairs so the caller can set the key DIM and the value
+    /// BRIGHT — the Leica info-card trick: hierarchy by brightness, not
+    /// size. Empty key = plain value (focal length, lens name).
+    static func exifSummaryParts(for url: URL) -> [(String, String)] {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return ""
+            return []
         }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        var parts: [String] = []
+        var parts: [(String, String)] = []
         if let t = exif?[kCGImagePropertyExifExposureTime] as? Double, t > 0 {
-            parts.append(t >= 1 ? String(format: "%.1fs", t) : String(format: "1/%.0f", 1 / t))
+            parts.append(("S", t >= 1 ? String(format: "%.1fs", t) : String(format: "1/%.0f", 1 / t)))
         }
         if let f = exif?[kCGImagePropertyExifFNumber] as? Double {
-            parts.append(String(format: "ƒ/%.1f", f))
+            parts.append(("ƒ", String(format: "%.1f", f)))
         }
         if let isos = exif?[kCGImagePropertyExifISOSpeedRatings] as? [Any], let iso = isos.first {
-            parts.append("ISO \(iso)")
+            parts.append(("ISO", "\(iso)"))
         }
         if let fl = exif?[kCGImagePropertyExifFocalLength] as? Double, fl > 0 {
-            parts.append(String(format: "%.0fmm", fl))
+            parts.append(("", String(format: "%.0fmm", fl)))
         }
         if let lens = exif?[kCGImagePropertyExifLensModel] as? String, !lens.isEmpty {
-            parts.append(lens)
+            parts.append(("", lens))
         }
-        return parts.joined(separator: "   ")
+        return parts
     }
 
     static func exifRows(for url: URL) -> [(String, String)] {
@@ -482,6 +483,14 @@ final class InspectorViewController: NSViewController {
             }
             rows.append(("Focal", focal))
         }
+        // Resolution sits HIGH in the list, not last: the expanded view's
+        // info card trims rows to a height budget, and "Size" appended at
+        // the tail fell off it — invisibly for EXIF-rich files, and exactly
+        // when someone was trying to learn a mystery JPEG's dimensions.
+        if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
+            let mp = Double(w * h) / 1_000_000
+            rows.append(("Size", mp >= 1 ? String(format: "%d × %d · %.0f MP", w, h, mp) : "\(w) × \(h)"))
+        }
         // The Photo-Mechanic "unusual info" pros scan for — nearly free reads.
         if let bias = exif?[kCGImagePropertyExifExposureBiasValue] as? Double {
             rows.append(("Exp. comp", String(format: "%+.1f EV", bias)))
@@ -501,9 +510,6 @@ final class InspectorViewController: NSViewController {
         }
         if let flash = exif?[kCGImagePropertyExifFlash] as? Int {
             rows.append(("Flash", flash & 0x1 != 0 ? "Fired" : "Off"))
-        }
-        if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
-            rows.append(("Size", "\(w) × \(h)"))
         }
         if let date = exif?[kCGImagePropertyExifDateTimeOriginal] as? String {
             rows.append(("Captured", date))

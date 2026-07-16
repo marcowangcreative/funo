@@ -145,7 +145,7 @@ final class FaceAnalyzer {
         for asset in assets {
             results.removeValue(forKey: asset.id)
             if let identity = CacheDB.identity(for: asset.url) {
-                CacheDB.shared.delete(identity + "|faces-v8")
+                CacheDB.shared.delete(identity + "|faces-v9")
             }
         }
         analyzeFolder(assets)
@@ -217,7 +217,7 @@ final class FaceAnalyzer {
                 guard let self, let op, !op.isCancelled else { return }
                 // Persistent cache: bump "v" when the detector changes so old
                 // verdicts re-derive.
-                let cacheKey = CacheDB.identity(for: url).map { $0 + "|faces-v8" }
+                let cacheKey = CacheDB.identity(for: url).map { $0 + "|faces-v9" }
                 var analysis: FaceAnalysis?
                 if let cacheKey, let data = CacheDB.shared.get(cacheKey) {
                     analysis = try? JSONDecoder().decode(FaceAnalysis.self, from: data)
@@ -345,7 +345,24 @@ final class FaceAnalyzer {
             // defaulted to "eyes wide open, quality fine" and green-ringed a
             // hand. No eyes → nothing to triage → not a face we show.
             guard let landmarks = observation.landmarks,
-                  landmarks.leftEye != nil, landmarks.rightEye != nil else { continue }
+                  let leftEye = landmarks.leftEye, let rightEye = landmarks.rightEye else { continue }
+            // Pareidolia gate 2: landmarks EXISTING isn't enough — Vision
+            // happily hallucinates "eyes" on toes, hands, and bokeh blobs
+            // (a sandaled foot shipped a green ring to prove it). Demand the
+            // landmarks be ARRANGED like a face: decent confidence, eyes
+            // ordered left-to-right with real separation, roughly level, and
+            // a mouth clearly below them. Real faces — even tilted, even in
+            // profile-ish poses — pass with margin; body parts don't.
+            guard landmarks.confidence >= 0.5 else { continue }
+            let le = Self.centroid(leftEye)
+            let re = Self.centroid(rightEye)
+            guard abs(re.x - le.x) > 0.08,                  // truly separated
+                  abs(le.y - re.y) < 0.35 else { continue } // level-ish (tilt-tolerant)
+            if let lips = landmarks.outerLips {
+                let mouth = Self.centroid(lips)
+                let eyeMidY = (le.y + re.y) / 2
+                guard eyeMidY - mouth.y > 0.08 else { continue } // mouth below eyes
+            }
             let openness = (eyeOpenness(landmarks.leftEye) + eyeOpenness(landmarks.rightEye)) / 2
             let smile = smileScore(landmarks.outerLips)
             let b = observation.boundingBox
@@ -356,6 +373,14 @@ final class FaceAnalyzer {
             out.append(DetectedFace(rect: mapped, openness: openness, smile: smile))
         }
         return out
+    }
+
+    /// Mean point of a landmark region (face-normalized coordinates).
+    private static func centroid(_ region: VNFaceLandmarkRegion2D) -> CGPoint {
+        let pts = region.normalizedPoints
+        guard !pts.isEmpty else { return .zero }
+        let sum = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(pts.count), y: sum.y / CGFloat(pts.count))
     }
 
     /// Intersection-over-union of two normalized rects.

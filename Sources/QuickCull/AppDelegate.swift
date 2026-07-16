@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         MainThreadWatchdog.shared.start()
         #endif
         FolderTemplates.ensureDefaults()
+        LicenseManager.shared.revalidateInBackground()
         buildMenu()
 
         // Root = split view + one full-width status footer beneath it.
@@ -225,6 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         undoItem.target = self
         editMenu.addItem(undoItem)
         editMenu.addItem(.separator())
+        let findItem = NSMenuItem(title: "Find…", action: #selector(showFind(_:)), keyEquivalent: "f")
+        findItem.target = self
+        editMenu.addItem(findItem)
+        editMenu.addItem(.separator())
         // Clipboard file ops — the key monitor handles the shortcuts; these
         // exist so the commands are discoverable in the menu.
         let cutItem = NSMenuItem(title: "Cut Photos", action: #selector(cutPhotos(_:)), keyEquivalent: "x")
@@ -345,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func undoFileOperation(_ sender: Any?) {
+        if let editor = activeTextEditor { editor.undoManager?.undo(); return }
         mainController.undoFileOperation()
     }
 
@@ -370,6 +376,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    @objc private func showFind(_ sender: Any?) {
+        mainController.showSearchPalette()
+    }
+
     @objc private func showLicense(_ sender: Any?) {
         LicenseWindowController.shared.show()
     }
@@ -384,19 +394,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         colorFirstMenuItem?.state = RatingsStore.shared.colorFirstRating ? .on : .off
     }
 
+    /// Menu key equivalents are APP-GLOBAL: "Paste Photos" owns ⌘V even
+    /// when the user is typing in a text field (the license key field was
+    /// the victim — ⌘V fired photo-paste at the grid instead of pasting
+    /// text). When any text editor has focus, these forward to it.
+    private var activeTextEditor: NSTextView? {
+        NSApp.keyWindow?.firstResponder as? NSTextView
+    }
+
     @objc private func selectAllPhotos(_ sender: Any?) {
+        if let editor = activeTextEditor { editor.selectAll(sender); return }
         mainController.selectAllPhotos()
     }
 
     @objc private func cutPhotos(_ sender: Any?) {
+        if let editor = activeTextEditor { editor.cut(sender); return }
         mainController.cutPhotos()
     }
 
     @objc private func copyPhotos(_ sender: Any?) {
+        if let editor = activeTextEditor { editor.copy(sender); return }
         mainController.copyPhotos()
     }
 
     @objc private func pastePhotos(_ sender: Any?) {
+        if let editor = activeTextEditor { editor.paste(sender); return }
         mainController.pastePhotos()
     }
 

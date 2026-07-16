@@ -109,20 +109,82 @@ enum FileOps {
     struct OperationResult {
         let primaries: Int                    // photos affected
         let records: [(from: URL, to: URL)]   // every file's journey, for undo
+        var skipped: Int = 0                  // collisions the user chose to skip
+    }
+
+    /// Finder-style collision handling. Decided per photo GROUP (RAW +
+    /// JPEG pair + sidecar move as one unit, so a rename can't split a pair).
+    enum Collision {
+        case keepBoth   // rename incoming: "Name 2.CR3" (+ "Name 2.xmp"…)
+        case skip       // leave colliding photos where they are
+        case overwrite  // existing files go to the TRASH first — never rm
+    }
+
+    /// Would this photo (or any companion) land on an existing name?
+    static func wouldCollide(_ url: URL, in folder: URL) -> Bool {
+        let fm = FileManager.default
+        return ([url] + companions(of: url)).contains {
+            fm.fileExists(atPath: folder.appendingPathComponent($0.lastPathComponent).path)
+        }
+    }
+
+    /// How many of these photos collide in `folder`? (Same-folder moves are
+    /// no-ops and don't count.) Callers use this to decide whether to ask.
+    static func collisionCount(_ urls: [URL], in folder: URL) -> Int {
+        urls.filter { $0.deletingLastPathComponent().path != folder.path }
+            .filter { wouldCollide($0, in: folder) }
+            .count
+    }
+
+    /// One unique stem for the whole group — "IMG_1234 2" — so RAW, JPEG
+    /// and sidecar keep matching names after a keep-both rename.
+    private static func uniqueStem(for url: URL, in folder: URL) -> String {
+        let fm = FileManager.default
+        let stem = url.deletingPathExtension().lastPathComponent
+        let exts = ([url] + companions(of: url)).map { $0.pathExtension }
+        func taken(_ candidate: String) -> Bool {
+            exts.contains { fm.fileExists(atPath: folder.appendingPathComponent("\(candidate).\($0)").path) }
+        }
+        var counter = 2
+        var candidate = stem
+        while taken(candidate) {
+            candidate = "\(stem) \(counter)"
+            counter += 1
+        }
+        return candidate
     }
 
     /// Move files (plus companions) into a folder.
-    static func move(_ urls: [URL], to folder: URL) -> OperationResult {
+    static func move(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth) -> OperationResult {
         let fm = FileManager.default
         var moved = 0
+        var skipped = 0
         var records: [(from: URL, to: URL)] = []
         for url in urls {
             // No-op if it's already there.
             guard url.deletingLastPathComponent().path != folder.path else { continue }
             let all = [url] + companions(of: url)
+            var stem: String? = nil
+            if wouldCollide(url, in: folder) {
+                switch onCollision {
+                case .skip:
+                    skipped += 1
+                    continue
+                case .overwrite:
+                    for file in all {
+                        let existing = folder.appendingPathComponent(file.lastPathComponent)
+                        if fm.fileExists(atPath: existing.path) {
+                            try? fm.trashItem(at: existing, resultingItemURL: nil)
+                        }
+                    }
+                case .keepBoth:
+                    stem = uniqueStem(for: url, in: folder)
+                }
+            }
             var movedPrimary = false
             for file in all {
-                let dest = uniqueDestination(for: file.lastPathComponent, in: folder)
+                let name = stem.map { "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
+                let dest = folder.appendingPathComponent(name)
                 do {
                     try fm.moveItem(at: file, to: dest)
                     records.append((from: file, to: dest))
@@ -144,20 +206,45 @@ enum FileOps {
                                                 userInfo: ["sources": Array(sources)])
             }
         }
-        return OperationResult(primaries: moved, records: records)
+        return OperationResult(primaries: moved, records: records, skipped: skipped)
     }
 
     /// Copy files (plus companions) into a folder. Pasting into the same
     /// folder duplicates ("name 2.CR3") — that's what the user asked for.
-    static func copy(_ urls: [URL], to folder: URL) -> OperationResult {
+    static func copy(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth) -> OperationResult {
         let fm = FileManager.default
         var copied = 0
+        var skipped = 0
         var records: [(from: URL, to: URL)] = []
         for url in urls {
             let all = [url] + companions(of: url)
+            var stem: String? = nil
+            if wouldCollide(url, in: folder) {
+                switch onCollision {
+                case .skip:
+                    skipped += 1
+                    continue
+                case .overwrite:
+                    // Copy-over-self would destroy the original — same-folder
+                    // duplicates always keep both, whatever the policy says.
+                    if url.deletingLastPathComponent().path == folder.path {
+                        stem = uniqueStem(for: url, in: folder)
+                    } else {
+                        for file in all {
+                            let existing = folder.appendingPathComponent(file.lastPathComponent)
+                            if fm.fileExists(atPath: existing.path) {
+                                try? fm.trashItem(at: existing, resultingItemURL: nil)
+                            }
+                        }
+                    }
+                case .keepBoth:
+                    stem = uniqueStem(for: url, in: folder)
+                }
+            }
             var copiedPrimary = false
             for file in all {
-                let dest = uniqueDestination(for: file.lastPathComponent, in: folder)
+                let name = stem.map { "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
+                let dest = folder.appendingPathComponent(name)
                 do {
                     try fm.copyItem(at: file, to: dest)
                     records.append((from: file, to: dest))
@@ -172,7 +259,7 @@ enum FileOps {
             }
             if copiedPrimary { copied += 1 }
         }
-        return OperationResult(primaries: copied, records: records)
+        return OperationResult(primaries: copied, records: records, skipped: skipped)
     }
 
     /// Move files (plus companions) to the Trash — recoverable, never rm.

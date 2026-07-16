@@ -203,9 +203,14 @@ final class FilmstripResizeHandle: NSView {
         NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
     }
 
+    var onDoubleClick: (() -> Void)?
+
     override func mouseDown(with e: NSEvent) { startY = e.locationInWindow.y; onDragStart?() }
     override func mouseDragged(with e: NSEvent) { onDrag?(e.locationInWindow.y - startY) }
-    override func mouseUp(with e: NSEvent) { onDragEnd?() }
+    override func mouseUp(with e: NSEvent) {
+        onDragEnd?()
+        if e.clickCount == 2 { onDoubleClick?() }
+    }
 }
 
 /// folder — scrollable, current frame auto-centered, scroller as progress.
@@ -245,6 +250,7 @@ final class PreviewOverlayView: NSView {
     }()
     private let railHandle = FilmstripResizeHandle()
     private var infoDragStartHeight: CGFloat = 396
+    private var infoHeightBeforeCollapse: CGFloat = 396
     private var infoGeneration = 0
     private weak var infoFocusRow: NSView?
     private var showInfoPanel: Bool = {
@@ -448,6 +454,24 @@ final class PreviewOverlayView: NSView {
             guard let self else { return }
             UserDefaults.standard.set(Double(self.infoPanelHeightValue), forKey: "QuickCullInfoHeight")
         }
+        // Double-click the seam: give faces every pixel (info shrinks to its
+        // minimum). Double-click again: restore the previous balance — the
+        // macOS split-divider convention.
+        railHandle.onDoubleClick = { [weak self] in
+            guard let self else { return }
+            let minH = Self.infoMinHeight
+            if self.infoPanelHeightValue > minH + 1 {
+                self.infoHeightBeforeCollapse = self.infoPanelHeightValue
+                self.infoPanelHeightValue = minH
+            } else {
+                self.infoPanelHeightValue = min(self.maxInfoHeight(),
+                                                max(self.infoHeightBeforeCollapse, minH))
+            }
+            self.infoPanelHeight.constant = self.infoPanelHeightValue
+            UserDefaults.standard.set(Double(self.infoPanelHeightValue), forKey: "QuickCullInfoHeight")
+            self.refreshInfoPanel()
+            self.layoutFacesGrid()
+        }
         railHandle.isHidden = true
         addSubview(railHandle)
         NSLayoutConstraint.activate([
@@ -647,14 +671,13 @@ final class PreviewOverlayView: NSView {
         // Footer: filename + position now, exposure summary async (a tiny
         // metadata read that must never block the frame swap).
         let position = "\(index + 1) / \(assets.count)"
-        infoLabel.stringValue = "\(asset.filename)      \(position)"
+        infoLabel.attributedStringValue = Self.footerLine(filename: asset.filename, parts: [], position: position)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let summary = InspectorViewController.exifSummary(for: url)
+            let parts = InspectorViewController.exifSummaryParts(for: url)
             DispatchQueue.main.async {
                 guard let self, self.showGeneration == gen else { return }
-                self.infoLabel.stringValue = summary.isEmpty
-                    ? "\(asset.filename)      \(position)"
-                    : "\(asset.filename)      \(summary)      \(position)"
+                self.infoLabel.attributedStringValue = Self.footerLine(
+                    filename: asset.filename, parts: parts, position: position)
             }
         }
         FaceAnalyzer.shared.prioritize(asset.id) // scan what's on screen first
@@ -956,10 +979,33 @@ final class PreviewOverlayView: NSView {
 
     }
 
+    /// The Leica info-card pattern: dim key, bright value, same size, same
+    /// line. "S" whispers, "1/175" speaks. Filename and position sit dim at
+    /// the ends; the exposure numbers own the middle.
+    private static func footerLine(filename: String, parts: [(String, String)], position: String) -> NSAttributedString {
+        let dim: [NSAttributedString.Key: Any] = [.font: Theme.mono(12), .foregroundColor: Theme.tx2]
+        let bright: [NSAttributedString.Key: Any] = [.font: Theme.mono(12, .semibold), .foregroundColor: Theme.tx1]
+        let line = NSMutableAttributedString(string: filename, attributes: dim)
+        for (key, value) in parts {
+            line.append(NSAttributedString(string: "      ", attributes: dim))
+            if !key.isEmpty {
+                line.append(NSAttributedString(string: key + " ", attributes: dim))
+            }
+            line.append(NSAttributedString(string: value, attributes: bright))
+        }
+        line.append(NSAttributedString(string: "      " + position, attributes: dim))
+        return line
+    }
+
     private func infoRow(_ key: String, _ value: String, valueColor: NSColor = Theme.tx0) -> NSView {
-        let k = NSTextField(labelWithString: key)
-        k.font = NSFont.systemFont(ofSize: 11.5)
-        k.textColor = Theme.tx2
+        let k = NSTextField(labelWithString: "")
+        // Engraved-key styling: uppercase, mono, letterspaced, dim — the
+        // label recedes so the value (bright mono) carries the line.
+        k.attributedStringValue = NSAttributedString(string: key.uppercased(), attributes: [
+            .font: Theme.mono(9.5, .medium),
+            .foregroundColor: Theme.tx2,
+            .kern: 0.8
+        ])
         k.setContentHuggingPriority(.required, for: .horizontal)
         let v = NSTextField(labelWithString: value)
         v.font = Theme.mono(11.5)

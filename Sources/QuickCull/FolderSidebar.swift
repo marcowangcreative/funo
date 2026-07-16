@@ -367,7 +367,9 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         guard let node = item as? FolderNode, !node.isSectionHeader else { return [] }
         // Always drop ON the folder, never between rows.
         outlineView.setDropItem(node, dropChildIndex: NSOutlineViewDropOnItemIndex)
-        return .move
+        // Finder semantics: plain drag MOVES, ⌥-drag COPIES. Returning .copy
+        // gives the drag image its green + badge for free.
+        return NSEvent.modifierFlags.contains(.option) ? .copy : .move
     }
 
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo,
@@ -377,14 +379,32 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let urls = (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
         guard !urls.isEmpty else { return false }
         let destination = node.url
+        let copying = NSEvent.modifierFlags.contains(.option)
         // Off the main thread: dropping 2,000 photos must not beach-ball.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = FileOps.move(urls, to: destination)
-            DispatchQueue.main.async {
-                FileOpsHistory.push("move to \(destination.lastPathComponent)", result.records)
-                node.invalidateChildren()
-                self?.outlineView.reloadItem(node, reloadChildren: true)
-                self?.onFilesMoved?(result.primaries, destination)
+            // Finder semantics for duplicates: ASK (keep both / skip /
+            // overwrite) instead of silently minting "Name 2.CR3".
+            let collisions = FileOps.collisionCount(urls, in: destination)
+            let run: (FileOps.Collision) -> Void = { policy in
+                let result = copying
+                    ? FileOps.copy(urls, to: destination, onCollision: policy)
+                    : FileOps.move(urls, to: destination, onCollision: policy)
+                DispatchQueue.main.async { [weak self] in
+                    FileOpsHistory.push("\(copying ? "copy" : "move") to \(destination.lastPathComponent)",
+                                        kind: copying ? .copy : .move, result.records)
+                    node.invalidateChildren()
+                    self?.outlineView.reloadItem(node, reloadChildren: true)
+                    self?.onFilesMoved?(result.primaries, destination)
+                }
+            }
+            if collisions > 0 {
+                DispatchQueue.main.async {
+                    guard let policy = CollisionPrompt.ask(collisions: collisions, total: urls.count,
+                                                           destination: destination.lastPathComponent) else { return }
+                    DispatchQueue.global(qos: .userInitiated).async { run(policy) }
+                }
+            } else {
+                run(.keepBoth)
             }
         }
         return true
@@ -455,6 +475,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
     @objc private func sendFolderToLightroom(_ sender: Any?) {
         guard let node = clickedNode else { return }
+        RatingsStore.shared.flushXMPNow()   // sidecars on disk before LR reads
         LightroomBridge.send([node.url]) { ok in
             if !ok { NSSound.beep() }
         }
@@ -580,6 +601,29 @@ extension FolderSidebarViewController: NSMenuDelegate {
                                        action: #selector(sendFolderToLightroom(_:)), keyEquivalent: "")
             lightroom.target = self
             menu.addItem(lightroom)
+        }
+    }
+}
+
+/// Finder-style duplicate dialog, shared by the sidebar drop and ⌘V paste.
+enum CollisionPrompt {
+    /// nil = user cancelled the whole operation.
+    static func ask(collisions: Int, total: Int, destination: String) -> FileOps.Collision? {
+        let alert = NSAlert()
+        alert.messageText = collisions == total
+            ? (total == 1 ? "This photo already exists in “\(destination)”"
+                          : "All \(total) photos already exist in “\(destination)”")
+            : "\(collisions) of \(total) photos already exist in “\(destination)”"
+        alert.informativeText = "Keep Both renames the incoming files — RAW+JPEG pairs and sidecars stay together. Overwrite moves the existing files to the Trash first."
+        alert.addButton(withTitle: "Keep Both")
+        alert.addButton(withTitle: "Skip")
+        alert.addButton(withTitle: "Overwrite")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .keepBoth
+        case .alertSecondButtonReturn: return .skip
+        case .alertThirdButtonReturn: return .overwrite
+        default: return nil
         }
     }
 }

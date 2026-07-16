@@ -9,6 +9,22 @@ final class MainSplitViewController: NSSplitViewController {
     private let tabs = TabbedContactSheetController()
     private var previewOverlay: PreviewOverlayView? { didSet { refreshWindowTitle() } }
     private var surveyOverlay: SurveyOverlay? { didSet { refreshWindowTitle() } }
+    private var searchPalette: SearchPaletteView?
+
+    func showSearchPalette() {
+        guard previewOverlay == nil, surveyOverlay == nil, searchPalette == nil,
+              let container = view.window?.contentView else { return }
+        let palette = SearchPaletteView(frame: container.bounds)
+        palette.photoSource = { [weak self] in self?.grid.searchablePhotos() ?? [] }
+        palette.onJumpToPhoto = { [weak self] index in self?.grid.select(index: index) }
+        palette.onOpenFolder = { [weak self] url, newTab in self?.tabs.open(url, inNewTab: newTab) }
+        palette.onDismiss = { [weak self] in
+            self?.searchPalette = nil
+            self?.view.window?.makeFirstResponder(self?.grid.view)
+        }
+        searchPalette = palette
+        palette.present(in: container)
+    }
     private var titleFolderURL: URL?
 
     /// Lightroom-style title: "Folder - f/uno - Grid|Expanded|Survey".
@@ -51,6 +67,12 @@ final class MainSplitViewController: NSSplitViewController {
             if event.modifierFlags.contains(.command), event.modifierFlags.contains(.shift),
                event.keyCode == 30 || event.keyCode == 33 { // ] and [
                 self.selectAdjacentTab(event.keyCode == 30 ? 1 : -1)
+                return nil
+            }
+            // ⌘F — the search palette (photos here, folders anywhere).
+            if event.modifierFlags.intersection([.command, .control, .option]) == .command,
+               event.keyCode == 3 {
+                self.showSearchPalette()
                 return nil
             }
             // Clipboard file ops: ⌘C / ⌘X / ⌘V on photos. Text editing is
@@ -112,6 +134,7 @@ final class MainSplitViewController: NSSplitViewController {
         tabs.onActiveFolderChanged = { [weak self] url in
             self?.titleFolderURL = url
             self?.refreshWindowTitle()
+            if let url { SearchPaletteView.noteRecent(url) }   // feeds ⌘F
         }
 
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)

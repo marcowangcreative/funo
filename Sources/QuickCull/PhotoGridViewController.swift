@@ -976,7 +976,10 @@ final class PhotoGridViewController: NSViewController,
     // MARK: - Selection
 
     var selectedIndex: Int? {
-        collectionView.selectionIndexPaths.first?.item
+        // selectionIndexPaths is a SET — `.first` on a multi-selection is
+        // hash-order roulette (Space on a range opened a random middle
+        // photo). The first of the range, deterministically.
+        collectionView.selectionIndexPaths.map(\.item).min()
     }
 
     var selectedAsset: PhotoAsset? {
@@ -1052,13 +1055,30 @@ final class PhotoGridViewController: NSViewController,
         Self.cutPendingPaths = nil
         flash("\(isCut ? "Moving" : "Copying") \(urls.count) photo\(urls.count == 1 ? "" : "s")…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = isCut ? FileOps.move(urls, to: folder) : FileOps.copy(urls, to: folder)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                FileOpsHistory.push("\(isCut ? "move" : "copy") to \(folder.lastPathComponent)",
-                                    kind: isCut ? .move : .copy, result.records)
-                self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)")
-                self.reloadCurrentFolderPreservingSelection()
+            // Cross-folder collisions ask, like Finder. Same-folder ⌘V is
+            // excluded from the count — pasting in place means "duplicate",
+            // and it keeps both without asking.
+            let collisions = FileOps.collisionCount(urls, in: folder)
+            let run: (FileOps.Collision) -> Void = { policy in
+                let result = isCut ? FileOps.move(urls, to: folder, onCollision: policy)
+                                   : FileOps.copy(urls, to: folder, onCollision: policy)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    FileOpsHistory.push("\(isCut ? "move" : "copy") to \(folder.lastPathComponent)",
+                                        kind: isCut ? .move : .copy, result.records)
+                    let skippedNote = result.skipped > 0 ? " — \(result.skipped) skipped" : ""
+                    self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)")
+                    self.reloadCurrentFolderPreservingSelection()
+                }
+            }
+            if collisions > 0 {
+                DispatchQueue.main.async {
+                    guard let policy = CollisionPrompt.ask(collisions: collisions, total: urls.count,
+                                                           destination: folder.lastPathComponent) else { return }
+                    DispatchQueue.global(qos: .userInitiated).async { run(policy) }
+                }
+            } else {
+                run(.keepBoth)
             }
         }
     }
@@ -1260,6 +1280,12 @@ final class PhotoGridViewController: NSViewController,
             selectionAnchor = fp.item
         }
         if let asset = selectedAsset { onSelectionChanged?(asset) }
+    }
+
+    /// (index, filename) pairs for the ⌘F palette — visible photos only,
+    /// so a jump target is always somewhere the grid can actually go.
+    func searchablePhotos() -> [(Int, String)] {
+        displayedAssets.enumerated().map { ($0.offset, $0.element.filename) }
     }
 
     func select(index: Int) {
@@ -1525,6 +1551,8 @@ final class PhotoGridViewController: NSViewController,
             flash("Select photos to send to Lightroom")
             return
         }
+        // Sidecars MUST be on disk before Lightroom reads the files.
+        RatingsStore.shared.flushXMPNow()
         LightroomBridge.send(urls) { [weak self] ok in
             self?.flash(ok
                 ? "Sent \(urls.count) photo\(urls.count == 1 ? "" : "s") to Lightroom — confirm the import there"
@@ -1538,6 +1566,7 @@ final class PhotoGridViewController: NSViewController,
             flash("Select photos to edit in Photoshop")
             return
         }
+        RatingsStore.shared.flushXMPNow()
         PhotoshopBridge.send(urls) { [weak self] ok in
             self?.flash(ok
                 ? "Opened \(urls.count) photo\(urls.count == 1 ? "" : "s") in Photoshop"
