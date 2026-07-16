@@ -17,6 +17,17 @@ if [ ! -x "$SPARKLE_BIN/generate_appcast" ]; then
   exit 1
 fi
 
+# One version number = one build, FOREVER. Re-cutting a published version
+# reuses its DMG filename, and browsers/CDNs serve their cached copy of the
+# OLD bytes for an unchanged URL — "I downloaded the fix and the bug is
+# still there." If the version already shipped, bump it. (Delete the DMG
+# from site/updates first if you REALLY mean to re-cut.)
+if [ -f "$UPDATES/$(basename "$DMG")" ]; then
+  echo "✗ Funo-$VERSION.dmg already exists in site/updates/ — that version is published." >&2
+  echo "  Bump the version instead: ./cut_release.sh <next-version>" >&2
+  exit 1
+fi
+
 echo "▸ [1/3] Building $VERSION (signed + notarized)…"
 VERSION="$VERSION" "$ROOT/build_app.sh"
 
