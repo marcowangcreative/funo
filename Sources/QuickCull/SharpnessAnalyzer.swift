@@ -44,9 +44,12 @@ final class SharpnessAnalyzer {
         let facesPending = faceResult == nil
             && FaceAnalyzer.shared.isEnabled
             && !FileOps.isMemoryCard(url)
-        let key = facesPending ? nil : CacheDB.identity(for: url).map { "\($0)|\(Self.cacheVersion)" }
-
+        // NOTE: CacheDB.identity stats the photo file — that must happen on
+        // OUR queue, not the caller's thread (score() is called from the
+        // preview/survey overlays on main; a stat against a waking external
+        // drive there froze the frame swap).
         queue.async { [weak self] in
+            let key = facesPending ? nil : CacheDB.identity(for: url).map { "\($0)|\(Self.cacheVersion)" }
             if let key, let data = CacheDB.shared.get(key),
                let s = String(data: data, encoding: .utf8), let v = Double(s) {
                 DispatchQueue.main.async { self?.memo[id] = v; completion(v) }

@@ -73,9 +73,17 @@ final class ThumbnailLoader {
     /// USB card thrash it into delivering less than two would.
     private var volumeQueues: [String: OperationQueue] = [:] // main thread
 
+    /// Directory → decode queue memo. queue(for:) runs on the MAIN thread for
+    /// every thumbnail request; resolving .volumeURLKey is a stat, and doing
+    /// one per visible cell against a waking external drive froze the click.
+    /// Every file in a folder shares a volume — the first answers for all.
+    private var dirQueueMemo: [String: OperationQueue] = [:] // main thread
+
     private func queue(for url: URL) -> OperationQueue {
+        let dir = url.deletingLastPathComponent().path
+        if let memoed = dirQueueMemo[dir] { return memoed }
         let volumePath = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? "/"
-        if let existing = volumeQueues[volumePath] { return existing }
+        if let existing = volumeQueues[volumePath] { dirQueueMemo[dir] = existing; return existing }
         let values = try? URL(fileURLWithPath: volumePath).resourceValues(
             forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey])
         // A genuinely slow memory card (SD/CF/USB flash) is the only volume
@@ -95,6 +103,7 @@ final class ThumbnailLoader {
             : (isExternal ? max(4, cores - 2)  // external SSD/HDD: nearly full
                           : max(4, cores - 1)) // internal SSD: all cores
         volumeQueues[volumePath] = q
+        dirQueueMemo[dir] = q
         return q
     }
 

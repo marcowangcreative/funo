@@ -7,9 +7,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var mainController: MainSplitViewController!
     /// Sparkle: checks the appcast on a schedule and on demand. Configured
     /// via Info.plist (SUFeedURL + SUPublicEDKey, set by build_app.sh).
+    /// Started ONLY inside a real .app bundle — under `swift run` there is
+    /// no Info.plist/bundle, and starting the updater throws an alert on
+    /// every dev launch ("The updater failed to start… version of debug").
     private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+    private var updaterAvailable: Bool {
+        Bundle.main.bundlePath.hasSuffix(".app")
+            && Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
+    }
     private weak var colorFirstMenuItem: NSMenuItem?
+    private weak var clearCachesMenuItem: NSMenuItem?
 
     /// THE fix: a hard ceiling the window server enforces BELOW autolayout.
     /// Every prior attempt was reactive — let the window grow, then shove it
@@ -34,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowDidChangeScreen(_ notification: Notification) { clampWindowToScreen() }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if updaterAvailable { updaterController.startUpdater() }
+        #if DEBUG
+        MainThreadWatchdog.shared.start()
+        #endif
         FolderTemplates.ensureDefaults()
         buildMenu()
 
@@ -57,7 +69,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.minSize = NSSize(width: 900, height: 600)
         window.delegate = self
         window.center()
+        // First launch on a small display: 1440×900 is wider than a 13"
+        // laptop's usable area. The clamp already exists for screen changes —
+        // it just was never applied to the INITIAL frame.
+        clampWindowToScreen()
+        window.center()
         window.makeKeyAndOrderFront(nil)
+
+        // License gate: silent while licensed or in the early trial; a
+        // dismissible reminder in the final week; a hard gate once expired.
+        switch LicenseManager.shared.status {
+        case .licensed:
+            break
+        case .trial(let days):
+            if days <= 7 { LicenseWindowController.shared.show(gate: false) }
+        case .expired:
+            LicenseWindowController.shared.show(gate: true)
+        }
 
         // Cap the window to the screen NOW (before any split can grow it)
         // and keep it capped as the window moves between monitors.
@@ -66,6 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Photographers' tools live in the dark.
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Never lose the last second of culling to the debounce windows.
+        RatingsStore.shared.flushForTermination()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -88,10 +121,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      keyEquivalent: "")
         updatesItem.target = updaterController
         appMenu.addItem(updatesItem)
-        appMenu.addItem(.separator())
+        let licenseItem = NSMenuItem(title: "License…", action: #selector(showLicense(_:)), keyEquivalent: "")
+        licenseItem.target = self
+        appMenu.addItem(licenseItem)
+        // Diagnostic, not a feature: hold ⌥ while the menu is open and it
+        // appears. Testers who need it can be told "Option-click the f/uno
+        // menu"; everyone else never sees it.
         let clearCaches = NSMenuItem(title: "Clear Caches (cold-start test)", action: #selector(clearCaches(_:)), keyEquivalent: "")
         clearCaches.target = self
+        clearCaches.isHidden = true
         appMenu.addItem(clearCaches)
+        clearCachesMenuItem = clearCaches
+        appMenu.delegate = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide f/uno", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -275,6 +316,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    @objc private func showLicense(_ sender: Any?) {
+        LicenseWindowController.shared.show()
+    }
+
     @objc private func toggleColorFirst(_ sender: Any?) {
         RatingsStore.shared.colorFirstRating.toggle()
     }
@@ -319,5 +364,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard response == .OK, let url = panel.url else { return }
             self?.mainController.showFolder(url)
         }
+    }
+}
+
+// MARK: - App menu: ⌥ reveals the cache diagnostic
+extension AppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let item = clearCachesMenuItem, menu === item.menu else { return }
+        item.isHidden = !NSEvent.modifierFlags.contains(.option)
     }
 }

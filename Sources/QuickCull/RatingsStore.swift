@@ -233,6 +233,43 @@ final class RatingsStore {
         }
     }
 
+    /// Quit-time flush, SYNCHRONOUS. The debounced JSON save and the XMP
+    /// writer both lose the last ~1 s of culling if the process exits before
+    /// their timers/queues run — which read as "ratings pop in late" on the
+    /// next launch, when the sidecar adoption pass restored them. Called
+    /// from applicationWillTerminate (and safe to call any time on main).
+    func flushForTermination() {
+        assert(Thread.isMainThread)
+        // 1. Pending sidecars — write them NOW, inline. Small batch (only
+        //    what changed in the last 0.8 s); at quit there is no UI to jank.
+        let batch = xmpDirty.map { id in
+            (id, rating(for: id), colorLabel(for: id), rotation(for: id))
+        }
+        xmpDirty.removeAll()
+        // Drain any in-flight background flush first so we can't interleave.
+        xmpQueue.sync {}
+        for (id, rating, label, rotationDegrees) in batch {
+            let url = URL(fileURLWithPath: id)
+            guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
+                  FileManager.default.fileExists(atPath: url.path) else { continue }
+            var orientation: Int?
+            if rotationDegrees != 0 {
+                orientation = XMPSidecar.orientationCode(
+                    containerOrientation: ImageTransform.containerOrientation(of: url),
+                    plusDegreesCW: rotationDegrees)
+            }
+            XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+        }
+        // 2. The JSON store, synchronously.
+        let snap = Snapshot(ratings: ratings, rejected: Array(rejected),
+                            colorLabels: colorLabels, rotations: rotations,
+                            clearedRatings: Array(clearedRatings),
+                            clearedLabels: Array(clearedLabels))
+        if let data = try? JSONEncoder().encode(snap) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
     // MARK: - Persistence
 
     private struct Snapshot: Codable {
@@ -261,12 +298,18 @@ final class RatingsStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
             self.saveScheduled = false
+            // Snapshot on main (state is main-only); encode + write on a
+            // background queue — during a rating burst this fires every
+            // 0.5 s, and a big store shouldn't cost the keyboard rhythm.
             let snap = Snapshot(ratings: self.ratings, rejected: Array(self.rejected),
                                 colorLabels: self.colorLabels, rotations: self.rotations,
                                 clearedRatings: Array(self.clearedRatings),
                                 clearedLabels: Array(self.clearedLabels))
-            if let data = try? JSONEncoder().encode(snap) {
-                try? data.write(to: self.fileURL, options: .atomic)
+            let dest = self.fileURL
+            DispatchQueue.global(qos: .utility).async {
+                if let data = try? JSONEncoder().encode(snap) {
+                    try? data.write(to: dest, options: .atomic)
+                }
             }
         }
     }

@@ -189,17 +189,40 @@ final class IngestController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Cards
 
+    private var cardScanGeneration = 0
+
     private func refreshCards() {
         for view in cardsStack.arrangedSubviews {
             cardsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
         cardRows.removeAll()
-        let cards = IngestJob.detectCards()
-        noCardsLabel.isHidden = !cards.isEmpty
+        noCardsLabel.isHidden = true
 
-        for card in cards {
-            let name = (try? card.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? card.lastPathComponent
+        // Card detection stats EVERY mounted volume (fileExists on <vol>/DCIM)
+        // and lists each card's DCIM — on main that woke every sleeping drive
+        // SERIALLY with the sheet frozen. Detect in the background; build the
+        // checkboxes when the answers land. The generation token drops a
+        // stale scan if the user hit Refresh (or a volume mounted) meanwhile.
+        cardScanGeneration += 1
+        let generation = cardScanGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let found: [(card: URL, name: String, sections: [URL])] = IngestJob.detectCards().map { card in
+                (card,
+                 (try? card.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? card.lastPathComponent,
+                 IngestJob.sections(of: card))
+            }
+            DispatchQueue.main.async {
+                guard let self, self.cardScanGeneration == generation else { return }
+                self.buildCardRows(found)
+            }
+        }
+    }
+
+    private func buildCardRows(_ found: [(card: URL, name: String, sections: [URL])]) {
+        noCardsLabel.isHidden = !found.isEmpty
+
+        for (_, name, sections) in found {
             let master = NSButton(checkboxWithTitle: name, target: self, action: #selector(masterToggled(_:)))
             master.state = .on
             master.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -208,7 +231,7 @@ final class IngestController: NSWindowController, NSWindowDelegate {
             var row = CardRow(master: master, sections: [])
             // Not everyone wants the whole card: each DCIM subfolder is
             // individually selectable.
-            for section in IngestJob.sections(of: card) {
+            for section in sections {
                 let label = section.lastPathComponent == "DCIM" ? "All files" : section.lastPathComponent
                 let check = NSButton(checkboxWithTitle: "\(label)  (counting…)", target: nil, action: nil)
                 check.state = .on

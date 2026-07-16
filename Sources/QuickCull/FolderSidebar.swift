@@ -6,12 +6,19 @@ final class FolderNode {
     let url: URL
     let displayName: String
     let isSectionHeader: Bool
+    /// True = removable MEDIA (SD/CF card, flash stick) → card glyph.
+    /// Resolved ONCE at mount enumeration; the cell renderer must never
+    /// stat the volume — statfs on a sleeping drive blocks the main thread
+    /// for the entire spin-up, which read as "lag when clicking a drive".
+    let isRemovableMedia: Bool
     private var loadedChildren: [FolderNode]?
 
-    init(url: URL, displayName: String? = nil, isSectionHeader: Bool = false) {
+    init(url: URL, displayName: String? = nil, isSectionHeader: Bool = false,
+         isRemovableMedia: Bool = false) {
         self.url = url
         self.displayName = displayName ?? FileManager.default.displayName(atPath: url.path)
         self.isSectionHeader = isSectionHeader
+        self.isRemovableMedia = isRemovableMedia
     }
 
     var children: [FolderNode] {
@@ -181,10 +188,18 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
         // Mounted volumes (external drives, cards, network shares).
         var drives: [FolderNode] = []
-        if let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey], options: [.skipHiddenVolumes]) {
+        if let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey, .volumeIsRemovableKey], options: [.skipHiddenVolumes]) {
             for vol in volumes {
-                let name = (try? vol.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? vol.lastPathComponent
-                drives.append(FolderNode(url: vol, displayName: name))
+                let values = try? vol.resourceValues(forKeys: [.volumeNameKey, .volumeIsRemovableKey])
+                let node = FolderNode(url: vol,
+                                      displayName: values?.volumeName ?? vol.lastPathComponent,
+                                      isRemovableMedia: values?.volumeIsRemovable ?? false)
+                // Drive rows are ROOTS — they never pass through children(of:),
+                // so the visibility-driven prefetch never warms them. Without
+                // this, the FIRST expand of a drive read its directory on the
+                // main thread while the disk woke. Warm them up front instead.
+                node.prefetchChildren()
+                drives.append(node)
             }
         }
         if !drives.isEmpty {
@@ -308,9 +323,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                 // external HDDs/SSDs are merely ejectable, not removable, so
                 // they correctly get the drive glyph. (isOnRemovableVolume is
                 // deliberately broader for gentle-handling and would misfire.)
-                let removableMedia = (try? node.url.resourceValues(
-                    forKeys: [.volumeIsRemovableKey]))?.volumeIsRemovable ?? false
-                symbolName = removableMedia ? "sdcard" : "externaldrive"
+                symbolName = node.isRemovableMedia ? "sdcard" : "externaldrive"
             } else {
                 symbolName = "folder"
             }

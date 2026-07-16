@@ -696,6 +696,7 @@ final class PhotoGridViewController: NSViewController,
                 self.pairedHidden = result.pairedJPEGCount
                 self.captureDates = [:]
                 self.applyFilter(keepSelection: false)
+                self.scanSidecars(self.allAssets, generation: generation)
                 self.scanCaptureDates(result.assets, generation: generation)
                 FaceAnalyzer.shared.analyzeFolder(result.assets)
             }
@@ -706,47 +707,76 @@ final class PhotoGridViewController: NSViewController,
     /// Sidecar ratings/labels from Lightroom/Photo Mechanic are adopted so
     /// culls done elsewhere show up here.
     private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
+        // Dates only — sidecar adoption streams separately (scanSidecars).
+        // A capture date needs an image-header read, 10–50× the cost of a
+        // sidecar; bundling them made Lightroom/PM ratings wait ~2 s behind
+        // the EXIF pass on a 2,000-RAW folder.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var dates: [String: Date] = [:]
-            var sidecarValues: [(String, Int?, Int?)] = []
             for asset in assets {
                 if let date = FolderScanner.captureDate(of: asset.url) {
                     dates[asset.id] = date
-                }
-                if asset.isRAW {
-                    let (rating, label) = XMPSidecar.read(for: asset.url)
-                    if rating != nil || label != nil {
-                        sidecarValues.append((asset.id, rating, label))
-                    }
                 }
             }
             DispatchQueue.main.async {
                 guard let self, self.scanGeneration == generation else { return }
                 self.captureDates = dates
-                var adoptedAny = false
-                for (id, rating, label) in sidecarValues {
-                    if RatingsStore.shared.adopt(rating: rating, label: label, for: id) {
-                        adoptedAny = true
-                    }
-                }
-                if !sidecarValues.isEmpty {
-                    // Adopted values arrive AFTER the first filter pass — a
-                    // photo whose sidecar matches the active filter must
-                    // APPEAR, not just repaint. But a full grid reload is a
-                    // main-thread hit on big folders, so pay it ONLY when
-                    // adoption changed a value AND a filter could be hiding
-                    // photos; otherwise a badge repaint is all that's needed.
-                    let filterActive = self.rejectsOnly || self.starThreshold != nil || !self.colorFilter.isEmpty
-                    if adoptedAny && filterActive {
-                        self.preserveScrollOnNextApply = true
-                        self.applyFilter(keepSelection: true)
-                    }
-                    self.refreshVisibleCullStates()
-                    if let asset = self.selectedAsset { self.onSelectionChanged?(asset) }
-                }
                 if self.sortKey == .capture { self.resort(keepSelection: true) }
             }
         }
+    }
+
+    /// Foreign sidecar ratings (Lightroom / Photo Mechanic culls) stream in
+    /// FAST: tiny .xmp text reads in display order, applied in chunks — the
+    /// first chunk is one screenful, so existing culls paint effectively
+    /// with the thumbnails instead of seconds later.
+    private func scanSidecars(_ assets: [PhotoAsset], generation: Int) {
+        let raws = assets.filter { $0.isRAW }
+        guard !raws.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var pending: [(String, Int?, Int?)] = []
+            var scannedSinceFlush = 0
+            var flushedOnce = false
+            for (index, asset) in raws.enumerated() {
+                let (rating, label) = XMPSidecar.read(for: asset.url)
+                if rating != nil || label != nil {
+                    pending.append((asset.id, rating, label))
+                }
+                scannedSinceFlush += 1
+                // First flush after ~one screenful; then every 400 files.
+                let due = scannedSinceFlush >= (flushedOnce ? 400 : 60)
+                if (due || index == raws.count - 1), !pending.isEmpty {
+                    flushedOnce = true
+                    scannedSinceFlush = 0
+                    let batch = pending
+                    pending.removeAll()
+                    DispatchQueue.main.async {
+                        self?.applySidecarBatch(batch, generation: generation)
+                    }
+                }
+            }
+        }
+    }
+
+    private func applySidecarBatch(_ batch: [(String, Int?, Int?)], generation: Int) {
+        guard scanGeneration == generation else { return }
+        var adoptedAny = false
+        for (id, rating, label) in batch {
+            if RatingsStore.shared.adopt(rating: rating, label: label, for: id) {
+                adoptedAny = true
+            }
+        }
+        guard adoptedAny else { return }
+        // A photo whose adopted value matches the active filter must APPEAR,
+        // not just repaint. A full grid reload is a main-thread hit on big
+        // folders, so pay it only when a filter could be hiding photos.
+        let filterActive = rejectsOnly || starThreshold != nil || !colorFilter.isEmpty
+        if filterActive {
+            preserveScrollOnNextApply = true
+            applyFilter(keepSelection: true)
+        }
+        refreshVisibleCullStates()
+        if let asset = selectedAsset { onSelectionChanged?(asset) }
     }
 
     // MARK: - Sorting

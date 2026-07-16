@@ -307,9 +307,13 @@ final class InspectorViewController: NSViewController {
         nameLabel.stringValue = asset.filename
         refreshCullState()
 
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: asset.url.path)[.size] as? Int64) ?? nil
-        let sizeText = fileSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? ""
-        subLabel.stringValue = sizeText + (asset.hasJPEGPair ? " · paired JPEG hidden" : "")
+        // File size + dimensions arrive async: attributesOfItem is a stat
+        // against the photo's volume, and this runs on every arrow-key
+        // selection change. ONE background block (the EXIF read below)
+        // gathers both and is the only writer of subLabel — two racing
+        // writers was the first version of this fix, and a compile error.
+        let pairNote = asset.hasJPEGPair ? " · paired JPEG hidden" : ""
+        subLabel.stringValue = asset.hasJPEGPair ? "paired JPEG hidden" : ""
 
         // Thumbnail + histogram
         ThumbnailLoader.shared.request(asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self] image in
@@ -325,17 +329,18 @@ final class InspectorViewController: NSViewController {
             }
         }
 
-        // EXIF (header read only — cheap even for RAW)
+        // EXIF (header read only — cheap even for RAW) + file size, one trip.
         let url = asset.url
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let rows = Self.exifRows(for: url)
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? nil
+            let sizeText = fileSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? ""
             DispatchQueue.main.async {
                 guard let self, self.generation == gen else { return }
                 self.setExifRows(rows)
-                if let dims = rows.first(where: { $0.0 == "Size" })?.1 {
-                    self.subLabel.stringValue = dims + (sizeText.isEmpty ? "" : " · " + sizeText)
-                        + (asset.hasJPEGPair ? " · paired JPEG hidden" : "")
-                }
+                let dims = rows.first(where: { $0.0 == "Size" })?.1
+                let parts = [dims, sizeText.isEmpty ? nil : sizeText].compactMap { $0 }
+                self.subLabel.stringValue = parts.joined(separator: " · ") + pairNote
             }
         }
     }
