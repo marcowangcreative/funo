@@ -472,12 +472,10 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         structurePopup.target = self
         structurePopup.action = #selector(structureChanged(_:))
 
-        templatePopup.removeAllItems()
-        templatePopup.addItem(withTitle: "None")
-        templatePopup.addItems(withTitles: FolderTemplates.names)
         templatePopup.target = self
         templatePopup.action = #selector(templateChanged(_:))
-        if templatePopup.itemTitles.contains("Wedding") { templatePopup.selectItem(withTitle: "Wedding") }
+        rebuildTemplatePopup()
+        lastTemplateChoice = templatePopup.titleOfSelectedItem ?? "None"
         rebuildCopyInto()
         copyIntoPopup.target = self
         copyIntoPopup.action = #selector(copyIntoChanged(_:))
@@ -727,7 +725,50 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         refreshCrumbs()
     }
 
-    @objc private func templateChanged(_ sender: Any?) { rebuildCopyInto(); refreshCrumbs() }
+    @objc private func templateChanged(_ sender: Any?) {
+        if let choice = templatePopup.titleOfSelectedItem, choice != "Edit Templates…" {
+            lastTemplateChoice = choice
+        }
+        rebuildCopyInto()
+        refreshCrumbs()
+    }
+
+    private var lastTemplateChoice = "None"
+
+    /// The popup owns its whole lifecycle now - no backing out to the
+    /// sidebar menu just to edit a template.
+    private func rebuildTemplatePopup(selecting: String? = nil) {
+        let wanted = selecting ?? templatePopup.titleOfSelectedItem
+        templatePopup.removeAllItems()
+        templatePopup.addItem(withTitle: "None")
+        templatePopup.addItems(withTitles: FolderTemplates.names)
+        templatePopup.menu?.addItem(.separator())
+        let editItem = NSMenuItem(title: "Edit Templates…",
+                                  action: #selector(editTemplatesTapped(_:)), keyEquivalent: "")
+        editItem.target = self
+        templatePopup.menu?.addItem(editItem)
+        if let wanted, templatePopup.itemTitles.contains(wanted), wanted != "Edit Templates…" {
+            templatePopup.selectItem(withTitle: wanted)
+        } else if templatePopup.itemTitles.contains("Wedding") {
+            templatePopup.selectItem(withTitle: "Wedding")
+        } else {
+            templatePopup.selectItem(at: 0)
+        }
+    }
+
+    @objc private func editTemplatesTapped(_ sender: Any?) {
+        // Clicking the item made it the popup's selection - put the real
+        // choice back before the editor opens.
+        rebuildTemplatePopup(selecting: lastTemplateChoice)
+        TemplateEditor.show()
+    }
+
+    /// Back from the template editor (or anywhere): the popup reflects
+    /// whatever templates exist NOW, selection preserved.
+    func windowDidBecomeKey(_ notification: Notification) {
+        rebuildTemplatePopup(selecting: lastTemplateChoice)
+        rebuildCopyInto()
+    }
     @objc private func copyIntoChanged(_ sender: Any?) { refreshCrumbs() }
     @objc private func ejectWhenDoneToggled(_ sender: BrassSwitch) {
         UserDefaults.standard.set(sender.state == .on, forKey: "QuickCullEjectWhenDone")
@@ -908,12 +949,20 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         startButton.isEnabled = allFit
     }
 
-    /// Blank slate on every open: no job carried over, no shooter picked,
-    /// nothing presumed. The card tells us what it knows; the user says
-    /// what they want.
+    /// The job you're MID-WAY through - card 2 of a wedding must not ask
+    /// the name again. Set when a run starts, gone when the app quits;
+    /// never persisted, so every fresh session opens a blank slate.
+    private var sessionJob: String?
+
+    /// First open of a session: blank slate, nothing presumed. Once an
+    /// ingest has run, later opens continue that job - insert, Enter.
     private func prefillActiveJob() {
-        jobField.stringValue = ""
-        selectedShooterPrefix = nil
+        if let sessionJob {
+            jobField.stringValue = sessionJob
+        } else {
+            jobField.stringValue = ""
+            selectedShooterPrefix = nil
+        }
         rebuildShooterChips()
         refreshShooterInfo()
         refreshCrumbs()
@@ -1126,7 +1175,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
                 string: found.count > 1 ? "CARDS DETECTED (\(found.count))" : "CARD DETECTED",
                 attributes: [.font: Theme.monoEyebrow, .foregroundColor: Theme.tx2, .kern: 1.4])
             specLine.font = Theme.monoData
-            specLine.stringValue = first.name + " - counting…"
+            specLine.stringValue = (found.count > 1 ? "\(found.count) cards" : first.name) + " - counting…"
         } else {
             cardEyebrow.attributedStringValue = NSAttributedString(string: "NO CARD",
                 attributes: [.font: Theme.monoEyebrow, .foregroundColor: Theme.tx2, .kern: 1.4])
@@ -1331,11 +1380,16 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             let uuid = ShooterStore.volumeUUID(of: first.card)
             var perSection: [URL: (serial: String, model: String?)] = [:]
             var allFiles: [URL] = []
-            for section in first.sections {
-                let files = IngestJob.mediaFiles(under: section)
-                allFiles.append(contentsOf: files)
-                if let file = files.first, let info = ShooterStore.cameraInfo(of: file) {
-                    perSection[section] = info
+            // EVERY card's sections - two readers at once is a real
+            // wedding-night shape, and card 2's serials matter as much
+            // as card 1's.
+            for cardEntry in found {
+                for section in cardEntry.sections {
+                    let files = IngestJob.mediaFiles(under: section)
+                    allFiles.append(contentsOf: files)
+                    if let file = files.first, let info = ShooterStore.cameraInfo(of: file) {
+                        perSection[section] = info
+                    }
                 }
             }
             let bytes = allFiles.reduce(Int64(0)) {
@@ -1359,10 +1413,17 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
                 for (_, info) in perSection {
                     if let model = info.model { ShooterStore.shared.noteModel(model, forSerial: info.serial) }
                 }
-                // Recognition INFORMS (the info line says whose camera);
-                // selecting the chip stays the user's move.
-                self.detectedCardName = first.name
-                self.refreshSpecLine(cardName: first.name)
+                // First open: recognition INFORMS, selecting stays the
+                // user's move. Mid-session (job active): the recognized
+                // shooter pre-selects - card 2 is insert, Enter.
+                if self.sessionJob != nil,
+                   let serial = headline?.serial,
+                   let shooter = ShooterStore.shared.shooter(forSerial: serial) {
+                    self.selectedShooterPrefix = shooter.prefix
+                    self.rebuildShooterChips()
+                }
+                self.detectedCardName = found.count > 1 ? "\(found.count) cards" : first.name
+                self.refreshSpecLine(cardName: self.detectedCardName)
                 self.refreshShooterInfo()
                 self.refreshCrumbs()
                 for (index, cell) in self.thumbCells.enumerated() {
@@ -1437,18 +1498,21 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             try? FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         }
 
-        // Group the selected sections by shooter: one group normally; a
-        // mixed card splits into per-shooter folders. Unknown serials
-        // follow the selected chip.
+        // Group the selected sections by CARD + shooter: every card gets
+        // its own numbered folder (two cards from one shooter = marco-01
+        // AND marco-02), and a mixed card still splits per shooter.
+        // Unknown serials follow the selected chip.
         var groups: [(prefix: String, sources: [URL])] = []
         if let fallback = selectedShooterPrefix {
-            var byPrefix: [String: [URL]] = [:]
+            var byKey: [String: (prefix: String, sources: [URL])] = [:]
             for source in sources {
                 let prefix = sectionSerials[source]
                     .flatMap { ShooterStore.shared.shooter(forSerial: $0)?.prefix } ?? fallback
-                byPrefix[prefix, default: []].append(source)
+                let volume = (try? source.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? ""
+                let key = volume + "|" + prefix
+                byKey[key, default: (prefix, [])].sources.append(source)
             }
-            groups = byPrefix.map { ($0.key, $0.value) }.sorted { $0.prefix < $1.prefix }
+            groups = byKey.sorted { $0.key < $1.key }.map { $0.value }
         }
 
         var runs: [(sources: [URL], target: URL, label: String)] = []
@@ -1472,7 +1536,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
                 let groupTarget = target.appendingPathComponent(sub, isDirectory: true)
                 try? FileManager.default.createDirectory(at: groupTarget, withIntermediateDirectories: true)
                 runs.append((group.sources, groupTarget,
-                             "Shooter \(index + 1) of \(groups.count) - \(sub)…"))
+                             "Copy \(index + 1) of \(groups.count) - \(sub)…"))
             }
         }
 
@@ -1498,6 +1562,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             cardMemoryFolderExists = true   // we're about to create it
         }
         UserDefaults.standard.set(jobName, forKey: "QuickCullLastJob")
+        sessionJob = jobName
 
         // Open the grid on the first landing folder - thumbnails pour in live.
         onOpenFolder?(runs.first?.target ?? target)
