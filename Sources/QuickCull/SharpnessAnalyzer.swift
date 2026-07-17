@@ -1,12 +1,12 @@
 import AppKit
 
-/// Focus/sharpness scoring — variance of the Laplacian over the central
+/// Focus/sharpness scoring - variance of the Laplacian over the central
 /// region of a downscaled grayscale copy. High edge energy = crisp focus,
 /// low = soft/blurred.
 ///
 /// Honest scope: the ABSOLUTE number isn't comparable across scenes (a flat
 /// wall scores low even in perfect focus). It's reliable as a RELATIVE
-/// signal between similar frames — which is exactly the survey-mode
+/// signal between similar frames - which is exactly the survey-mode
 /// question ("which of these near-identical shots is sharpest"). Computed
 /// lazily on demand from the already-decoded preview, then cached forever.
 final class SharpnessAnalyzer {
@@ -20,7 +20,7 @@ final class SharpnessAnalyzer {
     /// Cached acutance if we already have it (main thread, instant).
     func cached(for asset: PhotoAsset) -> Double? { memo[asset.id] }
 
-    /// Acutance for an asset — memo → CacheDB → compute from the decoded
+    /// Acutance for an asset - memo → CacheDB → compute from the decoded
     /// preview. Completion always on the main thread; nil if we couldn't
     /// get a decoded image yet (caller can retry once the preview lands).
     func score(for asset: PhotoAsset, completion: @escaping (Double?) -> Void) {
@@ -30,7 +30,7 @@ final class SharpnessAnalyzer {
 
         // Subject-aware focus: measure the DETECTED FACE (the thing that has to
         // be sharp), not the whole frame. A whole-frame metric rewards a busy,
-        // detailed scene and punishes a clean portrait with a soft background —
+        // detailed scene and punishes a clean portrait with a soft background -
         // exactly backwards. Fall back to the frame when there are no faces
         // (landscape/product) or a memory card skipped the face pass. Rects are
         // read here on the main thread (FaceAnalyzer.results is main-only).
@@ -44,7 +44,7 @@ final class SharpnessAnalyzer {
         let facesPending = faceResult == nil
             && FaceAnalyzer.shared.isEnabled
             && !FileOps.isMemoryCard(url)
-        // NOTE: CacheDB.identity stats the photo file — that must happen on
+        // NOTE: CacheDB.identity stats the photo file - that must happen on
         // OUR queue, not the caller's thread (score() is called from the
         // preview/survey overlays on main; a stat against a waking external
         // drive there froze the frame swap).
@@ -92,16 +92,16 @@ final class SharpnessAnalyzer {
     }
 
     /// 0…1 focus fraction for a meter, from an empirical log scale. Blurry
-    /// frames sit near 0, crisp ones near 1. For display only — the raw
+    /// frames sit near 0, crisp ones near 1. For display only - the raw
     /// acutance is what's compared in survey mode.
     static func focusFraction(_ normalized: Double) -> Double {
         // `normalized` is edge-energy ÷ contrast (see acutance), now measured
         // on a ~1024px working image instead of 256px. At high resolution a
         // soft edge spreads over several pixels and its Laplacian collapses,
-        // so blurred frames genuinely score low — dense text no longer aliases
+        // so blurred frames genuinely score low - dense text no longer aliases
         // into fake sharpness. Log-mapped; anchors calibrated for the hi-res
         // metric. Capped below 1.0 on purpose: an automated score shouldn't
-        // claim absolute "100%" certainty — pixel-peep (Z) to confirm.
+        // claim absolute "100%" certainty - pixel-peep (Z) to confirm.
         let lg = log10(max(0.0001, normalized))
         let f = (lg - (-2.6)) / ((-0.9) - (-2.6))
         return min(0.99, max(0, f))
@@ -111,15 +111,15 @@ final class SharpnessAnalyzer {
 
     /// Edge energy (variance of the Laplacian) DIVIDED by the image's own
     /// contrast (intensity variance). Plain Laplacian variance is fooled by
-    /// high-contrast content — printed text has huge edge energy even when
+    /// high-contrast content - printed text has huge edge energy even when
     /// soft, so it always read "sharp." Normalizing by contrast asks the
     /// right question: how sharp are the edges *relative to* how much detail
-    /// the scene has — which a soft-but-contrasty document now fails.
+    /// the scene has - which a soft-but-contrasty document now fails.
     private static func acutance(from cg: CGImage) -> Double {
         // Work at ~1024px, NOT 256px. The old 256px downscale was the whole
         // problem: shrinking a 3200px+ frame that far turns fine detail into
         // aliasing, and aliasing has huge Laplacian variance regardless of
-        // focus — so any dense-detail subject (a photographed document above
+        // focus - so any dense-detail subject (a photographed document above
         // all) pegged the meter. At ~1024px a soft edge stays soft: it spans
         // several pixels, its second derivative collapses, and the score
         // finally tracks real focus. Never upscale past the source.
@@ -136,7 +136,7 @@ final class SharpnessAnalyzer {
         guard let data = ctx.data else { return 0 }
         let px = data.bindMemory(to: UInt8.self, capacity: w * h)
 
-        // Central 70% — subjects live near the middle; corners are often
+        // Central 70% - subjects live near the middle; corners are often
         // intentionally soft (bokeh) and would poison a full-frame metric.
         let x0 = max(1, Int(Double(w) * 0.15)), x1 = min(w - 1, Int(Double(w) * 0.85))
         let y0 = max(1, Int(Double(h) * 0.15)), y1 = min(h - 1, Int(Double(h) * 0.85))

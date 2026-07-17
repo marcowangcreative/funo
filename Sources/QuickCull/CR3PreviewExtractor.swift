@@ -3,7 +3,7 @@ import ImageIO
 import AppKit
 
 /// Canon CR3 files are ISO-BMFF (MP4-family) containers. Track 1 is a
-/// full-resolution JPEG rendition of the frame — the same pixels the camera
+/// full-resolution JPEG rendition of the frame - the same pixels the camera
 /// would have written as a Large JPEG. Apple's ImageIO only surfaces the
 /// smaller 1620×1080 PRVW preview, so for crisp full-screen previews we pull
 /// the full-size JPEG straight out of the container ourselves. No RAW decode.
@@ -41,8 +41,8 @@ enum CR3PreviewExtractor {
     }
 
     /// Decode the full-size embedded JPEG downsampled to `maxPixel`.
-    /// The embedded JPEG carries NO orientation tag — the camera writes the
-    /// rotation flag on the CR3 container — so portrait frames must be
+    /// The embedded JPEG carries NO orientation tag - the camera writes the
+    /// rotation flag on the CR3 container - so portrait frames must be
     /// rotated using the container's orientation or they display sideways.
     static func decodePreview(url: URL, maxPixel: CGFloat) -> NSImage? {
         guard let jpeg = fullSizeJPEGData(from: url),

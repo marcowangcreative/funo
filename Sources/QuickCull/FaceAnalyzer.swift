@@ -17,17 +17,17 @@ struct FaceInfo: Codable {
     /// smile squints the eyes (raised cheeks push the lower lid up), so a
     /// grinning subject's eyes are genuinely narrower than a neutral face's.
     /// Judging a smiling squint by the neutral threshold produced constant
-    /// false blinks — a laughing subject in glasses reads identical to a
+    /// false blinks - a laughing subject in glasses reads identical to a
     /// closed eye. So when the face is clearly smiling we drop the line to
     /// 0.14; neutral faces keep the stricter 0.17. Real blinks still trip it
     /// (a full blink collapses the aperture well below 0.14); it just stops
     /// punishing people for enjoying themselves.
     // Smiling faces get a LOW blink line (0.10): a joyful squint reads
     // nearly closed on any geometric measure, and red drives reject
-    // decisions — a laughing kid shouldn't torpedo the frame. The squint
+    // decisions - a laughing kid shouldn't torpedo the frame. The squint
     // band above it (amber, "check") catches exactly that case instead.
     var blinking: Bool { eyeOpenness < (smiling ? 0.10 : 0.16) }
-    /// Narrow-but-not-closed: a joyful squint is genuinely ambiguous — the UI
+    /// Narrow-but-not-closed: a joyful squint is genuinely ambiguous - the UI
     /// shows it as its own state instead of guessing open/closed.
     var squinting: Bool { !blinking && eyeOpenness < 0.19 }
 }
@@ -45,7 +45,7 @@ struct FaceAnalysis: Codable {
 
 /// Cuts face crops for display panels. Cached per photo so flipping between
 /// frames of the same group doesn't re-decode; crops are cut ONLY for photos
-/// actually being inspected — never for the whole folder.
+/// actually being inspected - never for the whole folder.
 final class FaceCropper {
     static let shared = FaceCropper()
     private let cache = NSCache<NSString, NSArray>()
@@ -96,10 +96,10 @@ final class FaceCropper {
 }
 
 /// AI as an ANNOTATOR, never a gatekeeper. Everything here runs on a single
-/// background-QoS operation — macOS scheduling guarantees it yields to the
+/// background-QoS operation - macOS scheduling guarantees it yields to the
 /// user-initiated thumbnail/preview decodes, so culling speed is untouched.
 /// Results trickle onto thumbnails as they land; if you cull faster than the
-/// analyzer, you simply beat it. Uses Apple's on-device Vision + CoreImage —
+/// analyzer, you simply beat it. Uses Apple's on-device Vision + CoreImage -
 /// nothing is downloaded, nothing leaves the machine.
 final class FaceAnalyzer {
 
@@ -116,13 +116,13 @@ final class FaceAnalyzer {
     private var done = 0
     private(set) var total = 0
 
-    /// Pending operations by asset id — lets the UI bump the photo the user
+    /// Pending operations by asset id - lets the UI bump the photo the user
     /// is actually looking at to the front of the queue.
     private var pendingOps: [String: Operation] = [:] // main thread only
 
     private init() {
         // Serial: one lane can never crowd the decode queues. .utility (not
-        // .background) so macOS doesn't starve it indefinitely under load —
+        // .background) so macOS doesn't starve it indefinitely under load -
         // "the scan never happens" was background-QoS starvation.
         queue = OperationQueue()
         queue.name = "quickcull.faceanalysis"
@@ -132,7 +132,7 @@ final class FaceAnalyzer {
 
     var isScanning: Bool { total > 0 && done < total }
 
-    /// The user is looking at this photo — analyze it next.
+    /// The user is looking at this photo - analyze it next.
     func prioritize(_ id: String) {
         pendingOps[id]?.queuePriority = .veryHigh
     }
@@ -163,7 +163,7 @@ final class FaceAnalyzer {
         onProgress?(0, 0)
     }
 
-    /// THE faces switch — deliberately the same preference as the expanded
+    /// THE faces switch - deliberately the same preference as the expanded
     /// view's faces panel (Tab). The panel IS the feature: panel open →
     /// scanning runs; panel closed → no watts spent looking. One concept,
     /// one control, no separate toolbar toggle.
@@ -198,7 +198,7 @@ final class FaceAnalyzer {
             return
         }
 
-        // Never scan photos still on a memory card — every analysis is a
+        // Never scan photos still on a memory card - every analysis is a
         // multi-MB read stealing bandwidth from the thumbnails the user is
         // actually waiting on. Cards get analyzed after ingest, from the SSD.
         let pending = assets.filter { results[$0.id] == nil && !FileOps.isMemoryCard($0.url) }
@@ -263,8 +263,8 @@ final class FaceAnalyzer {
 
             // Pass 2: four overlapping quadrants at full analysis resolution.
             // A kid's face that spans 40px in the whole frame spans ~110px in
-            // its quadrant. Triggered by ANY hint of a group — two faces, or
-            // one small face — so a weak whole-frame pass can't silently
+            // its quadrant. Triggered by ANY hint of a group - two faces, or
+            // one small face - so a weak whole-frame pass can't silently
             // disable its own rescue (the "found 2 of 25" failure mode).
             let smallFacePresent = found.contains { $0.rect.height < 0.14 }
             if found.count >= 2 || smallFacePresent {
@@ -285,7 +285,7 @@ final class FaceAnalyzer {
 
             // Pass 3: per-face landmark REFINEMENT for small faces. In a
             // group shot a face can be ~100px tall in the analysis image,
-            // leaving the eye region ~25px wide — the landmark net is fitting
+            // leaving the eye region ~25px wide - the landmark net is fitting
             // a contour through noise, and eye-state judgments downstream
             // (blink/squint, and glasses especially) inherit that noise.
             // Re-running landmarks on a tight crop lets the face fill the
@@ -340,19 +340,19 @@ final class FaceAnalyzer {
         var out: [DetectedFace] = []
         for observation in request.results ?? [] {
             // Pareidolia gate: Vision sometimes "finds" a face in skin-toned
-            // texture — clasped hands, elbows, tree bark. Hallucinations
+            // texture - clasped hands, elbows, tree bark. Hallucinations
             // usually come back WITHOUT fitted eye landmarks, which then
             // defaulted to "eyes wide open, quality fine" and green-ringed a
             // hand. No eyes → nothing to triage → not a face we show.
             guard let landmarks = observation.landmarks,
                   let leftEye = landmarks.leftEye, let rightEye = landmarks.rightEye else { continue }
-            // Pareidolia gate 2: landmarks EXISTING isn't enough — Vision
+            // Pareidolia gate 2: landmarks EXISTING isn't enough - Vision
             // happily hallucinates "eyes" on toes, hands, and bokeh blobs
             // (a sandaled foot shipped a green ring to prove it). Demand the
             // landmarks be ARRANGED like a face: decent confidence, eyes
             // ordered left-to-right with real separation, roughly level, and
-            // a mouth clearly below them. Real faces — even tilted, even in
-            // profile-ish poses — pass with margin; body parts don't.
+            // a mouth clearly below them. Real faces - even tilted, even in
+            // profile-ish poses - pass with margin; body parts don't.
             guard landmarks.confidence >= 0.5 else { continue }
             let le = Self.centroid(leftEye)
             let re = Self.centroid(rightEye)
@@ -406,7 +406,7 @@ final class FaceAnalyzer {
         // Open-mouth grin: corner-lift collapses toward zero when the mouth is
         // open (the corners sit near mid-mouth), so an obvious teeth-baring
         // smile read as "not smiling." Add a term for a mouth that is OPEN and
-        // clearly wider than it is tall — a grin, not an O of surprise/speech.
+        // clearly wider than it is tall - a grin, not an O of surprise/speech.
         let ys = pts.map { $0.y }
         let openHeight = (ys.max() ?? centerY) - (ys.min() ?? centerY)
         let grin: CGFloat = (openHeight > 0.05 && width > openHeight * 1.4) ? (openHeight - 0.05) * 0.6 : 0
@@ -415,12 +415,12 @@ final class FaceAnalyzer {
 
     /// Height/width ratio of the eye outline in face-normalized coordinates.
     private static func eyeOpenness(_ region: VNFaceLandmarkRegion2D?) -> CGFloat {
-        // Spread of the lid points around the corner-to-corner CHORD — not the
+        // Spread of the lid points around the corner-to-corner CHORD - not the
         // bounding box. The bbox conflated opening with curvature: a fully
         // closed eye arced upward by a big smile has bbox height from the arc
         // alone, so it read "open" (the green-ringed closed-eyed kid). An open
         // eye has points on BOTH sides of the chord (upper lid above, lower
-        // below); a closed eye — however curved — has all its points on one
+        // below); a closed eye - however curved - has all its points on one
         // arc, so its above/below spread collapses toward zero.
         guard let region, region.pointCount >= 4 else { return 1 }
         var pts: [CGPoint] = []
@@ -439,7 +439,7 @@ final class FaceAnalyzer {
         return (maxOff - minOff) / chord
     }
 
-    /// Small standalone decode — deliberately does NOT touch ThumbnailLoader's
+    /// Small standalone decode - deliberately does NOT touch ThumbnailLoader's
     /// caches or queues, so analysis can never evict or delay UI pixels.
     /// Also used by the inspector to cut face crops (same orientation as the
     /// rects were computed in).

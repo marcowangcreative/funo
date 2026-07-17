@@ -1,6 +1,6 @@
 import Foundation
 
-/// XMP sidecar read/write — the bridge that makes stars, color labels and
+/// XMP sidecar read/write - the bridge that makes stars, color labels and
 /// rotation visible to Lightroom, Photo Mechanic, Capture One, Bridge…
 ///
 /// Rules:
@@ -8,20 +8,20 @@ import Foundation
 /// - A sidecar authored by another app (Lightroom develop settings,
 ///   Photo Mechanic prefs) is NEVER regenerated. Rating/label changes are
 ///   SURGICAL: only the xmp:Rating / xmp:Label attribute values change,
-///   every other byte survives verbatim. (Refusing to write at all — the
-///   old rule — meant culls silently never reached Lightroom for anyone
+///   every other byte survives verbatim. (Refusing to write at all - the
+///   old rule - meant culls silently never reached Lightroom for anyone
 ///   re-culling a folder PM or LR had already touched.)
 /// - Foreign orientation is never touched (it can interact with develop
 ///   settings); rotation only lands in sidecars WE authored.
-/// - Writes are atomic and happen on a background queue, debounced —
+/// - Writes are atomic and happen on a background queue, debounced -
 ///   the advance key never waits on disk.
 enum XMPSidecar {
 
     private static let marker = "funo"
-    /// Sidecars written before the rename carry the old toolkit string —
+    /// Sidecars written before the rename carry the old toolkit string -
     /// they are still OURS to update, not foreign files to protect.
     private static let legacyMarker = "QuickCull"
-    /// Lightroom's default label vocabulary — matches Theme.labelNames.
+    /// Lightroom's default label vocabulary - matches Theme.labelNames.
     private static let labelNames = ["", "Red", "Yellow", "Green", "Blue", "Purple"]
 
     static func sidecarURL(for photoURL: URL) -> URL {
@@ -70,7 +70,7 @@ enum XMPSidecar {
     /// Update ONLY xmp:Rating / xmp:Label inside someone else's sidecar.
     /// Handles both attribute form (PM, LR) and element form; inserts the
     /// attribute after rdf:about if absent. Everything the authoring app
-    /// wrote — develop settings, photomechanic:* prefs — survives verbatim.
+    /// wrote - develop settings, photomechanic:* prefs - survives verbatim.
     private static func surgicalUpdate(_ content: String, rating: Int, label: Int, to sidecar: URL) -> Bool {
         var s = content
 

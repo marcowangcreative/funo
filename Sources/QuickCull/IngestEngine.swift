@@ -4,11 +4,11 @@ import CryptoKit
 /// Card ingest: copy media off memory cards as fast as the hardware allows.
 ///
 /// Speed levers (software's job is to not get in the way):
-/// - Cards copy IN PARALLEL — two readers are two independent pipes.
-/// - Within a card: strictly sequential, 8 MB blocks — no seek thrash,
+/// - Cards copy IN PARALLEL - two readers are two independent pipes.
+/// - Within a card: strictly sequential, 8 MB blocks - no seek thrash,
 ///   no per-file syscall overhead dominating small files.
 /// - SHA-256 computed from the bytes already in memory during the copy
-///   (free), stored for deferred verification — never a second read pass
+///   (free), stored for deferred verification - never a second read pass
 ///   blocking the transfer.
 /// - Writes land as ".qcpart" then rename: a yanked cable can't leave a
 ///   half-file that looks real.
@@ -28,6 +28,17 @@ final class IngestJob {
     var onProgress: ((Progress) -> Void)?
     /// Main thread: (copied, skipped, errors)
     var onComplete: ((Int, Int, [String]) -> Void)?
+
+    /// COPY AS pattern - {iseq} = 2-digit import number, {seq} = 4-digit
+    /// file counter. nil/empty = keep original names. RAW+JPEG pairs share
+    /// a source stem, so they share a renamed stem - pairs never split.
+    var renamePattern: String?
+    var ingestNumber = 1
+    /// NEW ONLY: same name + same size already at destination → skip.
+    var skipExisting = true
+    /// STRUCTURE: true = keep the card's DCIM subfolders at destination.
+    var preserveFolders = false
+    private var stemMap: [String: String] = [:]
 
     private var cancelled = false
     private var progress = Progress()
@@ -80,6 +91,27 @@ final class IngestJob {
         return files
     }
 
+    /// Tokens: {seq} → 0001 file counter · {iseq} → 04 import number ·
+    /// {date} → 20260717 capture date · {name} → original stem. A pattern
+    /// with nothing unique per file ({seq} or {name}) gets _0001 appended -
+    /// otherwise every file collides.
+    static func applyPattern(_ pattern: String, seq: Int, ingest: Int,
+                             date: Date = Date(), originalStem: String = "") -> String {
+        var stem = pattern
+            .replacingOccurrences(of: "{iseq}", with: String(format: "%02d", ingest))
+            .replacingOccurrences(of: "{seq}", with: String(format: "%04d", seq))
+            .replacingOccurrences(of: "{name}", with: originalStem)
+        if stem.contains("{date}") {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd"
+            stem = stem.replacingOccurrences(of: "{date}", with: formatter.string(from: date))
+        }
+        if !pattern.contains("{seq}") && !pattern.contains("{name}") {
+            stem += String(format: "_%04d", seq)
+        }
+        return stem
+    }
+
     // MARK: - The job
 
     func cancel() {
@@ -87,8 +119,8 @@ final class IngestJob {
     }
 
     /// Sources can be whole cards, individual DCIM subfolders, any mix.
-    /// Files are grouped into ONE sequential lane per physical volume —
-    /// two subfolders of the same card must never compete for its pipe —
+    /// Files are grouped into ONE sequential lane per physical volume -
+    /// two subfolders of the same card must never compete for its pipe -
     /// while different cards run fully in parallel.
     func start(sources: [URL], destination: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -108,6 +140,26 @@ final class IngestJob {
                     totalBytes += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
                 }
             }
+            // Rename map: sequential by name across the WHOLE run, one
+            // entry per stem - built before any lane starts, read-only after.
+            if let pattern = self.renamePattern, !pattern.isEmpty {
+                let all = lanes.values.flatMap { $0 }
+                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                var seq = 0
+                var map: [String: String] = [:]
+                for file in all {
+                    let stem = file.deletingPathExtension().lastPathComponent
+                    if map[stem] == nil {
+                        seq += 1
+                        let captured = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                            .contentModificationDate ?? Date()
+                        map[stem] = Self.applyPattern(pattern, seq: seq, ingest: self.ingestNumber,
+                                                      date: captured, originalStem: stem)
+                    }
+                }
+                self.stemMap = map
+            }
+
             self.accounting.sync {
                 self.progress.filesTotal = total
                 self.progress.bytesTotal = totalBytes
@@ -132,12 +184,22 @@ final class IngestJob {
     }
 
     private func ingestOne(_ source: URL, to destination: URL) {
-        let name = source.lastPathComponent
+        let sourceStem = source.deletingPathExtension().lastPathComponent
+        let name: String = stemMap[sourceStem].map { renamed in
+            let ext = source.pathExtension
+            return ext.isEmpty ? renamed : renamed + "." + ext
+        } ?? source.lastPathComponent
+        var targetDir = destination
+        if preserveFolders {
+            targetDir = destination.appendingPathComponent(source.deletingLastPathComponent().lastPathComponent)
+            try? FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        }
         let size = Int64((try? source.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
 
         // Incremental: same name + same size already at destination → skip.
-        let naive = destination.appendingPathComponent(name)
-        if let existing = try? FileManager.default.attributesOfItem(atPath: naive.path),
+        let naive = targetDir.appendingPathComponent(name)
+        if skipExisting,
+           let existing = try? FileManager.default.attributesOfItem(atPath: naive.path),
            (existing[.size] as? NSNumber)?.int64Value == size {
             accounting.sync {
                 progress.filesDone += 1
@@ -151,7 +213,7 @@ final class IngestJob {
 
         // Different-size collision (e.g. same filename on two cards) →
         // unique name instead of overwrite or skip.
-        let dest = FileOps.uniqueDestination(for: name, in: destination)
+        let dest = FileOps.uniqueDestination(for: name, in: targetDir)
         do {
             let sha = try streamCopy(from: source, to: dest)
             // Stash the checksum for deferred verification.
@@ -224,7 +286,7 @@ final class IngestJob {
 
         try fm.moveItem(at: partial, to: dest)
 
-        // Preserve the card's timestamps — capture-time sorting depends on it.
+        // Preserve the card's timestamps - capture-time sorting depends on it.
         if let attrs = try? fm.attributesOfItem(atPath: source.path) {
             var preserved: [FileAttributeKey: Any] = [:]
             if let mtime = attrs[.modificationDate] { preserved[.modificationDate] = mtime }

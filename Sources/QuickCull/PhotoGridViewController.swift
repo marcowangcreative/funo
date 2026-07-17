@@ -74,7 +74,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         thumbView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(thumbView)
 
-        nameLabel.font = Theme.mono(10.5)
+        nameLabel.font = Theme.monoCaption
         nameLabel.textColor = Theme.tx1
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.usesSingleLineMode = true
@@ -85,7 +85,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(nameLabel)
 
-        badgeLabel.font = Theme.mono(8, .medium)
+        badgeLabel.font = Theme.monoEyebrow
         badgeLabel.textColor = Theme.tx2
         badgeLabel.wantsLayer = true
         badgeLabel.layer?.borderColor = Theme.line.cgColor
@@ -95,9 +95,9 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         badgeLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(badgeLabel)
 
-        // Stars live in the card's top padding — on graphite, never fighting
+        // Stars live in the card's top padding - on graphite, never fighting
         // a bright image for contrast.
-        starsLabel.font = NSFont.systemFont(ofSize: 11.5)
+        starsLabel.font = Theme.secondary
         starsLabel.textColor = Theme.accent
         starsLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(starsLabel)
@@ -160,7 +160,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
             starsLabel.stringValue = rating > 0 ? String(repeating: "★", count: rating) : ""
             starsLabel.textColor = Theme.accent
         }
-        // Color label tints the whole card — reads at a glance from across
+        // Color label tints the whole card - reads at a glance from across
         // the room, the way Photo Mechanic color classes do.
         let color = RatingsStore.shared.colorLabel(for: assetID)
         if color > 0 {
@@ -193,7 +193,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         let base = url.deletingPathExtension().lastPathComponent
         editingBase = base
         editCancelled = false
-        nameLabel.stringValue = base // extension protected — edit the base only
+        nameLabel.stringValue = base // extension protected - edit the base only
         nameLabel.isEditable = true
         nameLabel.isSelectable = true
         nameLabel.drawsBackground = true
@@ -266,10 +266,10 @@ final class PhotoGridViewController: NSViewController,
     private let bannerView = NSImageView()
     private let filterStrip = NSButton()
     private var filterStripHeight: NSLayoutConstraint!
-    /// View-options cluster (AI faces toggle — global state anyway — and
+    /// View-options cluster (AI faces toggle - global state anyway - and
     /// the size slider) hides when this grid is narrow.
     private var compactHiddenViews: [NSView] = []
-    /// The window footer renders our status line — (text, undo visible).
+    /// The window footer renders our status line - (text, undo visible).
     /// Only the ACTIVE tab pushes; frozen tabs stay quiet.
     var onStatusChanged: ((String, Bool) -> Void)?
 
@@ -348,18 +348,19 @@ final class PhotoGridViewController: NSViewController,
 
     /// Blank ⌘T tab: say what to do next instead of showing a void.
     func showNewTabPlaceholder() {
-        emptyLabel.stringValue = "Pick a folder in the sidebar"
+        installWelcomeIfNeeded()
+        if welcomeOverlay == nil { emptyLabel.stringValue = "Pick a folder in the sidebar" }
         bannerView.isHidden = false
     }
 
-    /// Tab is closing for good — stop watching, stop timers.
+    /// Tab is closing for good - stop watching, stop timers.
     func prepareForClose() {
         folderMonitor?.cancel()
         folderMonitor = nil
         externalReloadTimer?.invalidate()
         externalReloadTimer = nil
     }
-    /// A face-analysis result landed (asset id) — lets the preview update live.
+    /// A face-analysis result landed (asset id) - lets the preview update live.
     var onFaceResult: ((String) -> Void)?
 
     // MARK: - View setup
@@ -398,7 +399,7 @@ final class PhotoGridViewController: NSViewController,
             self?.buildContextMenu(for: ip)
         }
 
-        // Face analysis trickles in — restyle the badge on whichever card is
+        // Face analysis trickles in - restyle the badge on whichever card is
         // visible, refresh the Eyes ✓ filter (throttled), update progress.
         FaceAnalyzer.shared.onResult = { [weak self] id in
             self?.onFaceResult?(id)
@@ -451,7 +452,7 @@ final class PhotoGridViewController: NSViewController,
 
         sortDirectionButton.title = "↑"
         sortDirectionButton.isBordered = false
-        sortDirectionButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        sortDirectionButton.font = Theme.bodyStrong
         sortDirectionButton.contentTintColor = Theme.tx1
         sortDirectionButton.toolTip = "Reverse sort order"
         sortDirectionButton.target = self
@@ -467,6 +468,7 @@ final class PhotoGridViewController: NSViewController,
         sizeSlider.maxValue = 320
         sizeSlider.doubleValue = 176
         sizeSlider.controlSize = .small
+        sizeSlider.trackFillColor = Theme.accent
         sizeSlider.target = self
         sizeSlider.action = #selector(thumbSizeChanged(_:))
         sizeSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -509,20 +511,20 @@ final class PhotoGridViewController: NSViewController,
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrollView)
 
-        // The status line renders in the WINDOW footer (StatusFooterView) —
+        // The status line renders in the WINDOW footer (StatusFooterView) -
         // this grid feeds it via onStatusChanged when it's the active tab.
         compactHiddenViews = [sizeLabel, sizeSlider]
 
-        emptyLabel.font = NSFont.systemFont(ofSize: 15)
+        emptyLabel.font = Theme.headline
         emptyLabel.textColor = Theme.tx2
         emptyLabel.alignment = .center
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(emptyLabel)
 
-        // Brand mark on the EMPTY state only — the aperture scale parked at
+        // Brand mark on the EMPTY state only - the aperture scale parked at
         // ƒ/1.0. Transparent PNG, so it sits on any surround color. It shows
         // when there's no folder open (launch, blank tab) and vanishes the
-        // moment real work is on screen — the brand lives in the pauses.
+        // moment real work is on screen - the brand lives in the pauses.
         if let url = Bundle.module.url(forResource: "banner", withExtension: "png") {
             bannerView.image = NSImage(contentsOf: url)
         }
@@ -577,13 +579,69 @@ final class PhotoGridViewController: NSViewController,
             emptyLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
 
             // Anchored to the bottom edge, like an engraving on the body of
-            // the instrument — not floating in the void mid-window.
+            // the instrument - not floating in the void mid-window.
             bannerView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             bannerView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -28),
             bannerView.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
             bannerView.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.55),
             bannerView.heightAnchor.constraint(equalTo: bannerView.widthAnchor, multiplier: 254.0 / 1600.0)
         ])
+
+        installWelcomeIfNeeded()
+    }
+
+    // MARK: - First-open welcome
+
+    private var welcomeOverlay: NSStackView?
+
+    /// First open is a void - a little hand-holding, engraved in brass.
+    /// Gone the moment a folder opens; gone forever via "Don't show again".
+    private func installWelcomeIfNeeded() {
+        guard currentFolder == nil,
+              !UserDefaults.standard.bool(forKey: "QuickCullHideWelcome"),
+              welcomeOverlay == nil else { return }
+        let eyebrowLabel = NSTextField(labelWithString: "")
+        eyebrowLabel.attributedStringValue = NSAttributedString(string: "GET STARTED", attributes: [
+            .font: Theme.monoEyebrow, .foregroundColor: Theme.tx2, .kern: 1.4
+        ])
+        let headline = NSTextField(labelWithString: "Insert a memory card - or open a folder.")
+        headline.font = Theme.headline
+        headline.textColor = Theme.accent
+        let sub = NSTextField(wrappingLabelWithString:
+            "Pop a card in and ingest opens by itself. Or pick any folder of photos from the sidebar - no importing, no catalog.")
+        sub.font = Theme.secondary
+        sub.textColor = Theme.tx2
+        sub.alignment = .center
+        sub.preferredMaxLayoutWidth = 400
+        sub.isSelectable = false
+        let dismiss = NSButton(title: "Don't show this again", target: self, action: #selector(dismissWelcome(_:)))
+        dismiss.isBordered = false
+        dismiss.font = Theme.caption
+        dismiss.contentTintColor = .tertiaryLabelColor
+        let stack = NSStackView(views: [eyebrowLabel, headline, sub, dismiss])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.setCustomSpacing(6, after: eyebrowLabel)
+        stack.setCustomSpacing(18, after: sub)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -20),
+            sub.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+        ])
+        welcomeOverlay = stack
+    }
+
+    private func removeWelcome() {
+        welcomeOverlay?.removeFromSuperview()
+        welcomeOverlay = nil
+    }
+
+    @objc private func dismissWelcome(_ sender: Any?) {
+        UserDefaults.standard.set(true, forKey: "QuickCullHideWelcome")
+        removeWelcome()
     }
 
     private func hairline() -> NSView {
@@ -607,7 +665,7 @@ final class PhotoGridViewController: NSViewController,
         }
     }
 
-    /// One click out of any filtered view — the "my photos disappeared"
+    /// One click out of any filtered view - the "my photos disappeared"
     /// escape hatch.
     @objc private func clearAllFilters(_ sender: Any?) {
         starThreshold = nil
@@ -641,10 +699,10 @@ final class PhotoGridViewController: NSViewController,
             let names = colorFilter.sorted().map { $0 == 0 ? "unlabeled" : Theme.labelNames[$0].lowercased() }
             parts.append(names.joined(separator: "/"))
         }
-        let text = "Showing \(displayedAssets.count) of \(allAssets.count)  ·  filtered to \(parts.joined(separator: " + "))   —   Show All ✕"
+        let text = "Showing \(displayedAssets.count) of \(allAssets.count)  ·  filtered to \(parts.joined(separator: " + "))   -   Show All ✕"
         filterStrip.attributedTitle = NSAttributedString(string: text, attributes: [
             .foregroundColor: Theme.accent,
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold)
+            .font: Theme.secondaryStrong
         ])
         filterStrip.isHidden = false
         filterStripHeight.constant = 26
@@ -665,7 +723,8 @@ final class PhotoGridViewController: NSViewController,
     // MARK: - Folder loading & filtering
 
     func loadFolder(_ url: URL) {
-        // History: only genuine folder CHANGES push an entry — reloads of
+        removeWelcome()
+        // History: only genuine folder CHANGES push an entry - reloads of
         // the same folder (watcher, undo, rename) never pollute the stack.
         if !navigatingHistory,
            let current = currentFolder,
@@ -707,7 +766,7 @@ final class PhotoGridViewController: NSViewController,
     /// Sidecar ratings/labels from Lightroom/Photo Mechanic are adopted so
     /// culls done elsewhere show up here.
     private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
-        // Dates only — sidecar adoption streams separately (scanSidecars).
+        // Dates only - sidecar adoption streams separately (scanSidecars).
         // A capture date needs an image-header read, 10–50× the cost of a
         // sidecar; bundling them made Lightroom/PM ratings wait ~2 s behind
         // the EXIF pass on a 2,000-RAW folder.
@@ -727,7 +786,7 @@ final class PhotoGridViewController: NSViewController,
     }
 
     /// Foreign sidecar ratings (Lightroom / Photo Mechanic culls) stream in
-    /// FAST: tiny .xmp text reads in display order, applied in chunks — the
+    /// FAST: tiny .xmp text reads in display order, applied in chunks - the
     /// first chunk is one screenful, so existing culls paint effectively
     /// with the thumbnails instead of seconds later.
     private func scanSidecars(_ assets: [PhotoAsset], generation: Int) {
@@ -809,7 +868,7 @@ final class PhotoGridViewController: NSViewController,
     }
 
     /// Reloads of the SAME folder (watcher refresh, undo, post-trash) keep
-    /// the user's scroll position — jumping to the top mid-cull because a
+    /// the user's scroll position - jumping to the top mid-cull because a
     /// sidecar landed on disk is disorienting. Genuine filter/folder changes
     /// still start at the top.
     private var preserveScrollOnNextApply = false
@@ -880,7 +939,7 @@ final class PhotoGridViewController: NSViewController,
 
     func updateStatus() {
         // A flash (esp. an undoable one) owns the status line until it
-        // expires — routine stat refreshes must not stomp it.
+        // expires - routine stat refreshes must not stomp it.
         guard flashTimer?.isValid != true else { return }
         guard currentFolder != nil else {
             pushStatus("Open a folder to begin. Nothing to import.")
@@ -942,7 +1001,7 @@ final class PhotoGridViewController: NSViewController,
         return item
     }
 
-    /// Coalesced "what's on screen now" report to the loader — keeps the
+    /// Coalesced "what's on screen now" report to the loader - keeps the
     /// visible cells at the front of slow-volume decode queues.
     private var focusPassScheduled = false
 
@@ -976,7 +1035,7 @@ final class PhotoGridViewController: NSViewController,
     // MARK: - Selection
 
     var selectedIndex: Int? {
-        // selectionIndexPaths is a SET — `.first` on a multi-selection is
+        // selectionIndexPaths is a SET - `.first` on a multi-selection is
         // hash-order roulette (Space on a range opened a random middle
         // photo). The first of the range, deterministically.
         collectionView.selectionIndexPaths.map(\.item).min()
@@ -1018,7 +1077,7 @@ final class PhotoGridViewController: NSViewController,
         flash("Selection cleared")
     }
 
-    // MARK: - Clipboard (⌘C copy, ⌘X cut, ⌘V paste — files, like Finder
+    // MARK: - Clipboard (⌘C copy, ⌘X cut, ⌘V paste - files, like Finder
     // wishes it worked)
 
     /// App-global: cut state survives tab switches. URLs also land on the
@@ -1036,8 +1095,8 @@ final class PhotoGridViewController: NSViewController,
         pb.writeObjects(urls as [NSURL])
         Self.cutPendingPaths = cut ? Set(urls.map { $0.path }) : nil
         let n = urls.count
-        flash(cut ? "Cut \(n) photo\(n == 1 ? "" : "s") — ⌘V in another folder moves them"
-                  : "Copied \(n) photo\(n == 1 ? "" : "s") — ⌘V in a folder pastes them")
+        flash(cut ? "Cut \(n) photo\(n == 1 ? "" : "s") - ⌘V in another folder moves them"
+                  : "Copied \(n) photo\(n == 1 ? "" : "s") - ⌘V in a folder pastes them")
     }
 
     func pasteIntoCurrentFolder() {
@@ -1056,7 +1115,7 @@ final class PhotoGridViewController: NSViewController,
         flash("\(isCut ? "Moving" : "Copying") \(urls.count) photo\(urls.count == 1 ? "" : "s")…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Cross-folder collisions ask, like Finder. Same-folder ⌘V is
-            // excluded from the count — pasting in place means "duplicate",
+            // excluded from the count - pasting in place means "duplicate",
             // and it keeps both without asking.
             let collisions = FileOps.collisionCount(urls, in: folder)
             let run: (FileOps.Collision) -> Void = { policy in
@@ -1066,7 +1125,7 @@ final class PhotoGridViewController: NSViewController,
                     guard let self else { return }
                     FileOpsHistory.push("\(isCut ? "move" : "copy") to \(folder.lastPathComponent)",
                                         kind: isCut ? .move : .copy, result.records)
-                    let skippedNote = result.skipped > 0 ? " — \(result.skipped) skipped" : ""
+                    let skippedNote = result.skipped > 0 ? " - \(result.skipped) skipped" : ""
                     self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)")
                     self.reloadCurrentFolderPreservingSelection()
                 }
@@ -1104,7 +1163,7 @@ final class PhotoGridViewController: NSViewController,
         flash(message)
     }
 
-    /// External change (undo, Finder, another app) — reload holding position.
+    /// External change (undo, Finder, another app) - reload holding position.
     func noteExternalChange(message: String?) {
         if let message { flash(message) }
         reloadCurrentFolderPreservingSelection()
@@ -1135,7 +1194,7 @@ final class PhotoGridViewController: NSViewController,
     private var externalReloadTimer: Timer?
     private var lastSelfLoadAt = Date.distantPast
 
-    /// Our own XMP sidecar flushes tickle the folder watcher — treat them
+    /// Our own XMP sidecar flushes tickle the folder watcher - treat them
     /// like self-loads so we don't reload (and re-adopt) our own writes.
     private var xmpFlushObserver: NSObjectProtocol?
 
@@ -1151,7 +1210,7 @@ final class PhotoGridViewController: NSViewController,
     private var watchGeneration = 0
     private var observingMoves = false
 
-    /// Our own drag-moves reload the source grid IMMEDIATELY — the watcher
+    /// Our own drag-moves reload the source grid IMMEDIATELY - the watcher
     /// path is throttled (correctly, for ingests) and left moved photos
     /// lingering on screen for a beat after a drop.
     private func observeFileMoves() {
@@ -1163,7 +1222,7 @@ final class PhotoGridViewController: NSViewController,
                   let sources = note.userInfo?["sources"] as? [String],
                   let folder = self.currentFolder,
                   sources.contains(folder.path) else { return }
-            // The moved photos are GONE — clear selection before the reload,
+            // The moved photos are GONE - clear selection before the reload,
             // or the collection view re-applies the old index paths to
             // whatever photos now occupy those positions ("random" highlight).
             self.collectionView.deselectItems(at: self.collectionView.selectionIndexPaths)
@@ -1172,12 +1231,30 @@ final class PhotoGridViewController: NSViewController,
         }
     }
 
+    /// A card is about to be ejected. If this tab is looking at it, drop
+    /// the folder watcher - its O_EVTONLY descriptor pins the volume for
+    /// as long as the tab lives, even in the background. The watcher comes
+    /// back automatically on the next loadFolder.
+    func releaseVolumeHold(under volumePaths: [String]) {
+        guard let folder = currentFolderURL?.path else { return }
+        let mine = folder.hasSuffix("/") ? folder : folder + "/"
+        for path in volumePaths {
+            let prefix = path.hasSuffix("/") ? path : path + "/"
+            if mine.hasPrefix(prefix) {
+                watchGeneration += 1        // orphan any in-flight open()
+                folderMonitor?.cancel()     // cancel handler closes the fd
+                folderMonitor = nil
+                return
+            }
+        }
+    }
+
     private func watchFolder(_ url: URL) {
         observeXMPFlushes()
         observeFileMoves()
         folderMonitor?.cancel()
         folderMonitor = nil
-        // open() blocks while a sleeping external drive wakes its USB link —
+        // open() blocks while a sleeping external drive wakes its USB link -
         // paying that ON THE MAIN THREAD was a visible hitch in the folder
         // click. Open in the background; install the source back on main.
         // The generation token drops a late fd if the user has already
@@ -1209,15 +1286,15 @@ final class PhotoGridViewController: NSViewController,
 
     private func scheduleExternalReload() {
         // Frozen background tab: remember that the folder changed and do
-        // the reload when the tab is next activated — zero work until then.
+        // the reload when the tab is next activated - zero work until then.
         guard isActiveTab else {
             reloadPendingWhileInactive = true
             return
         }
-        // Our own operations already reload — only react to changes we
+        // Our own operations already reload - only react to changes we
         // didn't cause (Finder, another app, an ingest in progress).
         guard Date().timeIntervalSince(lastSelfLoadAt) > 1.0 else { return }
-        // THROTTLE, not debounce: during an ingest, events never stop —
+        // THROTTLE, not debounce: during an ingest, events never stop -
         // a debounce that resets per event would wait for quiet that never
         // comes and show nothing until the very end. First event schedules
         // the refresh; the stream doesn't push it back.
@@ -1234,7 +1311,7 @@ final class PhotoGridViewController: NSViewController,
         }
     }
 
-    /// Reload keeping the SAME PHOTO selected (by identity, not index) —
+    /// Reload keeping the SAME PHOTO selected (by identity, not index) -
     /// files landing mid-ingest shift indexes constantly.
     private func reloadCurrentFolderPreservingSelection() {
         pendingSelectionID = selectedAsset?.id
@@ -1254,13 +1331,13 @@ final class PhotoGridViewController: NSViewController,
     }
 
     /// A flash for reversible file operations: the message plus a clickable
-    /// Undo button (5s) — ⌘Z knowledge not required.
+    /// Undo button (5s) - ⌘Z knowledge not required.
     private func flashUndoable(_ text: String) {
         flash(text, duration: 5.0, undoable: true)
     }
 
     /// Re-select a set of photos by id (display order preserved by the
-    /// collection view), focusing/scrolling to one of them — used when
+    /// collection view), focusing/scrolling to one of them - used when
     /// returning from a selection-scoped expanded pass so the working set
     /// survives the round trip.
     func select(ids: [String], focusID: String) {
@@ -1282,7 +1359,7 @@ final class PhotoGridViewController: NSViewController,
         if let asset = selectedAsset { onSelectionChanged?(asset) }
     }
 
-    /// (index, filename) pairs for the ⌘F palette — visible photos only,
+    /// (index, filename) pairs for the ⌘F palette - visible photos only,
     /// so a jump target is always somewhere the grid can actually go.
     func searchablePhotos() -> [(Int, String)] {
         displayedAssets.enumerated().map { ($0.offset, $0.element.filename) }
@@ -1294,7 +1371,7 @@ final class PhotoGridViewController: NSViewController,
         collectionView.deselectItems(at: collectionView.selectionIndexPaths)
         collectionView.selectItems(at: [ip], scrollPosition: .nearestHorizontalEdge)
         selectionAnchor = index
-        // Warm the full preview so Space is instant — but not on a memory
+        // Warm the full preview so Space is instant - but not on a memory
         // card, where arrow-scrolling would trigger a multi-MB read per
         // keystroke and starve the thumbnails.
         let url = displayedAssets[index].url
@@ -1370,7 +1447,7 @@ final class PhotoGridViewController: NSViewController,
         // other key let it pass so ⌃-combos aren't silently hijacked.
         if ctrl, !["0", "1", "2", "3", "4", "5"].contains(chars) { return false }
         switch chars {
-        // No auto-advance in the grid — advancing belongs to the expanded
+        // No auto-advance in the grid - advancing belongs to the expanded
         // view's rate-and-step rhythm. In a contact sheet you're often
         // rating a multi-selection or judging in place; jumping the
         // selection is disorienting.
@@ -1395,7 +1472,7 @@ final class PhotoGridViewController: NSViewController,
             applyToSelection(advance: false) { RatingsStore.shared.toggleRejected($0) }
             return true
         case "u":
-            // Unlabel — clears the color outright (vs. re-pressing its key).
+            // Unlabel - clears the color outright (vs. re-pressing its key).
             applyToSelection(advance: false) { RatingsStore.shared.setColorLabel(0, for: $0) }
             return true
         case "[", "]":
@@ -1555,7 +1632,7 @@ final class PhotoGridViewController: NSViewController,
         RatingsStore.shared.flushXMPNow()
         LightroomBridge.send(urls) { [weak self] ok in
             self?.flash(ok
-                ? "Sent \(urls.count) photo\(urls.count == 1 ? "" : "s") to Lightroom — confirm the import there"
+                ? "Sent \(urls.count) photo\(urls.count == 1 ? "" : "s") to Lightroom - confirm the import there"
                 : "Couldn't reach Lightroom")
         }
     }
@@ -1617,7 +1694,7 @@ final class PhotoGridViewController: NSViewController,
         guard assets.count > 1 else { return }
         let alert = NSAlert()
         alert.messageText = "Rename \(assets.count) photos in sequence"
-        alert.informativeText = "Result: BaseName + number (start value sets the padding — “001” gives three digits). Order follows the current sort."
+        alert.informativeText = "Result: BaseName + number (start value sets the padding - “001” gives three digits). Order follows the current sort."
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
         let baseField = NSTextField(frame: .zero)

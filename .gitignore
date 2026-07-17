@@ -5,3 +5,5 @@ _to_delete/
 *.xcodeproj
 .swiftpm/
 # DMGs in site/ ARE tracked deliberately — they're the download the site serves.
+.vercel
+.env*

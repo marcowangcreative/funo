@@ -1,7 +1,7 @@
 import Foundation
 import ImageIO
 
-/// A single photo in a folder. The file on disk is the source of truth —
+/// A single photo in a folder. The file on disk is the source of truth -
 /// this struct is just a lightweight handle to it.
 struct PhotoAsset: Hashable {
     let url: URL
@@ -40,7 +40,7 @@ enum FolderScanner {
         let pairedJPEGCount: Int
     }
 
-    /// Shallow, non-recursive scan of one directory. Never walks subfolders —
+    /// Shallow, non-recursive scan of one directory. Never walks subfolders -
     /// clicking a wedding folder must not crawl the whole card.
     static func scan(_ folder: URL) -> ScanResult {
         let start = Date()

@@ -3,7 +3,7 @@ import CoreGraphics
 import ImageIO
 
 /// CGImage rotation utilities. Two jobs:
-/// 1. Apply the CR3 *container's* orientation to its embedded JPEG — the
+/// 1. Apply the CR3 *container's* orientation to its embedded JPEG - the
 ///    camera writes the rotation flag on the container, not the JPEG bytes,
 ///    so portrait frames decode sideways without this.
 /// 2. Apply the user's manual [ / ] rotation.

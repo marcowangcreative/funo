@@ -10,7 +10,7 @@ struct HistogramData {
     var shadowPct: Float      // % of pixels with a channel at/near 0
 }
 
-/// RGB histogram with clipping indicators — the core "is this exposure
+/// RGB histogram with clipping indicators - the core "is this exposure
 /// recoverable" instrument. Channels overlay with additive blending so
 /// overlaps read white (the classic Photoshop/PM look); the blown ends get
 /// a red/blue flag when a channel is clipping.
@@ -75,7 +75,7 @@ final class HistogramView: NSView {
         func label(_ text: String, _ color: NSColor, rightAligned: Bool) {
             let attrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: color,
-                .font: NSFont.monospacedSystemFont(ofSize: 8.5, weight: .semibold)
+                .font: Theme.monoEyebrow
             ]
             let s = NSAttributedString(string: text, attributes: attrs)
             let size = s.size()
@@ -157,7 +157,7 @@ final class HistogramView: NSView {
 final class InspectorViewController: NSViewController {
 
     private let thumbView = NSImageView()
-    private let nameLabel = NSTextField(labelWithString: "—")
+    private let nameLabel = NSTextField(labelWithString: "-")
     private let subLabel = NSTextField(labelWithString: "")
     private let starsLabel = NSTextField(labelWithString: "")
     private var swatchButtons: [NSButton] = []
@@ -203,17 +203,17 @@ final class InspectorViewController: NSViewController {
         thumbView.layer?.backgroundColor = NSColor.black.cgColor
         thumbView.translatesAutoresizingMaskIntoConstraints = false
 
-        nameLabel.font = Theme.mono(11)
+        nameLabel.font = Theme.monoData
         nameLabel.textColor = Theme.tx0
         nameLabel.lineBreakMode = .byTruncatingMiddle
 
-        subLabel.font = Theme.mono(10)
+        subLabel.font = Theme.monoCaption
         subLabel.textColor = Theme.tx2
         subLabel.lineBreakMode = .byTruncatingTail
 
         starsLabel.attributedStringValue = Theme.stars(0, size: 16)
 
-        // Clickable color swatches — the visible provision for color labels.
+        // Clickable color swatches - the visible provision for color labels.
         let colorRow = NSStackView()
         colorRow.orientation = .horizontal
         colorRow.spacing = 7
@@ -243,7 +243,7 @@ final class InspectorViewController: NSViewController {
         exifStack.spacing = 0
         exifStack.translatesAutoresizingMaskIntoConstraints = false
 
-        placeholder.font = NSFont.systemFont(ofSize: 12)
+        placeholder.font = Theme.secondary
         placeholder.textColor = Theme.tx2
 
         stack.addArrangedSubview(selectedHeader)
@@ -295,7 +295,7 @@ final class InspectorViewController: NSViewController {
         guard let asset else {
             placeholder.isHidden = false
             thumbView.image = nil
-            nameLabel.stringValue = "—"
+            nameLabel.stringValue = "-"
             subLabel.stringValue = ""
             starsLabel.attributedStringValue = Theme.stars(0, size: 16)
             restyleSwatches(current: 0)
@@ -310,7 +310,7 @@ final class InspectorViewController: NSViewController {
         // File size + dimensions arrive async: attributesOfItem is a stat
         // against the photo's volume, and this runs on every arrow-key
         // selection change. ONE background block (the EXIF read below)
-        // gathers both and is the only writer of subLabel — two racing
+        // gathers both and is the only writer of subLabel - two racing
         // writers was the first version of this fix, and a compile error.
         let pairNote = asset.hasJPEGPair ? " · paired JPEG hidden" : ""
         subLabel.stringValue = asset.hasJPEGPair ? "paired JPEG hidden" : ""
@@ -329,7 +329,7 @@ final class InspectorViewController: NSViewController {
             }
         }
 
-        // EXIF (header read only — cheap even for RAW) + file size, one trip.
+        // EXIF (header read only - cheap even for RAW) + file size, one trip.
         let url = asset.url
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let rows = Self.exifRows(for: url)
@@ -351,7 +351,7 @@ final class InspectorViewController: NSViewController {
         if RatingsStore.shared.isRejected(asset.id) {
             starsLabel.attributedStringValue = NSAttributedString(string: "✕ rejected", attributes: [
                 .foregroundColor: Theme.red,
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold)
+                .font: Theme.bodyStrong
             ])
         } else {
             starsLabel.attributedStringValue = Theme.stars(RatingsStore.shared.rating(for: asset.id), size: 16)
@@ -386,13 +386,13 @@ final class InspectorViewController: NSViewController {
             row.translatesAutoresizingMaskIntoConstraints = false
 
             let k = NSTextField(labelWithString: key)
-            k.font = NSFont.systemFont(ofSize: 11)
+            k.font = Theme.caption
             k.textColor = Theme.tx2
             k.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(k)
 
             let v = NSTextField(labelWithString: value)
-            v.font = Theme.mono(10.5)
+            v.font = Theme.monoCaption
             v.textColor = Theme.tx1
             v.alignment = .right
             v.lineBreakMode = .byTruncatingHead
@@ -424,7 +424,7 @@ final class InspectorViewController: NSViewController {
 
     /// One-line shooting summary for the expanded-view footer, as
     /// (key, value) pairs so the caller can set the key DIM and the value
-    /// BRIGHT — the Leica info-card trick: hierarchy by brightness, not
+    /// BRIGHT - the Leica info-card trick: hierarchy by brightness, not
     /// size. Empty key = plain value (focal length, lens name).
     static func exifSummaryParts(for url: URL) -> [(String, String)] {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -485,20 +485,20 @@ final class InspectorViewController: NSViewController {
         }
         // Resolution sits HIGH in the list, not last: the expanded view's
         // info card trims rows to a height budget, and "Size" appended at
-        // the tail fell off it — invisibly for EXIF-rich files, and exactly
+        // the tail fell off it - invisibly for EXIF-rich files, and exactly
         // when someone was trying to learn a mystery JPEG's dimensions.
         if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
             let mp = Double(w * h) / 1_000_000
             rows.append(("Size", mp >= 1 ? String(format: "%d × %d · %.0f MP", w, h, mp) : "\(w) × \(h)"))
         }
-        // The Photo-Mechanic "unusual info" pros scan for — nearly free reads.
+        // The Photo-Mechanic "unusual info" pros scan for - nearly free reads.
         if let bias = exif?[kCGImagePropertyExifExposureBiasValue] as? Double {
             rows.append(("Exp. comp", String(format: "%+.1f EV", bias)))
         }
         if let mode = exif?[kCGImagePropertyExifExposureProgram] as? Int {
-            let names = ["—", "Manual", "Program", "Aperture", "Shutter",
+            let names = ["-", "Manual", "Program", "Aperture", "Shutter",
                          "Creative", "Action", "Portrait", "Landscape"]
-            rows.append(("Mode", mode < names.count ? names[mode] : "—"))
+            rows.append(("Mode", mode < names.count ? names[mode] : "-"))
         }
         if let meter = exif?[kCGImagePropertyExifMeteringMode] as? Int {
             let names = ["Unknown", "Average", "Center-weighted", "Spot",

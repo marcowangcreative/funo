@@ -2,7 +2,7 @@ import Foundation
 
 /// Folder-structure templates: a named list of relative paths ("Ceremony",
 /// "Reception/Speeches") stamped into any folder from the sidebar.
-/// The tree stays the source of truth — a template is just a recipe.
+/// The tree stays the source of truth - a template is just a recipe.
 enum FolderTemplates {
 
     private static let key = "QuickCullFolderTemplates"

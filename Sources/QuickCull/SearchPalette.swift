@@ -1,12 +1,12 @@
 import AppKit
 
-/// ⌘F — the Spotlight-style palette. No persistent search bar (chrome you
+/// ⌘F - the Spotlight-style palette. No persistent search bar (chrome you
 /// aren't using), no catalog (the filesystem stays the only truth). One
 /// field, two kinds of answers:
-///   · photos in the CURRENT folder — "6954" jumps to MWP36954.CR3 (clients
+///   · photos in the CURRENT folder - "6954" jumps to MWP36954.CR3 (clients
 ///     reference gallery frame numbers; suffix digits are the hero match)
-///   · folders ANYWHERE — instant hits from places you've been (MRU, tabs),
-///     then async hits from Spotlight's own index (NSMetadataQuery — we
+///   · folders ANYWHERE - instant hits from places you've been (MRU, tabs),
+///     then async hits from Spotlight's own index (NSMetadataQuery - we
 ///     borrow the OS's index rather than building one).
 final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
@@ -68,7 +68,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         panel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(panel)
 
-        field.font = Theme.mono(15)
+        field.font = Theme.monoInput
         field.textColor = Theme.tx0
         field.placeholderString = "Frame · file · folder"
         field.isBordered = false
@@ -90,7 +90,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(rowsStack)
 
-        emptyLabel.font = NSFont.systemFont(ofSize: 11.5)
+        emptyLabel.font = Theme.secondary
         emptyLabel.textColor = Theme.tx2
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(emptyLabel)
@@ -180,7 +180,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             return
         }
 
-        // 1. Photos in the current folder — suffix-digit matches first.
+        // 1. Photos in the current folder - suffix-digit matches first.
         let q = query.lowercased()
         let qIsDigits = !q.isEmpty && q.allSatisfy(\.isNumber)
         var photoHits: [(Int, String, Int)] = []   // (index, name, rank)
@@ -199,7 +199,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             results.append(.photo(index: index, name: name))
         }
 
-        // 2. Folders you've been to — instant.
+        // 2. Folders you've been to - instant.
         for url in Self.recents() where url.lastPathComponent.lowercased().contains(q) {
             if results.count >= 11 { break }
             results.append(.folder(url: url, detail: shortPath(url)))
@@ -209,7 +209,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         highlighted = 0
         rebuildRows()
 
-        // 3. Spotlight, debounced — appended as macOS answers.
+        // 3. Spotlight, debounced - appended as macOS answers.
         scheduleSpotlight(query)
     }
 
@@ -278,11 +278,11 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// Engraved section label — the FACES-panel convention.
+    /// Engraved section label - the FACES-panel convention.
     private func eyebrow(_ text: String) -> NSView {
         let label = NSTextField(labelWithString: "")
         label.attributedStringValue = NSAttributedString(string: text, attributes: [
-            .font: Theme.mono(9, .medium),
+            .font: Theme.monoEyebrow,
             .foregroundColor: Theme.tx2,
             .kern: 1.4
         ])
@@ -310,11 +310,11 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = highlighted ? Theme.accent : Theme.tx2
         let t = NSTextField(labelWithString: title)
-        t.font = Theme.mono(12.5)
+        t.font = Theme.monoData
         t.textColor = Theme.tx0
         t.lineBreakMode = .byTruncatingMiddle
         let d = NSTextField(labelWithString: detail)
-        d.font = NSFont.systemFont(ofSize: 10.5)
+        d.font = Theme.caption
         d.textColor = Theme.tx2
         d.lineBreakMode = .byTruncatingHead
         let spacer = NSView()

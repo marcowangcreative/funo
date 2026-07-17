@@ -2,7 +2,7 @@ import AppKit
 
 /// Photo surround: the background photos are judged against. Chrome stays
 /// graphite; only the stage and contact-sheet backdrop change. 18% gray is
-/// the print-evaluation standard — pure dark makes everything look punchier
+/// the print-evaluation standard - pure dark makes everything look punchier
 /// than it will on paper.
 enum Surround: Int, CaseIterable {
     case black, graphite, midGray
@@ -46,13 +46,13 @@ enum Theme {
     static let tx2    = NSColor(srgbRed: 0.361, green: 0.380, blue: 0.404, alpha: 1) // tertiary
     // Aged brass, not template amber: deeper and less saturated than the
     // #E8A33D every generated dark theme ships. Same warm family (selection,
-    // stars, live state all keep their meaning) but reads engraved-metal —
+    // stars, live state all keep their meaning) but reads engraved-metal -
     // and gives the Canon-red brand mark on the empty state room to breathe.
     static let accent = NSColor(srgbRed: 0.788, green: 0.588, blue: 0.184, alpha: 1) // #C9962F brass
     static let accentText = NSColor(srgbRed: 0.082, green: 0.063, blue: 0.024, alpha: 1)
     static let red    = NSColor(srgbRed: 0.898, green: 0.282, blue: 0.302, alpha: 1)
 
-    /// Color labels 1–5 (red, yellow, green, blue, purple) — the industry
+    /// Color labels 1–5 (red, yellow, green, blue, purple) - the industry
     /// standard alongside stars; ⌃1–5 apply them (color-first swaps 1–5).
     static let labelColors: [NSColor] = [
         .clear,
@@ -64,12 +64,12 @@ enum Theme {
     ]
     static let labelNames = ["None", "Red", "Yellow", "Green", "Blue", "Purple"]
 
-    /// A keyboard key drawn as a small keycap chip — how real Mac apps show
+    /// A keyboard key drawn as a small keycap chip - how real Mac apps show
     /// shortcuts, instead of typing them into a monospace string. Words stay
     /// in the system font; only the KEY itself is a chip.
     static func keycap(_ key: String) -> NSView {
         let label = NSTextField(labelWithString: key)
-        label.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .medium)
+        label.font = Theme.monoEyebrow
         label.textColor = Theme.tx1
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -91,14 +91,14 @@ enum Theme {
     }
 
     /// One shortcut-hint row: keycap chips + system-font action words.
-    /// Rebuildable — callers empty the stack and call this again on mode change.
+    /// Rebuildable - callers empty the stack and call this again on mode change.
     static func hintRow(_ items: [(String, String)]) -> NSStackView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.spacing = 13
         for (key, action) in items {
             let word = NSTextField(labelWithString: action)
-            word.font = NSFont.systemFont(ofSize: 10.5)
+            word.font = Theme.caption
             word.textColor = Theme.tx2
             let pair = NSStackView(views: [keycap(key), word])
             pair.orientation = .horizontal
@@ -111,6 +111,35 @@ enum Theme {
     static func mono(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
         .monospacedSystemFont(ofSize: size, weight: weight)
     }
+
+    // MARK: - Type ramp - the ONLY sizes in the app.
+    //
+    // Two voices: SF for sentences, SF Mono for data (filenames, numbers,
+    // keys). Georgia Italic exists solely for the ƒ brand mark. Everything
+    // else picks from this ramp - if a new label wants a size that isn't
+    // here, the ramp wins. (The audit that prompted this found ELEVEN mono
+    // sizes and twelve system sizes, drifted in half-points nobody chose.)
+    // Exempt as artwork, not typography: star glyphs, the Lr/Ps chip
+    // letters, file-type badges' 16px-tile fit, the title bar (system
+    // chrome), and the ƒ lockup.
+
+    // mono - the data voice
+    static var monoEyebrow: NSFont { mono(9, .medium) }        // engraved labels, badges
+    static var monoCaption: NSFont { mono(10.5) }              // chips, status, small data
+    static var monoData: NSFont { mono(12) }                   // values, fields, footers
+    static var monoDataStrong: NSFont { mono(12, .semibold) }  // bright values
+    static var monoInput: NSFont { mono(15) }                  // the ⌘F field
+    static var monoDisplay: NSFont { mono(26) }                // lockup "uno"
+
+    // system - the voice
+    static var caption: NSFont { .systemFont(ofSize: 10.5) }
+    static var captionStrong: NSFont { .systemFont(ofSize: 10.5, weight: .semibold) }
+    static var secondary: NSFont { .systemFont(ofSize: 11.5) }
+    static var secondaryStrong: NSFont { .systemFont(ofSize: 11.5, weight: .semibold) }
+    static var body: NSFont { .systemFont(ofSize: 13) }
+    static var bodyStrong: NSFont { .systemFont(ofSize: 13, weight: .semibold) }
+    static var headline: NSFont { .systemFont(ofSize: 15, weight: .medium) }
+    static var display: NSFont { .systemFont(ofSize: 34) }     // ƒ lockup fallback
 
     /// "★★★☆☆"-style attributed stars: filled amber, empty graphite.
     static func stars(_ rating: Int, size: CGFloat) -> NSAttributedString {
@@ -125,13 +154,13 @@ enum Theme {
         return s
     }
 
-    /// Tracked small-caps header style — the ONE header voice app-wide.
+    /// Tracked small-caps header style - the ONE header voice app-wide.
     /// (System font, uppercased, letterspaced: reads "engraved label", not
     /// "monospace terminal", which was the generated-UI tell.)
     static func sectionTitle(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text.uppercased(), attributes: [
             .foregroundColor: tx2,
-            .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+            .font: Theme.captionStrong,
             .kern: 1.4
         ])
     }
@@ -143,7 +172,7 @@ enum Theme {
     }
 }
 
-/// Five color dots that act as an exclusive filter toggle — click a color to
+/// Five color dots that act as an exclusive filter toggle - click a color to
 /// show only that label, click it again to clear. Combines with the star
 /// filter (both apply).
 final class ColorFilterBar: NSView {
@@ -167,7 +196,7 @@ final class ColorFilterBar: NSView {
             heightAnchor.constraint(equalToConstant: 24)
         ])
         // Ring-and-gap dots: an 18pt button whose border is the selection
-        // ring, with the 12pt color dot inset as a sublayer — selecting
+        // ring, with the 12pt color dot inset as a sublayer - selecting
         // draws a ring *around* the dot with breathing room instead of
         // fattening the dot itself. Geometry never changes; only the ring
         // and alpha do.
@@ -215,7 +244,7 @@ final class ColorFilterBar: NSView {
         onChange?(selected)
     }
 
-    /// Programmatic clear — does NOT fire onChange.
+    /// Programmatic clear - does NOT fire onChange.
     func clear() {
         guard !selected.isEmpty else { return }
         selected = []
@@ -264,13 +293,13 @@ final class ColorFilterBar: NSView {
     }
 }
 
-/// The star filter, resolved: five stars and a threshold — exactly like
+/// The star filter, resolved: five stars and a threshold - exactly like
 /// rating itself. Click the 3rd star → show 3★ & up (stars 1–3 light
 /// amber); click the same star again → back to everything. Stars are a
 /// SCALE, so one threshold beats toggling levels; colors are CATEGORIES,
 /// so the dots stay multi-select. Rejects remains its own exclusive pile.
 /// Lightroom's rating comparator: at least / exactly / at most.
-/// "At most 3★" includes unrated — that's the to-do pile.
+/// "At most 3★" includes unrated - that's the to-do pile.
 enum RatingComparison: Int {
     case atLeast, exactly, atMost
     var glyph: String { ["≥", "=", "≤"][rawValue] }
@@ -361,7 +390,7 @@ final class StarFilterBar: NSView {
         addSubview(rejectsButton)
 
         let rejectsWidth = ceil(("Rejects" as NSString).size(withAttributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold)
+            .font: Theme.secondaryStrong
         ]).width) + 24
         NSLayoutConstraint.activate([
             divider.leadingAnchor.constraint(equalTo: starButtons[4].trailingAnchor, constant: 9),
@@ -404,7 +433,7 @@ final class StarFilterBar: NSView {
         onChange?(threshold, comparison, rejectsOnly)
     }
 
-    /// Programmatic reset (filter strip's Show All) — does NOT fire onChange.
+    /// Programmatic reset (filter strip's Show All) - does NOT fire onChange.
     func clear() {
         guard threshold != nil || rejectsOnly else { return }
         threshold = nil
@@ -415,7 +444,7 @@ final class StarFilterBar: NSView {
     private func restyle(animated: Bool = false) {
         // Hover previews the threshold you'd get; the set threshold is the
         // committed state. Both fill stars 1…level (Lightroom fills the run
-        // regardless of comparator — the ≥/=/≤ glyph disambiguates).
+        // regardless of comparator - the ≥/=/≤ glyph disambiguates).
         let level = hoveredStar ?? threshold ?? 0
         let previewing = hoveredStar != nil && hoveredStar != threshold
         for b in starButtons {
@@ -425,18 +454,18 @@ final class StarFilterBar: NSView {
                 : Theme.bg3
             b.attributedTitle = NSAttributedString(string: "★", attributes: [
                 .foregroundColor: color,
-                .font: NSFont.systemFont(ofSize: 14)
+                .font: Theme.body
             ])
         }
         let cmpActive = threshold != nil && !rejectsOnly
         cmpButton.attributedTitle = NSAttributedString(string: comparison.glyph, attributes: [
             .foregroundColor: cmpActive ? Theme.tx0 : Theme.tx2,
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+            .font: Theme.monoDataStrong
         ])
         (animated ? rejectsHighlight.animator() : rejectsHighlight).alphaValue = rejectsOnly ? 1 : 0
         rejectsButton.attributedTitle = NSAttributedString(string: "Rejects", attributes: [
             .foregroundColor: rejectsOnly ? Theme.accentText : Theme.tx1,
-            .font: NSFont.systemFont(ofSize: 11, weight: rejectsOnly ? .semibold : .medium)
+            .font: NSFont.systemFont(ofSize: 11.5, weight: rejectsOnly ? .semibold : .medium)
         ])
     }
 
@@ -465,7 +494,7 @@ final class StarFilterBar: NSView {
 /// Design rules this control enforces:
 /// - Frame constant, content adapts: every segment's width is measured ONCE
 ///   at the heaviest font weight it will ever render, then pinned. Selecting
-///   a segment can never change layout — the old version re-measured bold
+///   a segment can never change layout - the old version re-measured bold
 ///   titles on click and shoved everything to its right a few pixels.
 /// - Selection is a single amber pill that *slides* between segments
 ///   (0.16s ease-out) instead of teleporting.
@@ -498,7 +527,7 @@ final class FilterBar: NSView {
         addSubview(indicator)
 
         // Fixed widths, measured at the widest weight ever rendered.
-        let measureFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let measureFont = Theme.secondaryStrong
         var previous: NSView?
         for (i, title) in titles.enumerated() {
             let b = NSButton(title: "", target: self, action: #selector(tapped(_:)))
@@ -541,7 +570,7 @@ final class FilterBar: NSView {
         onChange?(selectedIndex)
     }
 
-    /// Programmatic selection (filter-strip reset etc.) — does NOT fire
+    /// Programmatic selection (filter-strip reset etc.) - does NOT fire
     /// onChange, so callers can't loop.
     func select(_ index: Int) {
         guard buttons.indices.contains(index), index != selectedIndex else { return }

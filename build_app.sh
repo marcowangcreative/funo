@@ -85,6 +85,39 @@ if [ -f "AppIcon.icns" ]; then
   ICON_KEY="<key>CFBundleIconFile</key><string>AppIcon</string>"
 fi
 
+# Brass accent for every NATIVE control - checkbox ticks, menu highlights,
+# sliders, focus rings, table selections. NSAccentColorName needs a
+# compiled asset catalog (Assets.car); actool builds it from a throwaway
+# .xcassets. #C9962F = Theme.accent, exactly.
+echo "▸ Compiling brass accent…"
+XCASSETS="$DIST/Assets.xcassets"
+mkdir -p "$XCASSETS/AccentColor.colorset"
+cat > "$XCASSETS/Contents.json" <<'JSON'
+{ "info": { "author": "xcode", "version": 1 } }
+JSON
+cat > "$XCASSETS/AccentColor.colorset/Contents.json" <<'JSON'
+{
+  "colors": [
+    {
+      "color": {
+        "color-space": "srgb",
+        "components": { "alpha": "1.000", "red": "0xC9", "green": "0x96", "blue": "0x2F" }
+      },
+      "idiom": "universal"
+    }
+  ],
+  "info": { "author": "xcode", "version": 1 }
+}
+JSON
+if xcrun actool "$XCASSETS" --compile "$APP/Contents/Resources" \
+     --platform macosx --minimum-deployment-target 13.0 >/dev/null 2>&1; then
+  ACCENT_KEY="<key>NSAccentColorName</key><string>AccentColor</string>"
+else
+  echo "  (actool unavailable - skipping accent; controls stay system-tinted)"
+  ACCENT_KEY=""
+fi
+rm -rf "$XCASSETS"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -104,6 +137,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>SUEnableAutomaticChecks</key><true/>
     $SPARKLE_KEY_ENTRY
     $ICON_KEY
+    $ACCENT_KEY
 </dict>
 </plist>
 PLIST

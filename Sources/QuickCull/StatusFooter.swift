@@ -1,7 +1,7 @@
 import AppKit
 
 /// Window root: the split view (sidebar | tabs) fills the window with ONE
-/// full-width status footer beneath both — the sidebar terminates at the
+/// full-width status footer beneath both - the sidebar terminates at the
 /// footer, and the status text lives in the window's true bottom-left.
 final class RootViewController: NSViewController {
 
@@ -59,7 +59,7 @@ final class StatusFooterView: NSView {
         topLine.translatesAutoresizingMaskIntoConstraints = false
         addSubview(topLine)
 
-        statusLabel.font = Theme.mono(10.5)
+        statusLabel.font = Theme.monoCaption
         statusLabel.textColor = Theme.tx1
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -68,7 +68,7 @@ final class StatusFooterView: NSView {
         // Gmail-style clickable Undo, shown next to undoable flashes.
         undoButton.attributedTitle = NSAttributedString(string: "Undo", attributes: [
             .foregroundColor: Theme.accent,
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .bold)
+            .font: Theme.captionStrong
         ])
         undoButton.isBordered = false
         undoButton.setButtonType(.momentaryChange)
@@ -85,10 +85,10 @@ final class StatusFooterView: NSView {
                                                name: RatingsStore.cullModeChanged, object: nil)
         refreshHints()
 
-        // Hand-off is the END of every cull — visible buttons, not buried
+        // Hand-off is the END of every cull - visible buttons, not buried
         // context-menu items. Only installed apps appear.
         // The hand-off buttons wear the REAL app icons, fetched at runtime
-        // from the installed apps via NSWorkspace (never bundled — that's
+        // from the installed apps via NSWorkspace (never bundled - that's
         // Adobe's artwork; asking the system for an app's icon is how the
         // Dock and Finder do it). Title stays for clarity; icon leads.
         func handoffButton(_ title: String, _ action: Selector, tip: String,
@@ -96,7 +96,7 @@ final class StatusFooterView: NSView {
             let b = NSButton(title: "", target: self, action: action)
             b.attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: Theme.accent,
-                .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+                .font: Theme.captionStrong
             ])
             b.image = Self.appChip(chip)
             b.imagePosition = .imageLeading
@@ -177,7 +177,7 @@ final class StatusFooterView: NSView {
     @objc private func sendLR(_ sender: Any?) { onSendLightroom?() }
     @objc private func sendPS(_ sender: Any?) { onSendPhotoshop?() }
 
-    /// Uniform graphite app chips — a filled rounded tile with the two-letter
+    /// Uniform graphite app chips - a filled rounded tile with the two-letter
     /// mark, drawn to match the keycap hints beside them. Identical treatment
     /// for both apps (Adobe's own icons don't match EACH OTHER: LrC is an
     /// outline, Ps a filled tile) and no Adobe artwork in our bundle.

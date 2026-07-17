@@ -1,14 +1,14 @@
 import AppKit
 
 /// One node in the lazy directory tree. Children are only read from disk
-/// when the user expands the folder — never recursively.
+/// when the user expands the folder - never recursively.
 final class FolderNode {
     let url: URL
     let displayName: String
     let isSectionHeader: Bool
     /// True = removable MEDIA (SD/CF card, flash stick) → card glyph.
     /// Resolved ONCE at mount enumeration; the cell renderer must never
-    /// stat the volume — statfs on a sleeping drive blocks the main thread
+    /// stat the volume - statfs on a sleeping drive blocks the main thread
     /// for the entire spin-up, which read as "lag when clicking a drive".
     let isRemovableMedia: Bool
     private var loadedChildren: [FolderNode]?
@@ -49,13 +49,13 @@ final class FolderNode {
     }
 
     /// Warm this node's children off the main thread. On an idle external
-    /// drive the first directory read stalls while the volume wakes — paying
+    /// drive the first directory read stalls while the volume wakes - paying
     /// that on a background queue means the user's expand/click finds the
     /// children already cached and the main thread never blocks on the disk.
     /// One serial queue for ALL sidebar prefetching: on the concurrent
     /// global queue, one slow volume stalling an enumeration made dispatch
     /// spawn thread after thread (20+ blocked workers in the crash log).
-    /// Serial means one directory read at a time — plenty, and bounded.
+    /// Serial means one directory read at a time - plenty, and bounded.
     private static let prefetchQueue = DispatchQueue(label: "funo.sidebar.prefetch", qos: .utility)
 
     func prefetchChildren() {
@@ -75,7 +75,7 @@ final class FolderNode {
         loadedChildren = nil
     }
 
-    /// Children if already read from disk — nil means "haven't looked yet".
+    /// Children if already read from disk - nil means "haven't looked yet".
     var childrenIfLoaded: [FolderNode]? { loadedChildren }
 }
 
@@ -112,12 +112,12 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         outlineView.delegate = self
         outlineView.registerForDraggedTypes([.fileURL])
 
-        // Right-click: folder management (rebuilt per click — see menuNeedsUpdate)
+        // Right-click: folder management (rebuilt per click - see menuNeedsUpdate)
         let menu = NSMenu()
         menu.delegate = self
         outlineView.menu = menu
 
-        // Drives appear and disappear — keep the tree truthful.
+        // Drives appear and disappear - keep the tree truthful.
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(self, selector: #selector(volumesChanged(_:)),
                               name: NSWorkspace.didMountNotification, object: nil)
@@ -161,7 +161,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     private func buildRoots() {
         let fm = FileManager.default
 
-        // Favorites first — sorted output folders one click away.
+        // Favorites first - sorted output folders one click away.
         let favorites = favoritePaths
             .filter { fm.fileExists(atPath: $0) }
             .map { FolderNode(url: URL(fileURLWithPath: $0)) }
@@ -194,7 +194,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                 let node = FolderNode(url: vol,
                                       displayName: values?.volumeName ?? vol.lastPathComponent,
                                       isRemovableMedia: values?.volumeIsRemovable ?? false)
-                // Drive rows are ROOTS — they never pass through children(of:),
+                // Drive rows are ROOTS - they never pass through children(of:),
                 // so the visibility-driven prefetch never warms them. Without
                 // this, the FIRST expand of a drive read its directory on the
                 // main thread while the disk woke. Warm them up front instead.
@@ -220,7 +220,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
             kids = node.children
         }
         // Whatever just became visible, warm its own children in the
-        // background (bounded — a folder of 200 subfolders shouldn't spawn
+        // background (bounded - a folder of 200 subfolders shouldn't spawn
         // 200 enumerations). Expansion then never touches the disk on main.
         for child in kids.prefix(30) { child.prefetchChildren() }
         return kids
@@ -250,7 +250,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
-        // Expanding an empty folder teaches us it's a leaf — repaint the row
+        // Expanding an empty folder teaches us it's a leaf - repaint the row
         // so its triangle disappears.
         guard let node = notification.userInfo?["NSObject"] as? FolderNode,
               !node.isSectionHeader,
@@ -306,20 +306,20 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
         cell.textField?.stringValue = node.displayName
         if node.isSectionHeader {
-            cell.textField?.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+            cell.textField?.font = Theme.secondaryStrong
             cell.textField?.textColor = .secondaryLabelColor
         } else {
-            cell.textField?.font = NSFont.systemFont(ofSize: 13)
+            cell.textField?.font = Theme.body
             cell.textField?.textColor = .labelColor
             // Monochrome icons: quiet grey symbols instead of the colorful
-            // Finder icons — the photos should be the only color on screen.
+            // Finder icons - the photos should be the only color on screen.
             let path = node.url.path
             let symbolName: String
             if path == "/" {
                 symbolName = "internaldrive"                    // Macintosh HD
             } else if path.hasPrefix("/Volumes/"), node.url.pathComponents.count == 3 {
                 // Only true removable MEDIA (SD/CF cards, flash sticks) get
-                // the card glyph. `volumeIsRemovable` is the narrow key —
+                // the card glyph. `volumeIsRemovable` is the narrow key -
                 // external HDDs/SSDs are merely ejectable, not removable, so
                 // they correctly get the drive glyph. (isOnRemovableVolume is
                 // deliberately broader for gentle-handling and would misfire.)
@@ -343,7 +343,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
         guard row >= 0, let node = outlineView.item(atRow: row) as? FolderNode, !node.isSectionHeader else { return }
-        // A RIGHT-click selects the row to show the context menu — it must
+        // A RIGHT-click selects the row to show the context menu - it must
         // NOT also load the folder, or the menu's "Open in New Tab" then
         // sees it already open and dedupes to a no-op. Let the menu decide.
         if let event = NSApp.currentEvent, event.type == .rightMouseDown {
@@ -360,7 +360,30 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         }
     }
 
-    /// Expand the tree down to `url`, scroll to it, select it — so a folder
+    /// Forget cached listings along the path to `url` - folders created a
+    /// moment ago (an ingest's fresh job structure) aren't in the cached
+    /// tree, and reveal() would walk right past them. Invalidate every
+    /// loaded node that is an ancestor of `url`; the reveal re-reads.
+    func refreshBranchContaining(_ url: URL) {
+        var ancestors: [FolderNode] = []
+        for group in roots {
+            ancestors.append(contentsOf: placesGroupChildren[ObjectIdentifier(group)] ?? [])
+        }
+        var index = 0
+        while index < ancestors.count {
+            let node = ancestors[index]
+            index += 1
+            let base = node.url.path
+            guard url.path == base || url.path.hasPrefix(base.hasSuffix("/") ? base : base + "/") else { continue }
+            if let kids = node.childrenIfLoaded {
+                ancestors.append(contentsOf: kids)
+                node.invalidateChildren()
+                outlineView.reloadItem(node, reloadChildren: true)
+            }
+        }
+    }
+
+    /// Expand the tree down to `url`, scroll to it, select it - so a folder
     /// opened by ⌘F is also SHOWN in the nav, not just teleported to. The
     /// walk loads at most path-depth directory listings; the prefetch queue
     /// usually has them cached already.
@@ -393,11 +416,34 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
     }
 
-    // MARK: - Drop target (drag photos onto a folder to move them)
+    /// Where-you-are is GRAPHITE; brass is reserved for what you chose.
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        GraphiteRowView()
+    }
+
+    // MARK: - Drag source (folder rows can be picked up and moved)
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let node = item as? FolderNode, !node.isSectionHeader else { return nil }
+        // Drives don't drag - moving /Volumes/X somewhere is nonsense.
+        if node.url.path.hasPrefix("/Volumes/"), node.url.pathComponents.count == 3 { return nil }
+        return node.url as NSURL
+    }
+
+    // MARK: - Drop target (drag photos or folders onto a folder)
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo,
                      proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
         guard let node = item as? FolderNode, !node.isSectionHeader else { return [] }
+        // A folder can't land inside itself or its own subtree.
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL] {
+            let target = node.url.path.hasSuffix("/") ? node.url.path : node.url.path + "/"
+            for url in urls {
+                let source = url.path.hasSuffix("/") ? url.path : url.path + "/"
+                if target == source || target.hasPrefix(source) { return [] }
+            }
+        }
         // Always drop ON the folder, never between rows.
         outlineView.setDropItem(node, dropChildIndex: NSOutlineViewDropOnItemIndex)
         // Finder semantics: plain drag MOVES, ⌥-drag COPIES. Returning .copy
@@ -427,6 +473,12 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                                         kind: copying ? .copy : .move, result.records)
                     node.invalidateChildren()
                     self?.outlineView.reloadItem(node, reloadChildren: true)
+                    // A moved FOLDER also vanishes from where it was -
+                    // refresh every source branch, not just the target.
+                    if !copying {
+                        let parents = Set(result.records.map { $0.from.deletingLastPathComponent() })
+                        for parent in parents { self?.refreshBranchContaining(parent) }
+                    }
                     self?.onFilesMoved?(result.primaries, destination)
                 }
             }
@@ -469,6 +521,26 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         node.invalidateChildren()
         outlineView.reloadItem(node, reloadChildren: true)
         outlineView.expandItem(node)
+    }
+
+    @objc private func ejectVolume(_ sender: Any?) {
+        guard let node = clickedNode else { return }
+        let volume = node.url
+        Ejector.eject(volumes: [volume]) { result in
+            // Success needs no fanfare - the didUnmount observer removes
+            // the row and the drive vanishes, exactly like Finder.
+            guard !result.succeeded else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            if let culprit = result.holders.first {
+                alert.messageText = "“\(node.displayName)” wasn't ejected because “\(culprit)” is using it."
+                alert.informativeText = "Close the card there, then eject again."
+            } else {
+                alert.messageText = "“\(node.displayName)” couldn't be ejected."
+                alert.informativeText = result.failureDetail
+            }
+            alert.runModal()
+        }
     }
 
     @objc private func newFolder(_ sender: Any?) {
@@ -578,6 +650,16 @@ extension FolderSidebarViewController: NSMenuDelegate {
                              action: #selector(toggleFavorite(_:)), keyEquivalent: "")
         fav.target = self
         menu.addItem(fav)
+
+        // Drives get Finder's courtesy: Eject, right where muscle memory
+        // expects it. Volume roots only - /Volumes/Name is 3 components.
+        if node.url.path.hasPrefix("/Volumes/"), node.url.pathComponents.count == 3 {
+            menu.addItem(.separator())
+            let eject = NSMenuItem(title: "Eject “\(node.displayName)”",
+                                   action: #selector(ejectVolume(_:)), keyEquivalent: "")
+            eject.target = self
+            menu.addItem(eject)
+        }
         menu.addItem(.separator())
         for (title, action) in [
             ("New Folder…", #selector(newFolder(_:))),
@@ -647,7 +729,7 @@ enum CollisionPrompt {
             ? (total == 1 ? "This photo already exists in “\(destination)”"
                           : "All \(total) photos already exist in “\(destination)”")
             : "\(collisions) of \(total) photos already exist in “\(destination)”"
-        alert.informativeText = "Keep Both renames the incoming files — RAW+JPEG pairs and sidecars stay together. Overwrite moves the existing files to the Trash first."
+        alert.informativeText = "Keep Both renames the incoming files - RAW+JPEG pairs and sidecars stay together. Overwrite moves the existing files to the Trash first."
         alert.addButton(withTitle: "Keep Both")
         alert.addButton(withTitle: "Skip")
         alert.addButton(withTitle: "Overwrite")
@@ -658,5 +740,22 @@ enum CollisionPrompt {
         case .alertThirdButtonReturn: return .overwrite
         default: return nil
         }
+    }
+}
+
+/// Source-list row that selects in quiet graphite instead of accent blue.
+private final class GraphiteRowView: NSTableRowView {
+    // Never "emphasized" - that's the vibrant blue path.
+    override var isEmphasized: Bool {
+        get { false }
+        set {}
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none, isSelected else { return }
+        let rect = bounds.insetBy(dx: 6, dy: 2)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        NSColor(calibratedWhite: 1, alpha: 0.09).setFill()
+        path.fill()
     }
 }

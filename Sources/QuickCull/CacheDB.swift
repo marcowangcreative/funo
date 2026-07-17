@@ -8,7 +8,7 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 /// original invalidates automatically. Second open of a folder costs
 /// nothing; relaunches stop re-scanning.
 ///
-/// Invisible plumbing — never user-facing, never a catalog.
+/// Invisible plumbing - never user-facing, never a catalog.
 final class CacheDB {
 
     static let shared = CacheDB()

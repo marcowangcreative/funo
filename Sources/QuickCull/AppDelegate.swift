@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var mainController: MainSplitViewController!
     /// Sparkle: checks the appcast on a schedule and on demand. Configured
     /// via Info.plist (SUFeedURL + SUPublicEDKey, set by build_app.sh).
-    /// Started ONLY inside a real .app bundle — under `swift run` there is
+    /// Started ONLY inside a real .app bundle - under `swift run` there is
     /// no Info.plist/bundle, and starting the updater throws an alert on
     /// every dev launch ("The updater failed to start… version of debug").
     private let updaterController = SPUStandardUpdaterController(
@@ -23,8 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let titlePathMenu = PathMenuPresenter()
 
     /// THE fix: a hard ceiling the window server enforces BELOW autolayout.
-    /// Every prior attempt was reactive — let the window grow, then shove it
-    /// back with setFrame — which a required constraint just undoes on the
+    /// Every prior attempt was reactive - let the window grow, then shove it
+    /// back with setFrame - which a required constraint just undoes on the
     /// next layout pass (that's why it kept returning). `maxSize` cannot be
     /// overridden by any constraint: the window physically cannot exceed it,
     /// and content compresses instead. Kept current as screens change.
@@ -45,15 +45,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowDidChangeScreen(_ notification: Notification) { clampWindowToScreen() }
 
     func windowWillClose(_ notification: Notification) {
-        // Closing the MAIN window must not strand the License window — with
+        // Closing the MAIN window must not strand the License window - with
         // it open, the main window isn't "the last window", so the app kept
         // running with a lone activation dialog floating in space. Take it
         // down too; then the last-window-closed rule quits normally.
         // (window.close() skips windowShouldClose, so the expired-gate
-        // terminate path can't recurse — and quitting IS what the gate
+        // terminate path can't recurse - and quitting IS what the gate
         // wants anyway.)
         guard (notification.object as? NSWindow) === window else { return }
         LicenseWindowController.shared.window?.close()
+        IngestController.closeIfOpen()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -63,6 +64,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         #endif
         FolderTemplates.ensureDefaults()
         LicenseManager.shared.revalidateInBackground()
+
+        // Card inserted → offer ingest. ASK is the ceiling - auto-ingest
+        // never happens. Pref: defaults write com.funophoto.funo
+        // QuickCullIngestAutoAsk -bool NO to silence.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didMountNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard UserDefaults.standard.object(forKey: "QuickCullIngestAutoAsk") as? Bool ?? true,
+                  let volume = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
+                  FileManager.default.fileExists(atPath: volume.appendingPathComponent("DCIM").path)
+            else { return }
+            self?.showIngest(nil)
+        }
         buildMenu()
 
         // Root = split view + one full-width status footer beneath it.
@@ -88,12 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Centered title, Lightroom-style. Modern macOS leading-aligns the
         // system title next to the traffic lights; there is no alignment
         // knob, so we hide it and center our own label in the title bar.
-        // The label MIRRORS window.title via KVO — everything else keeps
+        // The label MIRRORS window.title via KVO - everything else keeps
         // setting window.title normally (Mission Control and accessibility
         // still read it; only the drawing is ours).
         window.titleVisibility = .hidden
         if let titlebar = window.standardWindowButton(.closeButton)?.superview {
-            // [folder icon] Folder Name - f/uno, centered as ONE unit —
+            // [folder icon] Folder Name - f/uno, centered as ONE unit -
             // the proxy-icon look, hand-rolled because the system title is
             // leading-aligned on modern macOS and has no centering knob.
             let icon = TitleBarPathIcon()
@@ -128,14 +142,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 label?.stringValue = win.title
             }
             // Our own mark leads the lockup (Lightroom shows ITS icon, not a
-            // folder). Static — the app icon doesn't change with the folder.
+            // folder). Static - the app icon doesn't change with the folder.
             let appIcon = NSApp.applicationIconImage ?? NSImage()
             appIcon.size = NSSize(width: 16, height: 16)
             icon.image = appIcon
         }
         window.center()
         // First launch on a small display: 1440×900 is wider than a 13"
-        // laptop's usable area. The clamp already exists for screen changes —
+        // laptop's usable area. The clamp already exists for screen changes -
         // it just was never applied to the INITIAL frame.
         clampWindowToScreen()
         window.center()
@@ -242,7 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         findItem.target = self
         editMenu.addItem(findItem)
         editMenu.addItem(.separator())
-        // Clipboard file ops — the key monitor handles the shortcuts; these
+        // Clipboard file ops - the key monitor handles the shortcuts; these
         // exist so the commands are discoverable in the menu.
         let cutItem = NSMenuItem(title: "Cut Photos", action: #selector(cutPhotos(_:)), keyEquivalent: "x")
         cutItem.target = self
@@ -262,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(deselectItem)
         editMenuItem.submenu = editMenu
 
-        // View menu — navigation + photo surround
+        // View menu - navigation + photo surround
         let viewMenuItem = NSMenuItem()
         mainMenu.addItem(viewMenuItem)
         let viewMenu = NSMenu(title: "View")
@@ -408,7 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Menu key equivalents are APP-GLOBAL: "Paste Photos" owns ⌘V even
     /// when the user is typing in a text field (the license key field was
-    /// the victim — ⌘V fired photo-paste at the grid instead of pasting
+    /// the victim - ⌘V fired photo-paste at the grid instead of pasting
     /// text). When any text editor has focus, these forward to it.
     private var activeTextEditor: NSTextView? {
         NSApp.keyWindow?.firstResponder as? NSTextView
@@ -463,7 +477,7 @@ extension AppDelegate: NSMenuDelegate {
     }
 }
 
-/// ⌘-click on the title lockup — the app icon OR the text — pops the folder
+/// ⌘-click on the title lockup - the app icon OR the text - pops the folder
 /// path hierarchy, Lightroom-style. Because f/uno IS the folder browser,
 /// choosing an ancestor opens it here, not in Finder.
 final class PathMenuPresenter: NSObject {

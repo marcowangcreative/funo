@@ -2,8 +2,8 @@ import AppKit
 
 /// Hand-off to Lightroom without the navigation ritual. Opening photo URLs
 /// (or a whole folder) with Lightroom Classic launches it straight into the
-/// Import dialog with those files pre-selected — the user just confirms.
-/// True zero-click import needs a companion Lightroom plugin (SDK/Lua) —
+/// Import dialog with those files pre-selected - the user just confirms.
+/// True zero-click import needs a companion Lightroom plugin (SDK/Lua) -
 /// that's the roadmap step; this saves every click except the last one.
 enum LightroomBridge {
 
@@ -35,7 +35,7 @@ enum LightroomBridge {
 }
 
 /// Hand-off to Photoshop. Opening RAW files with Photoshop drops them
-/// straight into Adobe Camera Raw — the classic "edit the keepers" jump.
+/// straight into Adobe Camera Raw - the classic "edit the keepers" jump.
 /// The app is discovered automatically: Adobe installs year-versioned
 /// folders (/Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app),
 /// so we scan for the newest year and fall back to asking Launch Services

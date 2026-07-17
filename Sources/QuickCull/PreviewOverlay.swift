@@ -1,6 +1,6 @@
 import AppKit
 
-/// Keeps the photo centered when it's smaller than the viewport —
+/// Keeps the photo centered when it's smaller than the viewport -
 /// without this, NSScrollView pins the image to the bottom-left and
 /// fit-to-window feels broken.
 final class CenteringClipView: NSClipView {
@@ -25,7 +25,7 @@ final class FlippedView: NSView {
 }
 
 /// The zoom stage's document view: draws a CGImage via its backing layer
-/// (an NSImageView would fight the window with its intrinsic size — the old
+/// (an NSImageView would fight the window with its intrinsic size - the old
 /// v2 bug), reports double-clicks, and pans with mouse drag.
 final class StageImageView: NSView {
     var onDoubleClick: (() -> Void)?
@@ -111,14 +111,14 @@ final class FilmstripItem: NSCollectionViewItem {
         badgePlate.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(badgePlate)
 
-        badge.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        badge.font = Theme.secondaryStrong
         badge.translatesAutoresizingMaskIntoConstraints = false
         badgePlate.addSubview(badge)
 
         NSLayoutConstraint.activate([
             // Gallery mat: content sits 4px inside the cell, so the amber
             // current-frame ring (drawn on the cell edge) and the color-label
-            // strip (on the photo's own edge) never touch — the dark gap
+            // strip (on the photo's own edge) never touch - the dark gap
             // between them is what kills the amber-on-red clash.
             thumb.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
             thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
@@ -213,7 +213,7 @@ final class FilmstripResizeHandle: NSView {
     }
 }
 
-/// folder — scrollable, current frame auto-centered, scroller as progress.
+/// folder - scrollable, current frame auto-centered, scroller as progress.
 final class PreviewOverlayView: NSView {
 
     private let stageScroll = NSScrollView()
@@ -231,14 +231,14 @@ final class PreviewOverlayView: NSView {
     private static let filmMinHeight: CGFloat = 60
     private static let filmMaxHeight: CGFloat = 200
 
-    // Info card (histogram + EXIF) — right rail, above faces, I to toggle.
+    // Info card (histogram + EXIF) - right rail, above faces, I to toggle.
     private let infoPanel = NSView()
     private let infoHistogram = HistogramView()
     private let infoStack = NSStackView()
     private var infoPanelWidth: NSLayoutConstraint!
     private var infoPanelHeight: NSLayoutConstraint!
     private var stageTrailing: NSLayoutConstraint!
-    /// ONE width for every right-rail card — the photo edge never jitters
+    /// ONE width for every right-rail card - the photo edge never jitters
     /// with face count, and the rail reads as a single instrument column.
     private static let railWidth: CGFloat = 272
     private static let infoMinHeight: CGFloat = 320
@@ -259,7 +259,7 @@ final class PreviewOverlayView: NSView {
             : UserDefaults.standard.bool(forKey: "QuickCullShowInfo")
     }()
 
-    // Face side panel — vertical, scrollable, Tab to toggle.
+    // Face side panel - vertical, scrollable, Tab to toggle.
     private let facesPanel = NSView()
     private let facesHeaderLabel = NSTextField(labelWithString: "")
     private let facesScroll = NSScrollView()
@@ -296,7 +296,7 @@ final class PreviewOverlayView: NSView {
         layer?.backgroundColor = NSColor(srgbRed: 0.024, green: 0.024, blue: 0.028, alpha: 0.97).cgColor
 
         // The photo surround: only the stage backdrop changes with the
-        // setting — chrome, labels and panels stay graphite for legibility.
+        // setting - chrome, labels and panels stay graphite for legibility.
         let stageBackdrop = NSView()
         stageBackdrop.wantsLayer = true
         stageBackdrop.layer?.backgroundColor = Theme.surround.color.cgColor
@@ -327,17 +327,17 @@ final class PreviewOverlayView: NSView {
                                                name: NSScrollView.didEndLiveMagnifyNotification,
                                                object: stageScroll)
 
-        infoLabel.font = Theme.mono(12, .medium)
+        infoLabel.font = Theme.monoData
         infoLabel.textColor = Theme.tx1
         infoLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(infoLabel)
 
-        zoomLabel.font = Theme.mono(11)
+        zoomLabel.font = Theme.monoCaption
         zoomLabel.textColor = Theme.tx2
         zoomLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(zoomLabel)
 
-        facesFooterLabel.font = Theme.mono(10.5)
+        facesFooterLabel.font = Theme.monoCaption
         facesFooterLabel.textColor = Theme.tx2
         facesFooterLabel.maximumNumberOfLines = 2
         facesFooterLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -410,7 +410,7 @@ final class PreviewOverlayView: NSView {
         infoHeader.translatesAutoresizingMaskIntoConstraints = false
         infoPanel.addSubview(infoHeader)
 
-        // Rating/color are NOT shown here — the filmstrip frame already
+        // Rating/color are NOT shown here - the filmstrip frame already
         // carries them. The info card is pure instrument: histogram + data.
         infoHistogram.translatesAutoresizingMaskIntoConstraints = false
         infoPanel.addSubview(infoHistogram)
@@ -435,7 +435,7 @@ final class PreviewOverlayView: NSView {
             infoStack.bottomAnchor.constraint(lessThanOrEqualTo: infoPanel.bottomAnchor, constant: -10)
         ])
 
-        // Drag handle straddling the info/faces seam — rebalance the rail.
+        // Drag handle straddling the info/faces seam - rebalance the rail.
         railHandle.translatesAutoresizingMaskIntoConstraints = false
         railHandle.onDragStart = { [weak self] in
             self?.infoDragStartHeight = self?.infoPanelHeightValue ?? 396
@@ -455,7 +455,7 @@ final class PreviewOverlayView: NSView {
             UserDefaults.standard.set(Double(self.infoPanelHeightValue), forKey: "QuickCullInfoHeight")
         }
         // Double-click the seam: give faces every pixel (info shrinks to its
-        // minimum). Double-click again: restore the previous balance — the
+        // minimum). Double-click again: restore the previous balance - the
         // macOS split-divider convention.
         railHandle.onDoubleClick = { [weak self] in
             guard let self else { return }
@@ -531,7 +531,7 @@ final class PreviewOverlayView: NSView {
         ])
 
         // Footer band: a real bar (bg1 + top hairline) like the grid's
-        // window footer — filename + exposure sits IN it, above the filmstrip.
+        // window footer - filename + exposure sits IN it, above the filmstrip.
         let footerBand = NSView()
         footerBand.wantsLayer = true
         footerBand.layer?.backgroundColor = Theme.bg1.cgColor
@@ -570,7 +570,7 @@ final class PreviewOverlayView: NSView {
             filmstripScroll.bottomAnchor.constraint(equalTo: footerBand.topAnchor, constant: -6),
 
             // Resize handle: floats in the empty gap ABOVE the filmstrip
-            // (4px clear of the top thumbnail edge) — grab it to size thumbs.
+            // (4px clear of the top thumbnail edge) - grab it to size thumbs.
             filmstripHandle.centerXAnchor.constraint(equalTo: centerXAnchor),
             filmstripHandle.bottomAnchor.constraint(equalTo: filmstripScroll.topAnchor, constant: -4),
             filmstripHandle.widthAnchor.constraint(equalToConstant: 50),
@@ -601,7 +601,7 @@ final class PreviewOverlayView: NSView {
     }
 
     /// The tallest the filmstrip may grow while still leaving the stage a
-    /// usable minimum — so its fixed height can NEVER over-demand and shove
+    /// usable minimum - so its fixed height can NEVER over-demand and shove
     /// the window past the screen.
     private func maxFilmstripHeight() -> CGFloat {
         let reserved: CGFloat = 30 + 24 + 220 // footer + handle gap + min stage
@@ -650,7 +650,7 @@ final class PreviewOverlayView: NSView {
         // Navigation always lands at FIT. Without this, arriving on a photo
         // whose preview was evicted (full-res decodes are huge and purge the
         // cache) while zoomed left the async display blocked by the atFit
-        // guard — the stage kept the OLD photo while the footer, filmstrip
+        // guard - the stage kept the OLD photo while the footer, filmstrip
         // and info panel advanced. The guard still protects a zoom made
         // AFTER landing here; it just can't veto the arrival itself.
         atFit = true
@@ -822,7 +822,7 @@ final class PreviewOverlayView: NSView {
 
     // MARK: - Culling state
 
-    /// Cull state lives on the filmstrip frame (and the grid) — the info
+    /// Cull state lives on the filmstrip frame (and the grid) - the info
     /// card no longer echoes it. Kept as a hook the cull-change path calls.
     /// A face analysis landed while the preview is open.
     func noteFaceResult(for id: String) {
@@ -835,7 +835,7 @@ final class PreviewOverlayView: NSView {
 
     /// Debounce: while the user is flying through frames with the arrow keys,
     /// the panel holds its last layout (slightly dimmed) instead of tearing
-    /// down and rebuilding per keystroke — that rebuild was the UI flashing.
+    /// down and rebuilding per keystroke - that rebuild was the UI flashing.
     private var facesRefreshTimer: Timer?
 
     private func scheduleFacesRefresh() {
@@ -848,7 +848,7 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    // MARK: - Rail panels — F faces · I info · Tab both
+    // MARK: - Rail panels - F faces · I info · Tab both
 
     private func setFacesPanel(_ shown: Bool) {
         showFacesPanel = shown
@@ -891,7 +891,7 @@ final class PreviewOverlayView: NSView {
     }
 
     /// The rail handle only exists when BOTH cards are on screen and there's
-    /// real room to rebalance — otherwise it'd be a dead grip.
+    /// real room to rebalance - otherwise it'd be a dead grip.
     private func updateRailHandle() {
         let bothVisible = !infoPanel.isHidden && !facesPanel.isHidden
         let hasRange = maxInfoHeight() - Self.infoMinHeight > 40
@@ -932,7 +932,7 @@ final class PreviewOverlayView: NSView {
         // Rows that fit the current card height (leave one slot for Focus).
         let rowBudget = max(4, Int((infoPanelHeightValue - 180) / 17) - 1)
 
-        // RGB histogram + clipping from whatever's already decoded — never a
+        // RGB histogram + clipping from whatever's already decoded - never a
         // new card read.
         if let image = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize)
             ?? ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.previewPixelSize) {
@@ -965,7 +965,7 @@ final class PreviewOverlayView: NSView {
         SharpnessAnalyzer.shared.score(for: asset) { [weak self] acutance in
             guard let self, self.infoGeneration == gen, let acutance else { return }
             let f = SharpnessAnalyzer.focusFraction(acutance)
-            // Color-coded so focus quality reads at a glance — and the tint
+            // Color-coded so focus quality reads at a glance - and the tint
             // advertises the metric exists: >=80% green, >=50% amber, else red.
             let word: String
             let tint: NSColor
@@ -983,8 +983,8 @@ final class PreviewOverlayView: NSView {
     /// line. "S" whispers, "1/175" speaks. Filename and position sit dim at
     /// the ends; the exposure numbers own the middle.
     private static func footerLine(filename: String, parts: [(String, String)], position: String) -> NSAttributedString {
-        let dim: [NSAttributedString.Key: Any] = [.font: Theme.mono(12), .foregroundColor: Theme.tx2]
-        let bright: [NSAttributedString.Key: Any] = [.font: Theme.mono(12, .semibold), .foregroundColor: Theme.tx1]
+        let dim: [NSAttributedString.Key: Any] = [.font: Theme.monoData, .foregroundColor: Theme.tx2]
+        let bright: [NSAttributedString.Key: Any] = [.font: Theme.monoDataStrong, .foregroundColor: Theme.tx1]
         let line = NSMutableAttributedString(string: filename, attributes: dim)
         for (key, value) in parts {
             line.append(NSAttributedString(string: "      ", attributes: dim))
@@ -999,16 +999,16 @@ final class PreviewOverlayView: NSView {
 
     private func infoRow(_ key: String, _ value: String, valueColor: NSColor = Theme.tx0) -> NSView {
         let k = NSTextField(labelWithString: "")
-        // Engraved-key styling: uppercase, mono, letterspaced, dim — the
+        // Engraved-key styling: uppercase, mono, letterspaced, dim - the
         // label recedes so the value (bright mono) carries the line.
         k.attributedStringValue = NSAttributedString(string: key.uppercased(), attributes: [
-            .font: Theme.mono(9.5, .medium),
+            .font: Theme.monoEyebrow,
             .foregroundColor: Theme.tx2,
             .kern: 0.8
         ])
         k.setContentHuggingPriority(.required, for: .horizontal)
         let v = NSTextField(labelWithString: value)
-        v.font = Theme.mono(11.5)
+        v.font = Theme.monoData
         v.textColor = valueColor
         v.alignment = .right
         v.lineBreakMode = .byTruncatingHead
@@ -1051,7 +1051,7 @@ final class PreviewOverlayView: NSView {
         }
 
         // No crops yet: distinguish "still scanning" from "won't scan here"
-        // (memory card) from "scanned, no faces" — never a mystery.
+        // (memory card) from "scanned, no faces" - never a mystery.
         if pairs.isEmpty {
             if index < assets.count, FaceAnalyzer.shared.result(for: assets[index].id) == nil {
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
@@ -1075,7 +1075,7 @@ final class PreviewOverlayView: NSView {
         let gap: CGFloat = 6
         let innerWidth = Self.railWidth - 24
 
-        // Columns come from the COUNT ALONE — so dragging the divider never
+        // Columns come from the COUNT ALONE - so dragging the divider never
         // reshuffles sizes; it only changes how many rows are visible. Fewer
         // faces → fewer columns → bigger crops.
         let columns: Int
@@ -1115,7 +1115,7 @@ final class PreviewOverlayView: NSView {
         }
 
         // The card is pinned to the lower edge and the scroll fills it, so
-        // crops sit at the top and the rest of the height is scrollable —
+        // crops sit at the top and the rest of the height is scrollable -
         // no dead gap below the panel, and sizes never depend on height.
         facesPanelWidth.constant = Self.railWidth
         facesPanel.isHidden = false
@@ -1287,7 +1287,7 @@ final class PreviewOverlayView: NSView {
             step(1) // clear-and-advance, same rhythm
             return true
         case "u":
-            // Unlabel — clears the color outright.
+            // Unlabel - clears the color outright.
             RatingsStore.shared.setColorLabel(0, for: assets[index].id)
             cullChanged()
             return true
@@ -1297,7 +1297,7 @@ final class PreviewOverlayView: NSView {
             step(1)
             return true
         case "[", "]":
-            // [ rotates CCW, ] rotates CW — re-decodes at the new orientation.
+            // [ rotates CCW, ] rotates CW - re-decodes at the new orientation.
             RatingsStore.shared.rotate(assets[index].id, by: chars == "]" ? 90 : -90)
             showCurrent()
             onCullChanged?() // grid thumbnails re-render too

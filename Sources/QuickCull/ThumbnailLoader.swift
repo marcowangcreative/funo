@@ -9,16 +9,16 @@ import ImageIO
 ///   1. Memory cache hit → instant.
 ///   2. Ask ImageIO for an EMBEDDED thumbnail only (no full decode).
 ///   3. If that's missing or too small, force-generate one (full decode,
-///      but downsampled during decode — never a 60MP bitmap in memory).
+///      but downsampled during decode - never a 60MP bitmap in memory).
 final class ThumbnailLoader {
 
     static let shared = ThumbnailLoader()
 
     /// Grid thumbnails.
     static let thumbnailPixelSize: CGFloat = 512
-    /// Full-window previews — roughly a Retina display's backing store.
+    /// Full-window previews - roughly a Retina display's backing store.
     static let previewPixelSize: CGFloat = 3200
-    /// 100% zoom — full native resolution (CR3s: the 6000×4000 embedded JPEG).
+    /// 100% zoom - full native resolution (CR3s: the 6000×4000 embedded JPEG).
     static let fullPixelSize: CGFloat = 8192
 
     /// Three tiers so they can't starve each other: a zooming session's
@@ -69,14 +69,14 @@ final class ThumbnailLoader {
     private var waiters: [String: [(NSImage?) -> Void]] = [:] // main thread
 
     /// Per-volume decode queues: an internal SSD takes all cores, but a
-    /// memory card gets TWO lanes — fifteen parallel readers on one slow
+    /// memory card gets TWO lanes - fifteen parallel readers on one slow
     /// USB card thrash it into delivering less than two would.
     private var volumeQueues: [String: OperationQueue] = [:] // main thread
 
     /// Directory → decode queue memo. queue(for:) runs on the MAIN thread for
     /// every thumbnail request; resolving .volumeURLKey is a stat, and doing
     /// one per visible cell against a waking external drive froze the click.
-    /// Every file in a folder shares a volume — the first answers for all.
+    /// Every file in a folder shares a volume - the first answers for all.
     private var dirQueueMemo: [String: OperationQueue] = [:] // main thread
 
     private func queue(for url: URL) -> OperationQueue {
@@ -109,6 +109,14 @@ final class ThumbnailLoader {
 
     /// Request an image. Completion always fires on the main thread.
     /// Calls are coalesced: many requests for the same file share one decode.
+    /// Drop every queued decode for files on `volumePath` - ejecting a card
+    /// fails while OUR reads hold it open. Executing decodes finish (they're
+    /// short); queued ones never start. Main thread (queues dict is main-only).
+    func cancelPending(underVolumePath volumePath: String) {
+        assert(Thread.isMainThread)
+        volumeQueues[volumePath]?.cancelAllOperations()
+    }
+
     func request(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
         let key = cacheKey(url, maxPixel)
         if let hit = cache(for: maxPixel).object(forKey: key as NSString) {
@@ -116,7 +124,7 @@ final class ThumbnailLoader {
             return
         }
         waiters[key, default: []].append(completion)
-        // A visible caller is waiting — make sure an already-queued op
+        // A visible caller is waiting - make sure an already-queued op
         // (e.g. from a prefetch) doesn't languish behind the backlog.
         if let existing = pending[key], existing.queuePriority.rawValue < Operation.QueuePriority.high.rawValue {
             existing.queuePriority = .high
@@ -124,7 +132,7 @@ final class ThumbnailLoader {
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
 
-    /// Warm the cache without registering a waiter — cancellable freely.
+    /// Warm the cache without registering a waiter - cancellable freely.
     func prefetch(_ url: URL, maxPixel: CGFloat) {
         let key = cacheKey(url, maxPixel)
         guard cache(for: maxPixel).object(forKey: key as NSString) == nil else { return }
@@ -144,7 +152,7 @@ final class ThumbnailLoader {
         }
     }
 
-    /// Cancel a decode that scrolled out of relevance — unless a visible
+    /// Cancel a decode that scrolled out of relevance - unless a visible
     /// caller is waiting on it.
     func cancel(_ url: URL, maxPixel: CGFloat) {
         let key = cacheKey(url, maxPixel)
@@ -244,7 +252,7 @@ final class ThumbnailLoader {
             return nil
         }
 
-        // Pass 1: embedded preview only. This is the Photo Mechanic trick —
+        // Pass 1: embedded preview only. This is the Photo Mechanic trick -
         // the camera already made us a JPEG; just use it.
         let embeddedOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
@@ -257,8 +265,8 @@ final class ThumbnailLoader {
             // · JPEG/HEIC: pass 2 is a cheap direct decode, so demand at
             //   least half the requested size. (The old flat 240px bar let
             //   a JPEG's 320px EXIF thumbnail stand in for a 3200px screen
-            //   preview — "perfectly fine JPEGs render blurry.")
-            // · RAW: pass 2 is a full develop (seconds on some formats) —
+            //   preview - "perfectly fine JPEGs render blurry.")
+            // · RAW: pass 2 is a full develop (seconds on some formats) -
             //   accept any real preview ≥1280px; a 2× upscale beats a
             //   beach ball, and face-aware focus judges sharpness anyway.
             let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
@@ -268,7 +276,7 @@ final class ThumbnailLoader {
             }
         }
 
-        // Pass 2: no usable embedded preview — decode, but downsample on the way in.
+        // Pass 2: no usable embedded preview - decode, but downsample on the way in.
         let forcedOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

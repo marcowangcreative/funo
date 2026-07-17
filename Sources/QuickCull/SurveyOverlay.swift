@@ -1,12 +1,12 @@
 import AppKit
 
 /// Survey mode: 2–4 selected photos side by side, BIG, for the one
-/// comparison culling actually needs — "which of these frames wins?"
+/// comparison culling actually needs - "which of these frames wins?"
 ///
 /// S opens it from a 2–4 photo selection. Amber ring = focused frame;
 /// click or arrows move focus; 1–5/0 rate, ⌃1–5 color, X reject the
 /// focused frame; Space opens it full screen; Esc or S returns to the grid.
-/// Z / scroll ZOOM ALL FRAMES TOGETHER to the same spot — the point of
+/// Z / scroll ZOOM ALL FRAMES TOGETHER to the same spot - the point of
 /// survey is comparing the same detail (focus, eyes) across near-dupes.
 final class SurveyOverlay: NSView {
 
@@ -47,7 +47,7 @@ final class SurveyOverlay: NSView {
         }
         focus(0)
 
-        // Footer bar — hints + zoom readout, matching the expanded view.
+        // Footer bar - hints + zoom readout, matching the expanded view.
         footerBar.wantsLayer = true
         footerBar.layer?.backgroundColor = Theme.bg1.cgColor
         footerBar.translatesAutoresizingMaskIntoConstraints = false
@@ -57,7 +57,7 @@ final class SurveyOverlay: NSView {
         topLine.layer?.backgroundColor = Theme.line.cgColor
         topLine.translatesAutoresizingMaskIntoConstraints = false
         footerBar.addSubview(topLine)
-        zoomLabel.font = Theme.mono(11)
+        zoomLabel.font = Theme.monoCaption
         zoomLabel.textColor = Theme.tx2
         zoomLabel.translatesAutoresizingMaskIntoConstraints = false
         footerBar.addSubview(zoomLabel)
@@ -242,7 +242,7 @@ final class SurveyOverlay: NSView {
 }
 
 /// One surveyed frame: aspect-fit image (zoomable via contentsRect), a color
-/// footer band — filename, stars, focus % (tinted when color-labeled).
+/// footer band - filename, stars, focus % (tinted when color-labeled).
 /// Amber ring when focused; the winner's focus readout turns brass.
 private final class SurveyCell: NSView {
 
@@ -272,7 +272,7 @@ private final class SurveyCell: NSView {
         imageHost.layer?.contentsGravity = .resizeAspect
         addSubview(imageHost)
 
-        // Color label tints the FOOTER band — same visual language as the
+        // Color label tints the FOOTER band - same visual language as the
         // grid's tinted cards. (It used to be a strip across the TOP of the
         // frame, which sat right against the amber focus ring and clashed.)
         colorStrip.wantsLayer = true
@@ -280,7 +280,7 @@ private final class SurveyCell: NSView {
         addSubview(colorStrip)
 
         nameLabel.stringValue = asset.filename
-        nameLabel.font = Theme.mono(10.5)
+        nameLabel.font = Theme.monoCaption
         nameLabel.textColor = Theme.tx2
         nameLabel.lineBreakMode = .byTruncatingMiddle
         addSubview(nameLabel)
@@ -288,7 +288,7 @@ private final class SurveyCell: NSView {
         starsLabel.alignment = .center
         addSubview(starsLabel)
 
-        focusLabel.font = Theme.mono(9.5)
+        focusLabel.font = Theme.monoCaption
         focusLabel.textColor = Theme.tx2
         focusLabel.alignment = .right
         addSubview(focusLabel)
@@ -307,7 +307,7 @@ private final class SurveyCell: NSView {
         applyFocusStyle()
     }
 
-    /// The sharpest frame's focus readout turns brass — a quiet crown.
+    /// The sharpest frame's focus readout turns brass - a quiet crown.
     /// (It used to be an amber "SHARPEST" pill floating on the photo;
     /// nothing in this app should stamp badges over someone's image.)
     func setSharpest(_ sharpest: Bool) {
@@ -332,7 +332,7 @@ private final class SurveyCell: NSView {
             ])
         } else {
             // The attributed string's own paragraph style overrides the
-            // field's alignment — without this the stars hug the left edge.
+            // field's alignment - without this the stars hug the left edge.
             let stars = NSMutableAttributedString(attributedString: Theme.stars(rating, size: 13))
             stars.addAttribute(.paragraphStyle, value: centered,
                                range: NSRange(location: 0, length: stars.length))

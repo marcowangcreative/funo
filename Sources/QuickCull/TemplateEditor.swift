@@ -71,7 +71,7 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         scroll.borderType = .bezelBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
         textView.isRichText = false
-        textView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        textView.font = Theme.monoData
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.autoresizingMask = [.width]
@@ -80,7 +80,7 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         content.addSubview(scroll)
 
         let hint = NSTextField(labelWithString: "One folder per line · use / to nest (e.g. Reception/Speeches)")
-        hint.font = .systemFont(ofSize: 11)
+        hint.font = Theme.caption
         hint.textColor = .tertiaryLabelColor
         hint.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(hint)

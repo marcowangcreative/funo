@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Offline license verification — Ed25519-signed keys, minted by the
+/// Offline license verification - Ed25519-signed keys, minted by the
 /// companion `license_tool.swift` (repo root) with a private key that never
 /// ships. The app embeds only the PUBLIC key: a valid signature proves the
 /// key came from us, so keygens are cryptographically impossible. This
@@ -21,7 +21,7 @@ final class LicenseManager {
     static let trialDays = 14
 
     /// Optional hard cutoff for time-limited builds (disclosed, not a hidden
-    /// kill switch). RETIRED in favor of the per-user 14-day demo — every
+    /// kill switch). RETIRED in favor of the per-user 14-day demo - every
     /// install gates itself, no calendar cliff needed. Keep nil unless a
     /// build ever needs a fleet-wide end date again.
     static let betaExpiry: Date? = nil
@@ -58,7 +58,7 @@ final class LicenseManager {
     var status: Status {
         if let email = validLicenseEmail() { return .licensed(email: email) }
         if let display = polarLicenseDisplay() { return .licensed(email: display) }
-        // Fleet-wide cutoff, if a build ever sets one (nil today — the
+        // Fleet-wide cutoff, if a build ever sets one (nil today - the
         // per-user demo below is the whole gating model).
         if let cutoff = Self.betaExpiry, Date() > cutoff { return .expired }
         let days = trialDaysLeft()
@@ -72,10 +72,10 @@ final class LicenseManager {
 
     // MARK: - Activation
 
-    /// Validate and persist a key — completion always on the MAIN thread.
+    /// Validate and persist a key - completion always on the MAIN thread.
     /// Two key families coexist:
-    ///   FUNO.payload.sig — our Ed25519 keys, verified OFFLINE, instant.
-    ///   FUNO-XXXX-…      — Polar-issued keys, validated against Polar's API
+    ///   FUNO.payload.sig - our Ed25519 keys, verified OFFLINE, instant.
+    ///   FUNO-XXXX-…      - Polar-issued keys, validated against Polar's API
     ///                      (org-scoped, no secrets involved).
     func activate(_ rawKey: String, completion: @escaping (_ display: String?, _ error: String?) -> Void) {
         let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -90,7 +90,7 @@ final class LicenseManager {
         } else if key.hasPrefix("FUNO-") {
             polarActivate(key, completion: completion)
         } else {
-            completion(nil, "Keys start with FUNO. or FUNO- — paste the whole thing from your receipt.")
+            completion(nil, "Keys start with FUNO. or FUNO- - paste the whole thing from your receipt.")
         }
     }
 
@@ -101,7 +101,7 @@ final class LicenseManager {
         return Self.verify(stored.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Signature check — returns the payload email iff the key is genuine.
+    /// Signature check - returns the payload email iff the key is genuine.
     private static func verify(_ key: String) -> String? {
         guard key.hasPrefix("FUNO.") else { return nil }
         let parts = key.dropFirst(5).split(separator: ".")
@@ -119,7 +119,7 @@ final class LicenseManager {
     // MARK: - Polar (store-issued keys)
 
     /// Organization ID from the Polar dashboard (Settings → General).
-    /// PUBLIC — it only scopes lookups so keys from other orgs can't collide.
+    /// PUBLIC - it only scopes lookups so keys from other orgs can't collide.
     private static let polarOrgID = "1abc1d85-c2d9-400c-8aa7-d746fb2a46ce"
     private static let polarAPI = "https://api.polar.sh/v1/customer-portal/license-keys"
 
@@ -146,7 +146,7 @@ final class LicenseManager {
 
     /// Licensed display string if a Polar license is on file. Deliberately
     /// NETWORK-OPTIMISTIC: a stored license stays valid on pure silence
-    /// (photographers work offline for weeks on location) — only a
+    /// (photographers work offline for weeks on location) - only a
     /// DEFINITIVE revocation from Polar clears it (see revalidate below,
     /// fired on every launch). A pirate who firewalls api.polar.sh forever
     /// beats revocation; he was never going to pay, and he loses updates.
@@ -154,7 +154,7 @@ final class LicenseManager {
         loadPolarState()?.display
     }
 
-    /// POST helper — both endpoints take the same JSON shape.
+    /// POST helper - both endpoints take the same JSON shape.
     private func polarRequest(_ endpoint: String, body: [String: Any],
                               completion: @escaping (Int?, [String: Any]?) -> Void) {
         guard let url = URL(string: "\(Self.polarAPI)/\(endpoint)") else { completion(nil, nil); return }
@@ -191,7 +191,7 @@ final class LicenseManager {
             case .some(404), .some(400...499):
                 completion(nil, "That key didn't validate. Paste the whole key from your receipt.")
             default:
-                completion(nil, "Couldn't reach the license server — check your connection and try again.")
+                completion(nil, "Couldn't reach the license server - check your connection and try again.")
             }
         }
     }
@@ -219,7 +219,7 @@ final class LicenseManager {
                 // Definitively dead: revoked, refunded, or deactivated.
                 self.savePolarState(nil)
             default:
-                break // offline / server hiccup — keep the license
+                break // offline / server hiccup - keep the license
             }
         }
     }
@@ -229,7 +229,7 @@ final class LicenseManager {
     /// Days remaining. First launch is recorded in Application Support AND
     /// UserDefaults; the EARLIEST surviving stamp wins, so deleting one of
     /// them doesn't restart the clock. (A determined tamperer can still
-    /// reset a trial — that's fine; they were never going to pay today.)
+    /// reset a trial - that's fine; they were never going to pay today.)
     private func trialDaysLeft() -> Int {
         let now = Date()
         var stamps: [Date] = []

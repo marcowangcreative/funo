@@ -65,14 +65,14 @@ final class MainSplitViewController: NSSplitViewController {
                   window.attachedSheet == nil,
                   !(window.firstResponder is NSTextView) // don't steal keys from text editing
             else { return event }
-            // ⌘⇧] / ⌘⇧[ still cycle tabs (Safari/Chrome muscle memory) —
+            // ⌘⇧] / ⌘⇧[ still cycle tabs (Safari/Chrome muscle memory) -
             // the menu shows ⌘→ / ⌘←, so these are handled here directly.
             if event.modifierFlags.contains(.command), event.modifierFlags.contains(.shift),
                event.keyCode == 30 || event.keyCode == 33 { // ] and [
                 self.selectAdjacentTab(event.keyCode == 30 ? 1 : -1)
                 return nil
             }
-            // ⌘F — the search palette (photos here, folders anywhere).
+            // ⌘F - the search palette (photos here, folders anywhere).
             if event.modifierFlags.intersection([.command, .control, .option]) == .command,
                event.keyCode == 3 {
                 self.showSearchPalette()
@@ -91,7 +91,7 @@ final class MainSplitViewController: NSSplitViewController {
                 }
             }
             let cullMods = event.modifierFlags.intersection([.command, .control, .option])
-            // Backtick toggles color-first rating mode — works in every mode
+            // Backtick toggles color-first rating mode - works in every mode
             // (grid, expanded, survey). Bare key only; text fields are already
             // excluded above, so a rename can still type a backtick.
             if cullMods.isEmpty, event.charactersIgnoringModifiers == "`" {
@@ -115,7 +115,7 @@ final class MainSplitViewController: NSSplitViewController {
 
         splitView.autosaveName = "QuickCullSplit"
 
-        // Wire BEFORE the split item loads the tabs view — the first grid is
+        // Wire BEFORE the split item loads the tabs view - the first grid is
         // created inside tabs.viewDidLoad and must get its callbacks.
         tabs.configureGrid = { [weak self] grid in
             grid.onOpenPreview = { [weak self] index in
@@ -134,6 +134,15 @@ final class MainSplitViewController: NSSplitViewController {
                 self?.footer?.setStatus(text, undoVisible: undoVisible)
             }
         }
+        // Eject wants the card back: any tab watching a folder on that
+        // volume lets go of its descriptor before the unmount fires.
+        NotificationCenter.default.addObserver(
+            forName: .funoPrepareEject, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let paths = note.userInfo?["paths"] as? [String] else { return }
+            for grid in self.tabs.grids { grid.releaseVolumeHold(under: paths) }
+        }
+
         tabs.onActiveFolderChanged = { [weak self] url in
             self?.titleFolderURL = url
             self?.refreshWindowTitle()
@@ -179,7 +188,7 @@ final class MainSplitViewController: NSSplitViewController {
         }
     }
 
-    /// ⌘[ / ⌘] — folder history of the active tab.
+    /// ⌘[ / ⌘] - folder history of the active tab.
     func goBack() {
         guard previewOverlay == nil, surveyOverlay == nil else { return }
         grid.goBack()
@@ -196,7 +205,7 @@ final class MainSplitViewController: NSSplitViewController {
         tabs.activateNumbered(number)
     }
 
-    /// ⌘⇧] / ⌘⇧[ — cycle tabs with wraparound.
+    /// ⌘⇧] / ⌘⇧[ - cycle tabs with wraparound.
     func selectAdjacentTab(_ delta: Int) {
         guard previewOverlay == nil, surveyOverlay == nil else { return }
         tabs.activateRelative(delta)
@@ -223,7 +232,7 @@ final class MainSplitViewController: NSSplitViewController {
     }
 
     func noteCachesCleared() {
-        grid.noteExternalChange(message: "Caches cleared — next load is a true cold start")
+        grid.noteExternalChange(message: "Caches cleared - next load is a true cold start")
     }
 
     func undoFileOperation() {
@@ -251,7 +260,15 @@ final class MainSplitViewController: NSSplitViewController {
     /// window is actually visible behind the ingest panel.
     func showIngestDestination(_ url: URL) {
         showFolder(url)
-        grid.announce("Ingesting into \(url.lastPathComponent) — photos appear as they land")
+        // Unfold the tree down to the landing folder - watching files pour
+        // into a folder you can SEE beats trusting a path string. (Same
+        // reveal the ⌘F palette uses; new folders may need a beat to appear
+        // in the prefetched listing, hence the tiny delay.)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sidebar.refreshBranchContaining(url)
+            self?.sidebar.reveal(url)
+        }
+        grid.announce("Ingesting into \(url.lastPathComponent) - photos appear as they land")
         view.window?.orderFront(nil)
     }
 
@@ -290,7 +307,7 @@ final class MainSplitViewController: NSSplitViewController {
         guard previewOverlay == nil, let container = view.window?.contentView else { return }
 
         // Photo Mechanic-style scoping: opening expanded view from a multi-
-        // selection makes THAT SELECTION the working set — the filmstrip and
+        // selection makes THAT SELECTION the working set - the filmstrip and
         // arrows never leave it. A single selection scopes to the whole
         // (filtered) folder as before.
         let all = grid.displayedAssets
@@ -308,11 +325,11 @@ final class MainSplitViewController: NSSplitViewController {
         overlay.autoresizingMask = [.width, .height]
         overlay.onClose = { [weak self] lastIndex in
             guard let self else { return }
-            // lastIndex is within the SCOPE — map back to a grid index.
+            // lastIndex is within the SCOPE - map back to a grid index.
             let asset = scope[max(0, min(lastIndex, scope.count - 1))]
             if scoped {
                 // Coming back from a scoped pass, the range is still the
-                // user's working set — keep it selected, focus the last frame.
+                // user's working set - keep it selected, focus the last frame.
                 self.closePreview()
                 self.grid.select(ids: scope.map { $0.id }, focusID: asset.id)
             } else {

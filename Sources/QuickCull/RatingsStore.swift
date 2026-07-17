@@ -2,7 +2,7 @@ import Foundation
 
 /// Prototype ratings store: optimistic in-memory state, debounced JSON
 /// persistence in Application Support. The real product writes XMP
-/// (embedded or sidecar) so ratings travel to Lightroom/Capture One —
+/// (embedded or sidecar) so ratings travel to Lightroom/Capture One -
 /// this store is deliberately invisible plumbing, not a catalog.
 final class RatingsStore {
 
@@ -16,7 +16,7 @@ final class RatingsStore {
     /// Tombstones: the user EXPLICITLY cleared this value. Without these,
     /// adopt() can't tell "never rated here" from "deliberately cleared",
     /// and a stale sidecar (foreign, or ours mid-flush) resurrects the old
-    /// value on the next folder scan — the "cleared reds come back" bug.
+    /// value on the next folder scan - the "cleared reds come back" bug.
     private var clearedRatings: Set<String> = []
     private var clearedLabels: Set<String> = []
 
@@ -118,10 +118,10 @@ final class RatingsStore {
         scheduleSave()
     }
 
-    /// A COPY inherits the original's cull values — the original keeps its
+    /// A COPY inherits the original's cull values - the original keeps its
     /// own. (Without this, ⌘C/⌘V produced an unrated duplicate: move carried
-    /// values via transfer(), copy carried nothing.) Tombstones don't copy —
-    /// a fresh file has nothing "deliberately cleared" yet — and no XMP write
+    /// values via transfer(), copy carried nothing.) Tombstones don't copy -
+    /// a fresh file has nothing "deliberately cleared" yet - and no XMP write
     /// is queued: the RAW's sidecar was copied along with it on disk.
     func copyValues(from sourceID: String, to newID: String) {
         guard sourceID != newID else { return }
@@ -137,7 +137,7 @@ final class RatingsStore {
         if changed { scheduleSave() }
     }
 
-    /// A photo's identity is its PATH — so when a file MOVES, every cull
+    /// A photo's identity is its PATH - so when a file MOVES, every cull
     /// value must move with it or the label silently stays behind under the
     /// old path (the "moved photos vanish from a color filter" bug). Also
     /// carries the cleared-tombstones so a deliberate clear survives a move,
@@ -145,8 +145,8 @@ final class RatingsStore {
     /// orphaned. No XMP rewrite: the sidecar traveled with the file.
     func transfer(from oldID: String, to newID: String) {
         guard oldID != newID else { return }
-        // Callers can be on a background queue — the sidebar drop runs
-        // FileOps.move off-main so a 2,000-photo drop can't beach-ball —
+        // Callers can be on a background queue - the sidebar drop runs
+        // FileOps.move off-main so a 2,000-photo drop can't beach-ball -
         // but this store's state is main-thread-only. Hop if needed.
         guard Thread.isMainThread else {
             DispatchQueue.main.async { self.transfer(from: oldID, to: newID) }
@@ -166,7 +166,7 @@ final class RatingsStore {
     /// Adopt values found in a sidecar written by another app (Lightroom,
     /// Photo Mechanic). Local values win; adoption never triggers a rewrite.
     /// Values the user explicitly cleared, and values whose sidecar write is
-    /// still in flight, are never adopted — local truth outranks stale disk.
+    /// still in flight, are never adopted - local truth outranks stale disk.
     @discardableResult
     func adopt(rating: Int?, label: Int?, for id: String) -> Bool {
         guard !xmpDirty.contains(id), !xmpInFlight.contains(id) else { return false }
@@ -185,7 +185,7 @@ final class RatingsStore {
 
     // MARK: - XMP sidecar writing (debounced, background, RAW-only)
 
-    /// Posted (on main) whenever a sidecar flush touches disk — the grid
+    /// Posted (on main) whenever a sidecar flush touches disk - the grid
     /// uses it to ignore the folder-watcher events our own writes cause.
     static let xmpFlushActivity = Notification.Name("QuickCullXMPFlushActivity")
 
@@ -193,7 +193,7 @@ final class RatingsStore {
     private var xmpInFlight: Set<String> = []
     private var xmpFlushScheduled = false
     /// SERIAL queue: two overlapping bulk edits (all→red, then all→none)
-    /// must flush in order — concurrent batches interleave per-file and an
+    /// must flush in order - concurrent batches interleave per-file and an
     /// old value can land after the new one.
     private let xmpQueue = DispatchQueue(label: "quickcull.xmpflush", qos: .utility)
 
@@ -213,7 +213,7 @@ final class RatingsStore {
             self.xmpQueue.async {
                 for (id, rating, label, rotationDegrees) in batch {
                     let url = URL(fileURLWithPath: id)
-                    // Sidecars for RAW files only — Lightroom ignores JPEG
+                    // Sidecars for RAW files only - Lightroom ignores JPEG
                     // sidecars, and we never rewrite originals.
                     guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
                           FileManager.default.fileExists(atPath: url.path) else { continue }
@@ -233,10 +233,10 @@ final class RatingsStore {
         }
     }
 
-    /// SYNCHRONOUS sidecar drain — every pending XMP hits disk before this
+    /// SYNCHRONOUS sidecar drain - every pending XMP hits disk before this
     /// returns. Called before hand-offs (→ Lightroom/Photoshop import the
     /// files IMMEDIATELY; the 0.8 s debounce meant rate-then-send lost the
-    /// last edits — "my red labels aren't in Lightroom") and at quit.
+    /// last edits - "my red labels aren't in Lightroom") and at quit.
     func flushXMPNow() {
         assert(Thread.isMainThread)
         let batch = xmpDirty.map { id in
@@ -301,7 +301,7 @@ final class RatingsStore {
             guard let self else { return }
             self.saveScheduled = false
             // Snapshot on main (state is main-only); encode + write on a
-            // background queue — during a rating burst this fires every
+            // background queue - during a rating burst this fires every
             // 0.5 s, and a big store shouldn't cost the keyboard rhythm.
             let snap = Snapshot(ratings: self.ratings, rejected: Array(self.rejected),
                                 colorLabels: self.colorLabels, rotations: self.rotations,

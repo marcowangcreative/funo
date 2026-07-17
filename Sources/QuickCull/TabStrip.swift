@@ -1,13 +1,13 @@
 import AppKit
 
-/// Tabbed contact sheets — the anti-Photo-Mechanic version.
+/// Tabbed contact sheets - the anti-Photo-Mechanic version.
 ///
 /// Philosophy (differs from PM on purpose):
 /// - Tabs are bookmarks you place DELIBERATELY (⌘T, ⌘-click a folder),
 ///   never history that piles up. Plain sidebar clicks replace the active
 ///   tab, exactly like before tabs existed.
 /// - Background tabs are FROZEN: a folder path, scroll position, selection
-///   and filter — kilobytes. No decoding, no prefetch, no face priority.
+///   and filter - kilobytes. No decoding, no prefetch, no face priority.
 ///   Only the visible tab feeds the pipelines. Ten tabs cost what one does.
 /// - The strip itself doesn't exist until there are 2+ tabs; single-folder
 ///   sessions look pixel-identical to the pre-tab app.
@@ -71,18 +71,18 @@ final class TabbedContactSheetController: NSViewController {
     /// ONE FOLDER = ONE TAB: if the folder is already open in any tab, we
     /// switch to that tab instead of opening it twice. Two live views of the
     /// same folder means two watchers reacting to the same disk events and
-    /// two selections fighting over one truth — all cost, no workflow.
+    /// two selections fighting over one truth - all cost, no workflow.
     func open(_ url: URL, inNewTab: Bool) {
         if grids.isEmpty { _ = view } // force viewDidLoad → first grid
         let path = url.standardizedFileURL.path
         if let existing = grids.firstIndex(where: { $0.currentFolderURL?.standardizedFileURL.path == path }) {
             if existing != activeIndex {
                 activate(existing)
-                activeGrid.announce("\(url.lastPathComponent) was already open — switched to its tab")
+                activeGrid.announce("\(url.lastPathComponent) was already open - switched to its tab")
             }
             return
         }
-        // Reuse the active tab if it's an empty placeholder — no point
+        // Reuse the active tab if it's an empty placeholder - no point
         // spawning a second tab next to an unused blank "New Tab".
         if inNewTab, activeGrid.currentFolderURL != nil {
             appendGrid()
@@ -93,7 +93,7 @@ final class TabbedContactSheetController: NSViewController {
         onActiveFolderChanged?(url)
     }
 
-    /// ⌘T — a blank tab, browser-style. (It can't duplicate the current
+    /// ⌘T - a blank tab, browser-style. (It can't duplicate the current
     /// folder anymore: one folder = one tab.)
     func newTab() {
         if grids.isEmpty { _ = view } // force viewDidLoad → first grid
@@ -104,7 +104,7 @@ final class TabbedContactSheetController: NSViewController {
         onActiveFolderChanged?(nil)
     }
 
-    /// ⌘W — close the active tab. Returns false when it's the last tab
+    /// ⌘W - close the active tab. Returns false when it's the last tab
     /// (caller should close the window instead).
     @discardableResult
     func closeActiveTab() -> Bool { closeTab(at: activeIndex) }
@@ -121,7 +121,7 @@ final class TabbedContactSheetController: NSViewController {
         }
     }
 
-    /// ⌘←/⌘→ (and ⌘⇧[ / ⌘⇧]) — cycle with wraparound, like a browser.
+    /// ⌘←/⌘→ (and ⌘⇧[ / ⌘⇧]) - cycle with wraparound, like a browser.
     func activateRelative(_ delta: Int) {
         guard grids.count > 1 else { return }
         let next = (activeIndex + delta + grids.count) % grids.count
@@ -148,7 +148,7 @@ final class TabbedContactSheetController: NSViewController {
 
     private func activate(_ index: Int, notify: Bool) {
         guard grids.indices.contains(index) else { return }
-        // Clicking the already-active tab must be a no-op — rebuilding the
+        // Clicking the already-active tab must be a no-op - rebuilding the
         // strip here would break drag gestures and waste a redraw.
         guard index != activeIndex || grids.count == 1 else { return }
         if grids.indices.contains(activeIndex), index != activeIndex {
@@ -210,7 +210,7 @@ final class TabbedContactSheetController: NSViewController {
     private func refreshStrip() {
         let titles = grids.map { $0.currentFolderURL?.lastPathComponent ?? "New Tab" }
         strip.update(titles: titles, active: activeIndex)
-        // Browser-style: the strip is ALWAYS visible — it's how anyone
+        // Browser-style: the strip is ALWAYS visible - it's how anyone
         // learns tabs exist, it shows a folder breadcrumb, and the "+"
         // gives new-tab a permanent home.
         strip.isHidden = false
@@ -219,7 +219,7 @@ final class TabbedContactSheetController: NSViewController {
 }
 
 /// The slim tab bar: graphite, hairline-separated, amber underline on the
-/// active tab, close button appears on hover. Rebuilt on every change —
+/// active tab, close button appears on hover. Rebuilt on every change -
 /// deliberate tabs stay few, so there's nothing to optimize.
 final class TabStrip: NSView {
 
@@ -241,7 +241,7 @@ final class TabStrip: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        // Browser-standard "+" — the permanent new-tab affordance.
+        // Browser-standard "+" - the permanent new-tab affordance.
         plusButton.attributedTitle = NSAttributedString(string: "+", attributes: [
             .foregroundColor: Theme.tx1,
             .font: NSFont.systemFont(ofSize: 16, weight: .regular)
@@ -330,7 +330,7 @@ private final class TabCell: NSView {
         wantsLayer = true
 
         label.stringValue = title
-        label.font = NSFont.systemFont(ofSize: 11.5, weight: isActive ? .semibold : .medium)
+        label.font = NSFont.systemFont(ofSize: 11.5, weight: isActive ? .semibold : .medium)  // ramp: secondary(+Strong)
         label.textColor = isActive ? Theme.tx0 : Theme.tx1
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -357,7 +357,7 @@ private final class TabCell: NSView {
 
         // Measured width: title at its widest weight + close/padding chrome,
         // clamped so one long wedding folder name can't eat the strip.
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+        let font = Theme.secondaryStrong
         let titleWidth = ceil((title as NSString).size(withAttributes: [.font: font]).width)
         let width = min(190, max(92, titleWidth + 46))
 
@@ -383,7 +383,7 @@ private final class TabCell: NSView {
     @objc private func closeTapped(_ sender: Any?) { onClose?() }
 
     override func mouseDown(with event: NSEvent) {
-        // Close button handles its own clicks. Everywhere else we WAIT —
+        // Close button handles its own clicks. Everywhere else we WAIT -
         // selecting on mouse-down rebuilds the strip, which would tear this
         // cell out from under an in-progress drag. Click resolves on
         // mouse-up; drag resolves as reorder.

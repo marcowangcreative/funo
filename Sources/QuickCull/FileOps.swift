@@ -2,7 +2,7 @@ import Foundation
 
 /// File operations for culling: move and trash, always carrying a photo's
 /// companions along (paired JPEG, XMP sidecar) so pairs never split.
-/// The directory stays the source of truth — no database to update.
+/// The directory stays the source of truth - no database to update.
 enum FileOps {
 
     /// Cached per volume. Main thread only.
@@ -11,7 +11,7 @@ enum FileOps {
     /// Posted on the main thread after a move WE initiated completes, with
     /// userInfo["sources"] = the folders files LEFT. The grid reloads the
     /// affected folder immediately instead of waiting for the throttled
-    /// filesystem watcher — the "ghost photos linger after a drag" fix.
+    /// filesystem watcher - the "ghost photos linger after a drag" fix.
     static let filesMoved = Notification.Name("QuickCullFilesMoved")
 
     /// Is this file on a memory card / external drive? Governs how gently
@@ -21,7 +21,7 @@ enum FileOps {
         // Directory-level memo: every file in a folder shares its volume, so
         // the FIRST file answers for all its siblings. Without this, callers
         // that sweep a whole folder (face gating, prefetch gates) issued one
-        // volume-resolution syscall PER FILE on the main thread — thousands
+        // volume-resolution syscall PER FILE on the main thread - thousands
         // per folder click, and measurably slower on external drives.
         let dir = url.deletingLastPathComponent().path
         if let cached = removableDirCache[dir] { return cached }
@@ -41,13 +41,13 @@ enum FileOps {
     private static var memoryCardCache: [String: Bool] = [:]
     private static var memoryCardDirCache: [String: Bool] = [:]
 
-    /// Narrow: true ONLY for real removable media — SD/CF cards, USB flash.
+    /// Narrow: true ONLY for real removable media - SD/CF cards, USB flash.
     /// External HDDs and SSDs report ejectable-but-not-removable, so this is
     /// false for them. Lots of people work straight off external drives, so
     /// those are treated like local disks (face scans run, etc.); only actual
     /// cards are held back (slow + read-only mid-shoot → scan after ingest).
     static func isMemoryCard(_ url: URL) -> Bool {
-        // Same directory-level memo as isOnRemovableVolume — see above.
+        // Same directory-level memo as isOnRemovableVolume - see above.
         let dir = url.deletingLastPathComponent().path
         if let cached = memoryCardDirCache[dir] { return cached }
         let volumePath = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? "/"
@@ -62,7 +62,7 @@ enum FileOps {
     /// Same-basename files that must travel with a photo (paired JPEG,
     /// XMP sidecar). Deduped by canonical file identity: on the default
     /// case-INSENSITIVE APFS, "x.xmp" and "x.XMP" are the SAME file and both
-    /// report as existing — naive checking moved it once, then logged a
+    /// report as existing - naive checking moved it once, then logged a
     /// failure trying to move it again under the other spelling.
     static func companions(of url: URL) -> [URL] {
         let base = url.deletingPathExtension()
@@ -117,7 +117,7 @@ enum FileOps {
     enum Collision {
         case keepBoth   // rename incoming: "Name 2.CR3" (+ "Name 2.xmp"…)
         case skip       // leave colliding photos where they are
-        case overwrite  // existing files go to the TRASH first — never rm
+        case overwrite  // existing files go to the TRASH first - never rm
     }
 
     /// Would this photo (or any companion) land on an existing name?
@@ -136,7 +136,7 @@ enum FileOps {
             .count
     }
 
-    /// One unique stem for the whole group — "IMG_1234 2" — so RAW, JPEG
+    /// One unique stem for the whole group - "IMG_1234 2" - so RAW, JPEG
     /// and sidecar keep matching names after a keep-both rename.
     private static func uniqueStem(for url: URL, in folder: URL) -> String {
         let fm = FileManager.default
@@ -183,14 +183,14 @@ enum FileOps {
             }
             var movedPrimary = false
             for file in all {
-                let name = stem.map { "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
+                let name = stem.map { file.pathExtension.isEmpty ? $0 : "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
                 let dest = folder.appendingPathComponent(name)
                 do {
                     try fm.moveItem(at: file, to: dest)
                     records.append((from: file, to: dest))
                     if file.path == url.path {
                         movedPrimary = true
-                        // Identity is the path — the cull values move too.
+                        // Identity is the path - the cull values move too.
                         RatingsStore.shared.transfer(from: file.path, to: dest.path)
                     }
                 } catch {
@@ -210,7 +210,7 @@ enum FileOps {
     }
 
     /// Copy files (plus companions) into a folder. Pasting into the same
-    /// folder duplicates ("name 2.CR3") — that's what the user asked for.
+    /// folder duplicates ("name 2.CR3") - that's what the user asked for.
     static func copy(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth) -> OperationResult {
         let fm = FileManager.default
         var copied = 0
@@ -225,7 +225,7 @@ enum FileOps {
                     skipped += 1
                     continue
                 case .overwrite:
-                    // Copy-over-self would destroy the original — same-folder
+                    // Copy-over-self would destroy the original - same-folder
                     // duplicates always keep both, whatever the policy says.
                     if url.deletingLastPathComponent().path == folder.path {
                         stem = uniqueStem(for: url, in: folder)
@@ -243,7 +243,7 @@ enum FileOps {
             }
             var copiedPrimary = false
             for file in all {
-                let name = stem.map { "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
+                let name = stem.map { file.pathExtension.isEmpty ? $0 : "\($0).\(file.pathExtension)" } ?? file.lastPathComponent
                 let dest = folder.appendingPathComponent(name)
                 do {
                     try fm.copyItem(at: file, to: dest)
@@ -262,7 +262,7 @@ enum FileOps {
         return OperationResult(primaries: copied, records: records, skipped: skipped)
     }
 
-    /// Move files (plus companions) to the Trash — recoverable, never rm.
+    /// Move files (plus companions) to the Trash - recoverable, never rm.
     static func trash(_ urls: [URL]) -> OperationResult {
         let fm = FileManager.default
         var trashed = 0
@@ -287,7 +287,7 @@ enum FileOps {
 }
 
 /// Undo for file operations: every move/trash batch is recorded and can be
-/// reversed with ⌘Z — files walk back to exactly where they came from.
+/// reversed with ⌘Z - files walk back to exactly where they came from.
 enum FileOpsHistory {
 
     /// How to reverse a batch: moves walk files back; copies TRASH the
@@ -336,13 +336,13 @@ enum FileOpsHistory {
                                                     userInfo: ["sources": Array(dirs)])
                 }
             }
-            return "Undid \(batch.description) — \(restored) file\(restored == 1 ? "" : "s") restored"
+            return "Undid \(batch.description) - \(restored) file\(restored == 1 ? "" : "s") restored"
         case .copy:
             for (_, to) in batch.records.reversed() {
                 guard fm.fileExists(atPath: to.path) else { continue }
                 if (try? fm.trashItem(at: to, resultingItemURL: nil)) != nil { restored += 1 }
             }
-            return "Undid \(batch.description) — \(restored) cop\(restored == 1 ? "y" : "ies") moved to Trash"
+            return "Undid \(batch.description) - \(restored) cop\(restored == 1 ? "y" : "ies") moved to Trash"
         }
     }
 }

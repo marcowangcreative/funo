@@ -1,6 +1,6 @@
 import AppKit
 
-// QuickCull — prototype of a no-import, folder-native photo culling app.
+// QuickCull - prototype of a no-import, folder-native photo culling app.
 // Entry point: builds the NSApplication by hand (no storyboard, no nib),
 // which is what lets this run straight from `swift run`.
 

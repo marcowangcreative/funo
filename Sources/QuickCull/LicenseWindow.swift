@@ -1,6 +1,6 @@
 import AppKit
 
-/// Activation window — the first thing a PAYING customer sees, so it gets
+/// Activation window - the first thing a PAYING customer sees, so it gets
 /// the full graphite/brass treatment: centered lockup, styled key field,
 /// one confident brass button. In trial it's dismissible; once expired,
 /// closing it quits the app (the gate).
@@ -37,28 +37,28 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
         content.wantsLayer = true
         content.layer?.backgroundColor = Theme.bg0.cgColor
 
-        // Brand lockup: the serif italic ƒ/ with mono "uno" — the site's mark.
+        // Brand lockup: the serif italic ƒ/ with mono "uno" - the site's mark.
         let mark = NSTextField(labelWithString: "")
         let lockup = NSMutableAttributedString(string: "ƒ/", attributes: [
-            .font: NSFont(name: "Georgia-Italic", size: 34) ?? NSFont.systemFont(ofSize: 34),
+            .font: NSFont(name: "Georgia-Italic", size: 34) ?? Theme.display,
             .foregroundColor: Theme.accent
         ])
         lockup.append(NSAttributedString(string: "uno", attributes: [
-            .font: Theme.mono(26),
+            .font: Theme.monoDisplay,
             .foregroundColor: Theme.tx0
         ]))
         mark.attributedStringValue = lockup
         mark.alignment = .center
 
-        statusLabel.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        statusLabel.font = Theme.headline
         statusLabel.textColor = Theme.tx0
         statusLabel.alignment = .center
 
-        subLabel.font = NSFont.systemFont(ofSize: 11.5)
+        subLabel.font = Theme.secondary
         subLabel.textColor = Theme.tx2
         subLabel.alignment = .center
 
-        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.font = Theme.caption
         hint.textColor = Theme.tx2
         hint.alignment = .center
 
@@ -68,7 +68,7 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
         fieldWrap.layer?.cornerRadius = 8
         fieldWrap.layer?.borderWidth = 1
         fieldWrap.layer?.borderColor = Theme.line.cgColor
-        keyField.font = Theme.mono(12)
+        keyField.font = Theme.monoData
         keyField.textColor = Theme.tx0
         keyField.placeholderString = "FUNO-…"
         keyField.isBordered = false
@@ -84,7 +84,7 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
             fieldWrap.heightAnchor.constraint(equalToConstant: 36)
         ])
 
-        feedback.font = NSFont.systemFont(ofSize: 11.5)
+        feedback.font = Theme.secondary
         feedback.textColor = Theme.red
         feedback.alignment = .center
         feedback.lineBreakMode = .byWordWrapping
@@ -94,9 +94,9 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
         activateButton.keyEquivalent = "\r"
 
         buyButton = NSButton(title: "", target: self, action: #selector(buyTapped))
-        buyButton.attributedTitle = NSAttributedString(string: "Get a license — $99", attributes: [
+        buyButton.attributedTitle = NSAttributedString(string: "Get a license - $99", attributes: [
             .foregroundColor: Theme.accent,
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: Theme.secondary,
             .underlineStyle: NSUnderlineStyle.single.rawValue
         ])
         buyButton.isBordered = false
@@ -144,12 +144,12 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
             enforceGate = false
             formVisible = false
         case .trial(let days):
-            statusLabel.stringValue = "Trial — \(days) day\(days == 1 ? "" : "s") remaining"
+            statusLabel.stringValue = "Trial - \(days) day\(days == 1 ? "" : "s") remaining"
             subLabel.stringValue = "Full features. One purchase, yours forever, 2 Macs."
             formVisible = true
         case .expired:
             statusLabel.stringValue = "Your trial has ended"
-            subLabel.stringValue = "Enter a license to keep culling — everything you rated is safe in your folders."
+            subLabel.stringValue = "Enter a license to keep culling - everything you rated is safe in your folders."
             formVisible = true
         }
         fieldWrap.isHidden = !formVisible
@@ -167,7 +167,7 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
             self.activateButton.isEnabled = true
             if let display {
                 self.feedback.textColor = Theme.labelColors[3]
-                self.feedback.stringValue = "Activated — licensed to \(display)."
+                self.feedback.stringValue = "Activated - licensed to \(display)."
                 self.enforceGate = false
                 self.refresh()
                 // Let the confirmation register, then get out of the way.
@@ -195,7 +195,7 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-/// Filled brass button — the site's .btn, in AppKit.
+/// Filled brass button - the site's .btn, in AppKit.
 final class BrassButton: NSButton {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -209,7 +209,7 @@ final class BrassButton: NSButton {
         layer?.backgroundColor = Theme.accent.cgColor
         layer?.cornerRadius = 7
         attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .font: Theme.bodyStrong,
             .foregroundColor: NSColor(calibratedRed: 0.09, green: 0.075, blue: 0.06, alpha: 1)
         ])
         setButtonType(.momentaryChange)
