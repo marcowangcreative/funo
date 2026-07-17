@@ -9,6 +9,21 @@
          Empty channel = "you're up to date". Do not hand-edit; re-run the
          release script and it rewrites this file with signed enclosures. -->
         <item>
+            <title>0.9.10</title>
+            <pubDate>Fri, 17 Jul 2026 17:33:14 -0500</pubDate>
+            <sparkle:version>202607171732</sparkle:version>
+            <sparkle:shortVersionString>0.9.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://www.funo.photo/updates/Funo-0.9.10.dmg" length="5094683" type="application/octet-stream" sparkle:edSignature="6g1T2IPaNY82LnXGeqxndzCqeLoezhHrRNnC21KEAtMCvJpVLyT4hjYrovpvGImKbTYp5Y1yGI/8vdywnUdhDg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://www.funo.photo/updates/Funo202607171732-202607171714.delta" sparkle:deltaFrom="202607171714" length="183110" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="NxjaUgratS2rj4z3rd13xVHmnca4iwc7onKA5MzRuhSzfiKczrYdmuBKYBojYiTLVZ+hsPsQXuuuqG4wMhZJDg=="/>
+                <enclosure url="https://www.funo.photo/updates/Funo202607171732-202607171658.delta" sparkle:deltaFrom="202607171658" length="262766" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2k+f/reb4qPXp4eI/eSJXOY6raVy6rj60aOaE5hlyXskuDg6iKf8IYTcrGELQ14SAHj9s8Big7JBEOkvD6ZjAg=="/>
+                <enclosure url="https://www.funo.photo/updates/Funo202607171732-202607161753.delta" sparkle:deltaFrom="202607161753" length="533050" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="GRcQgATUz27tH1h1As0RineG8/If5CHZfzM12S3frqLWUcpRy2zYjfAEp9c0VFmeWfPzfG9PXgMIH/mnzVNYBg=="/>
+                <enclosure url="https://www.funo.photo/updates/Funo202607171732-202607161736.delta" sparkle:deltaFrom="202607161736" length="534202" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="dBOxAWM3uiRI9AH1wo3vEoaq/5D+eKYvuHLi7RlQf6NWNT+yggeLOdHetOGrU2/WJRWbKhv8XXjxVptcyv9dCg=="/>
+                <enclosure url="https://www.funo.photo/updates/Funo202607171732-202607160857.delta" sparkle:deltaFrom="202607160857" length="633234" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="rWGJiO/HQ9QbQm0slLVg5VlYJeJn/QfUmmWaZBH54FGmapw0bB1lLL2DTimXbafNZLF6lLGGun2bM5bsPtp5BA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>0.9.9</title>
             <pubDate>Fri, 17 Jul 2026 17:14:53 -0500</pubDate>
             <sparkle:version>202607171714</sparkle:version>
@@ -36,21 +51,6 @@
                 <enclosure url="https://www.funo.photo/updates/Funo202607171658-202607160857.delta" sparkle:deltaFrom="202607160857" length="627410" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Wd5qBYa9CeBbu4ndr7dscp8HGszZKfPOKtUyg3uQeSYJK6aKZ13w/e+YBx2L942izzN1rfUPhiAqM5Cqj+EDBQ=="/>
                 <enclosure url="https://www.funo.photo/updates/Funo202607171658-202607160029.delta" sparkle:deltaFrom="202607160029" length="646498" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="EBpn2P+C8Nwj9DeohDr3BYrT3KZ8JyP9ZCndIp8gD4bDU7F/5kHlfhRiJ4rxVIXl8tCM4gzqp3odKrrRKR+pAA=="/>
                 <enclosure url="https://www.funo.photo/updates/Funo202607171658-202607152345.delta" sparkle:deltaFrom="202607152345" length="665638" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="WfDL5b4K5h5upNRyqrpkZQjSOi0N3DspgpLew9WXVdFjzE6Ywv4R6+9sAhIpA0CyaypkZ1MwNgLXJk+0LHOODg=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>0.9.7</title>
-            <pubDate>Thu, 16 Jul 2026 17:53:52 -0500</pubDate>
-            <sparkle:version>202607161753</sparkle:version>
-            <sparkle:shortVersionString>0.9.7</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://www.funo.photo/updates/Funo-0.9.7.dmg" length="4854431" type="application/octet-stream" sparkle:edSignature="iz6ahtvGR+FNnXoSJln1ZLjR7lbHoDBV4xLQKWB4MOvDKdEZ6YtgQKAUdDnykyiDOgEmWc5QV4a0Y0mhW8yzBQ=="/>
-            <sparkle:deltas>
-                <enclosure url="https://www.funo.photo/updates/Funo202607161753-202607161736.delta" sparkle:deltaFrom="202607161736" length="11042" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="5L2HeATyr+8Pp3r2V13m5rbbpDcU3fiA0busmUM6xBN8VVIxWz6FnTwcl2fYFJSDpViUKlxfPoqsNHpG9ooGAg=="/>
-                <enclosure url="https://www.funo.photo/updates/Funo202607161753-202607160857.delta" sparkle:deltaFrom="202607160857" length="352798" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OP81/47dQuynNiDeE1pqOypIr6nV9Q9IbGF/MEh98/mf9X03lZ6wkNQpNjTOVTu401lDHuqiMoGUTxgzwQa+Bw=="/>
-                <enclosure url="https://www.funo.photo/updates/Funo202607161753-202607160029.delta" sparkle:deltaFrom="202607160029" length="388266" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="KK15U2QXjjBZkDagL5rVnixpdmOFr76LfSZuAOS8p5/CtRwGGeTIRKVdcLq29oYdxkOgGqUoFUVPGVmh4b0CCg=="/>
-                <enclosure url="https://www.funo.photo/updates/Funo202607161753-202607152345.delta" sparkle:deltaFrom="202607152345" length="411762" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="jZ5zrj5D38+kIbsFpIfI1AD5brVlCknpiCsLn/XMR8eeCEe+O7B/pVi/6eBhrSZFu6uJfKCjwIzVDgneffw1AQ=="/>
-                <enclosure url="https://www.funo.photo/updates/Funo202607161753-202607152320.delta" sparkle:deltaFrom="202607152320" length="414866" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="FSrn8LCa7dT/rcWZfgASfr98NGdkv6U8eCtSc2Y8iMmSq34dBoIaKF4johxy9+5YeljpCIMGfEonwuF3eA/2CQ=="/>
             </sparkle:deltas>
         </item>
     </channel>

@@ -103,6 +103,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     private let newTag = NSTextField(labelWithString: "NEW")
     private let spaceValue = NSTextField(labelWithString: "")
     private let trustLabel = NSTextField(labelWithString: "Your card is never changed - photos are copied.")
+    private let multiCardWarning = NSTextField(labelWithString: "")
     private var thumbCells: [ThumbCell] = []
     private let moreLabel = NSTextField(labelWithString: "")
     private let railEmptyLabel = NSTextField(labelWithString: "Insert a card")
@@ -378,8 +379,16 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
 
         // Chips need a title - floating names read as decoration.
         let shooterEyebrow = eyebrow("Photographer")
+        multiCardWarning.attributedStringValue = NSAttributedString(
+            string: "\u{26A0} Two cards use the SELECTED photographer for anything unrecognized. For two different shooters, ingest one card at a time.",
+            attributes: [.font: Theme.caption, .foregroundColor: Theme.accent])
+        multiCardWarning.lineBreakMode = .byWordWrapping
+        multiCardWarning.maximumNumberOfLines = 2
+        multiCardWarning.isHidden = true
+        multiCardWarning.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let rightStack = NSStackView(views: [cardEyebrow, specLine, jobWell, shooterEyebrow, shooterStack, shooterInfo,
-                                             destWell, trustLabel, progressBar, statusRow])
+                                             multiCardWarning, destWell, trustLabel, progressBar, statusRow])
         rightStack.orientation = .vertical
         rightStack.alignment = .leading
         rightStack.spacing = 11
@@ -387,6 +396,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         rightStack.setCustomSpacing(14, after: specLine)
         rightStack.setCustomSpacing(6, after: shooterEyebrow)
         rightStack.setCustomSpacing(4, after: shooterStack)
+        rightStack.setCustomSpacing(10, after: multiCardWarning)
         rightStack.setCustomSpacing(8, after: destWell)
         rightStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -405,6 +415,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             jobWell.widthAnchor.constraint(equalTo: rightStack.widthAnchor),
             destWell.widthAnchor.constraint(equalTo: rightStack.widthAnchor),
             trustLabel.widthAnchor.constraint(equalTo: rightStack.widthAnchor),
+            multiCardWarning.widthAnchor.constraint(equalTo: rightStack.widthAnchor),
             progressBar.widthAnchor.constraint(equalTo: rightStack.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: rightStack.widthAnchor)
         ])
@@ -1143,6 +1154,10 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     // MARK: - Cards
 
     private var cardScanGeneration = 0
+    /// When the status line last received a RESTING message ("Card
+    /// ejected", "Done - N copied", a failure). Card rescans retire
+    /// stale ones - but not the message that triggered the rescan.
+    private var statusStamp = Date.distantPast
 
     private func refreshCards() {
         cardRows.removeAll()
@@ -1164,7 +1179,16 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     }
 
     private func buildCardRows(_ found: [(card: URL, name: String, sections: [URL])]) {
+        // A NEW card context retires the old card's status ("Card ejected
+        // - safe to remove" must not haunt the next card). The 1.5s grace
+        // keeps the eject confirmation alive through its own rescan.
+        if job == nil, Date().timeIntervalSince(statusStamp) > 1.5 {
+            statusLabel.stringValue = ""
+            statusLabel.toolTip = nil
+            statusLabel.textColor = .secondaryLabelColor
+        }
         detectedCardVolumes = found.map { $0.card }
+        multiCardWarning.isHidden = found.count < 2
         ejectButton.isHidden = found.isEmpty
         railEmptyLabel.isHidden = !found.isEmpty
         moreLabel.isHidden = found.isEmpty
@@ -1615,6 +1639,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
                 self.statusLabel.textColor = .secondaryLabelColor
             }
             self.statusLabel.stringValue = line
+            self.statusStamp = Date()
             for error in errors { NSLog("funo ingest error: \(error)") }
             self.job = nil
             if errors.isEmpty, UserDefaults.standard.bool(forKey: "QuickCullEjectWhenDone") {
@@ -1701,6 +1726,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         Ejector.eject(volumes: volumes) { [weak self] result in
             guard let self else { return }
             self.ejectButton.isEnabled = true
+            self.statusStamp = Date()
             if result.succeeded {
                 self.statusLabel.textColor = .secondaryLabelColor
                 self.statusLabel.stringValue = result.ejected.count == 1
