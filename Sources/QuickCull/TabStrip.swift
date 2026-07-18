@@ -53,8 +53,10 @@ final class TabbedContactSheetController: NSViewController {
         strip.onSelect = { [weak self] index in self?.activate(index) }
         strip.onClose = { [weak self] index in
             guard let self else { return }
-            // Browser-accurate: closing the last tab closes the window.
-            if !self.closeTab(at: index) { self.view.window?.performClose(nil) }
+            // Closing a tab is "close this view," never "quit the app" -
+            // ⌘Q and the red button are the quit gestures. Closing the
+            // LAST tab resets it to a fresh empty tab; the window stays.
+            if !self.closeTab(at: index) { self.resetToEmptyTab() }
         }
         strip.onReorder = { [weak self] from, to in self?.moveTab(from: from, to: to) }
         strip.onNewTab = { [weak self] in self?.newTab() }
@@ -105,9 +107,34 @@ final class TabbedContactSheetController: NSViewController {
     }
 
     /// ⌘W - close the active tab. Returns false when it's the last tab
-    /// (caller should close the window instead).
+    /// (caller resets it to a fresh empty tab instead of quitting).
     @discardableResult
-    func closeActiveTab() -> Bool { closeTab(at: activeIndex) }
+    func closeActiveTab() -> Bool {
+        if closeTab(at: activeIndex) { return true }
+        resetToEmptyTab()
+        return true
+    }
+
+    /// The last tab can't be closed away into nothing - closing it clears
+    /// it back to a fresh welcome tab. The app quits only via ⌘Q / red button.
+    private func resetToEmptyTab() {
+        let stale = activeGrid
+        appendGrid()
+        activate(grids.count - 1, notify: false)
+        // Drop the old grid now that a fresh one is mounted.
+        if let staleIndex = grids.firstIndex(where: { $0 === stale }), grids.count > 1 {
+            grids.remove(at: staleIndex)
+            stale.prepareForClose()
+            stale.view.removeFromSuperview()
+            stale.removeFromParent()
+            if activeIndex >= grids.count { activeIndex = grids.count - 1 }
+        }
+        mountActive()
+        activeGrid.didBecomeActiveTab()
+        activeGrid.showNewTabPlaceholder()
+        refreshStrip()
+        onActiveFolderChanged?(nil)
+    }
 
     func activate(_ index: Int) { activate(index, notify: true) }
 

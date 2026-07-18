@@ -257,6 +257,8 @@ final class PhotoGridViewController: NSViewController,
     private let collectionView = CullCollectionView()
     private let layout = NSCollectionViewFlowLayout()
     private var selectionAnchor: Int?
+    /// The moving end of a shift-arrow range (anchor stays put).
+    private var shiftFocus: Int?
     private let filterBar = StarFilterBar()
     private let colorFilterBar = ColorFilterBar()
     private let sortBar = FilterBar(titles: SortKey.titles)
@@ -408,7 +410,10 @@ final class PhotoGridViewController: NSViewController,
             guard let self else { return }
             self.aiDone = done
             self.aiTotal = total
-            self.updateStatus() // "scanning faces N/M" lives in the footer
+            // Cached folders stream thousands of results in a burst; a full
+            // updateStatus (2x O(n) rated/rejected recount + footer relayout)
+            // per result stormed the main thread. Coalesce to ~7 Hz.
+            self.scheduleStatusUpdate()
         }
 
         // ── Toolbar ──────────────────────────────────────────────
@@ -447,6 +452,9 @@ final class PhotoGridViewController: NSViewController,
             guard let self, let key = SortKey(rawValue: index) else { return }
             self.sortKey = key
             self.resort(keepSelection: true)
+            if key == .capture, self.captureDates.isEmpty, !self.allAssets.isEmpty {
+                self.scanCaptureDates(self.allAssets, generation: self.scanGeneration)
+            }
         }
         toolbar.addSubview(sortBar)
 
@@ -592,46 +600,99 @@ final class PhotoGridViewController: NSViewController,
 
     // MARK: - First-open welcome
 
-    private var welcomeOverlay: NSStackView?
+    private var welcomeOverlay: NSView?
 
-    /// First open is a void - a little hand-holding, engraved in brass.
-    /// Gone the moment a folder opens; gone forever via "Don't show again".
+    /// First open is a void - a proper, left-aligned intro that orients a
+    /// new photographer. Gone the moment a folder opens; gone for good via
+    /// "Don't show again".
     private func installWelcomeIfNeeded() {
         guard currentFolder == nil,
               !UserDefaults.standard.bool(forKey: "QuickCullHideWelcome"),
               welcomeOverlay == nil else { return }
-        let eyebrowLabel = NSTextField(labelWithString: "")
-        eyebrowLabel.attributedStringValue = NSAttributedString(string: "GET STARTED", attributes: [
-            .font: Theme.monoEyebrow, .foregroundColor: Theme.tx2, .kern: 1.4
-        ])
-        let headline = NSTextField(labelWithString: "Insert a memory card - or open a folder.")
-        headline.font = Theme.headline
-        headline.textColor = Theme.accent
-        let sub = NSTextField(wrappingLabelWithString:
-            "Pop a card in and ingest opens by itself. Or pick any folder of photos from the sidebar - no importing, no catalog.")
-        sub.font = Theme.secondary
-        sub.textColor = Theme.tx2
-        sub.alignment = .center
-        sub.preferredMaxLayoutWidth = 400
+
+        // The real mark: serif-italic ƒ/ + mono uno (the site lockup), not
+        // the squat mono ƒ.
+        let mark = NSTextField(labelWithString: "")
+        let lockup = NSMutableAttributedString(string: "ƒ/", attributes: [
+            .font: NSFont(name: "Georgia-Italic", size: 30) ?? Theme.display,
+            .foregroundColor: Theme.accent])
+        lockup.append(NSAttributedString(string: "uno", attributes: [
+            .font: Theme.monoDisplay, .foregroundColor: Theme.tx0]))
+        mark.attributedStringValue = lockup
+
+        let sub = NSTextField(wrappingLabelWithString: "Fast, folder-native culling. No import, no catalog.")
+        sub.font = Theme.body
+        sub.textColor = Theme.tx1
+        sub.preferredMaxLayoutWidth = 376
         sub.isSelectable = false
+
+        // Three left-aligned steps: engraved brass key, plain description.
+        func step(_ key: String, _ desc: String) -> NSStackView {
+            let k = NSTextField(labelWithString: "")
+            k.attributedStringValue = NSAttributedString(string: key.uppercased(), attributes: [
+                .font: Theme.monoEyebrow, .foregroundColor: Theme.accent, .kern: 1.2])
+            k.translatesAutoresizingMaskIntoConstraints = false
+            k.widthAnchor.constraint(equalToConstant: 96).isActive = true
+            k.setContentHuggingPriority(.required, for: .horizontal)
+            let d = NSTextField(wrappingLabelWithString: desc)
+            d.font = Theme.secondary
+            d.textColor = Theme.tx1
+            d.preferredMaxLayoutWidth = 250
+            d.isSelectable = false
+            let row = NSStackView(views: [k, d])
+            row.orientation = .horizontal
+            row.alignment = .firstBaseline
+            row.spacing = 12
+            return row
+        }
+        let steps = NSStackView(views: [
+            step("Insert a card", "Ingest opens on its own. Pick who shot it, hit go."),
+            step("Open a folder", "Any folder in the sidebar opens instantly."),
+            step("\u{2318}F", "Find any frame or folder in a single keystroke.")
+        ])
+        steps.orientation = .vertical
+        steps.alignment = .leading
+        steps.spacing = 11
+
+        let rule = NSView()
+        rule.wantsLayer = true
+        rule.layer?.backgroundColor = Theme.line.cgColor
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
+
         let dismiss = NSButton(title: "Don't show this again", target: self, action: #selector(dismissWelcome(_:)))
         dismiss.isBordered = false
         dismiss.font = Theme.caption
         dismiss.contentTintColor = .tertiaryLabelColor
-        let stack = NSStackView(views: [eyebrowLabel, headline, sub, dismiss])
+
+        let stack = NSStackView(views: [mark, sub, rule, steps, dismiss])
         stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 10
-        stack.setCustomSpacing(6, after: eyebrowLabel)
-        stack.setCustomSpacing(18, after: sub)
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.setCustomSpacing(10, after: mark)
+        stack.setCustomSpacing(20, after: sub)
+        stack.setCustomSpacing(18, after: rule)
+        stack.setCustomSpacing(20, after: steps)
+        stack.edgeInsets = NSEdgeInsets(top: 30, left: 34, bottom: 26, right: 34)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+
+        // No card chrome - the redesigned content stands on its own.
+        let card = NSView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        view.addSubview(card)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -20),
-            sub.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+            card.widthAnchor.constraint(equalToConstant: 444),
+            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: card.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            rule.widthAnchor.constraint(equalTo: card.widthAnchor, constant: -68)
         ])
-        welcomeOverlay = stack
+        welcomeOverlay = card   // handle for teardown / mutual-exclusion with emptyLabel
+        emptyLabel.stringValue = ""   // the card owns the empty screen
     }
 
     private func removeWelcome() {
@@ -720,6 +781,16 @@ final class PhotoGridViewController: NSViewController,
         layout.invalidateLayout()
     }
 
+    /// + / - keys nudge the grid thumbnail size, keeping the dial in sync.
+    private func adjustThumbSize(by delta: CGFloat) {
+        let lo = CGFloat(sizeSlider.minValue), hi = CGFloat(sizeSlider.maxValue)
+        let w = max(lo, min(hi, CGFloat(sizeSlider.doubleValue) + delta))
+        guard w != CGFloat(sizeSlider.doubleValue) else { return }
+        sizeSlider.doubleValue = Double(w)
+        layout.itemSize = NSSize(width: w, height: (w * 0.68).rounded() + 50)
+        layout.invalidateLayout()
+    }
+
     // MARK: - Folder loading & filtering
 
     func loadFolder(_ url: URL) {
@@ -750,14 +821,32 @@ final class PhotoGridViewController: NSViewController,
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
                 guard let self, self.scanGeneration == generation else { return }
-                self.allAssets = self.sorted(result.assets)
+                if self.sortKey == .name {
+                    self.allAssets = self.sortAscending ? result.assets : result.assets.reversed()
+                } else {
+                    self.allAssets = self.sorted(result.assets)
+                }
                 self.scanMS = result.elapsed * 1000
                 self.pairedHidden = result.pairedJPEGCount
                 self.captureDates = [:]
                 self.applyFilter(keepSelection: false)
                 self.scanSidecars(self.allAssets, generation: generation)
-                self.scanCaptureDates(result.assets, generation: generation)
-                FaceAnalyzer.shared.analyzeFolder(result.assets)
+                // Capture dates need an EXIF header read PER FILE - thousands
+                // of drive reads that fight the thumbnails. The default name
+                // sort never uses them, so only pay it when sorting by
+                // capture (and lazily on the first switch to it).
+                if self.sortKey == .capture {
+                    self.scanCaptureDates(result.assets, generation: generation)
+                }
+                // Face analysis reads a big decode PER photo. On a 5k folder
+                // on an external drive it saturates I/O and starves the very
+                // thumbnails the user is looking at. Let the thumbnails win
+                // the drive first; start faces ~2 s later, and bail if the
+                // user has already moved to another folder.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self, self.scanGeneration == generation else { return }
+                    FaceAnalyzer.shared.analyzeFolder(self.allAssets)
+                }
             }
         }
     }
@@ -905,9 +994,12 @@ final class PhotoGridViewController: NSViewController,
         } else {
             collectionView.scroll(NSPoint.zero)
         }
-        emptyLabel.stringValue = displayedAssets.isEmpty
-            ? (allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
-            : ""
+        // The welcome overlay owns the empty screen - never stack
+        // "No photos in this folder" on top of it.
+        emptyLabel.stringValue = welcomeOverlay != nil ? ""
+            : (displayedAssets.isEmpty
+                ? (allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
+                : "")
 
         if let pendingID = pendingSelectionID {
             pendingSelectionID = nil
@@ -955,10 +1047,20 @@ final class PhotoGridViewController: NSViewController,
         let rejected = allAssets.filter { RatingsStore.shared.isRejected($0.id) }.count
         if rated > 0 || rejected > 0 { parts.append("\(rated) rated · \(rejected) rejected") }
         if aiTotal > 0, aiDone < aiTotal { parts.append("scanning faces \(aiDone)/\(aiTotal)") }
-        if let folder = currentFolder, FileOps.isOnRemovableVolume(folder), FaceAnalyzer.shared.isEnabled {
-            parts.append("card: faces after ingest")
-        }
         pushStatus(parts.joined(separator: "   ·   "))
+    }
+
+    private var statusUpdateScheduled = false
+    /// Collapse a burst of status updates (face/sidecar progress) into one
+    /// refresh per ~150 ms - the footer counts don't need per-result fidelity.
+    func scheduleStatusUpdate() {
+        guard !statusUpdateScheduled else { return }
+        statusUpdateScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.statusUpdateScheduled = false
+            self.updateStatus()
+        }
     }
 
     private func reportFirstThumbIfNeeded() {
@@ -1142,9 +1244,20 @@ final class PhotoGridViewController: NSViewController,
         }
     }
 
+    /// The Finder "move to trash" sound - the canonical system path
+    /// (stable across macOS versions). Silent if it can't be found.
+    private static let trashSound: NSSound? = {
+        let path = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/finder/empty trash.aif"
+        return NSSound(contentsOfFile: path, byReference: true)
+    }()
+
     func trashSelection() {
         let assets = selectedAssets
         guard !assets.isEmpty else { return }
+        // Fire the sound ON the gesture, like Finder - playing it after the
+        // async trash finished made it feel laggy and detached ("too long").
+        Self.trashSound?.stop()
+        Self.trashSound?.play()
         let anchor = selectedIndex ?? 0
         let urls = assets.map { $0.url }
         flash("Moving \(urls.count) photo\(urls.count == 1 ? "" : "s") to Trash…")
@@ -1371,6 +1484,7 @@ final class PhotoGridViewController: NSViewController,
         collectionView.deselectItems(at: collectionView.selectionIndexPaths)
         collectionView.selectItems(at: [ip], scrollPosition: .nearestHorizontalEdge)
         selectionAnchor = index
+        shiftFocus = nil
         // Warm the full preview so Space is instant - but not on a memory
         // card, where arrow-scrolling would trigger a multi-MB read per
         // keystroke and starve the thumbnails.
@@ -1414,6 +1528,21 @@ final class PhotoGridViewController: NSViewController,
         return max(1, Int((usable + layout.minimumInteritemSpacing) / per))
     }
 
+    /// Arrow keys: plain moves the single selection; ⇧ grows/shrinks a
+    /// range from the anchor as you go (Finder semantics).
+    private func arrow(_ delta: Int, shift: Bool) -> Bool {
+        guard !displayedAssets.isEmpty else { return true }
+        guard shift else { shiftFocus = nil; moveSelection(delta); return true }
+        if selectionAnchor == nil { selectionAnchor = selectedIndex ?? 0 }
+        let base = shiftFocus ?? selectedIndex ?? selectionAnchor ?? 0
+        let target = max(0, min(displayedAssets.count - 1, base + delta))
+        shiftFocus = target
+        _ = selectRange(to: target)     // selects anchor…target, anchor unchanged
+        collectionView.scrollToItems(at: [IndexPath(item: target, section: 0)],
+                                     scrollPosition: .nearestHorizontalEdge)
+        return true
+    }
+
     private func moveSelection(_ delta: Int) {
         guard !displayedAssets.isEmpty else { return }
         // With a multi-selection, arrows anchor on the edge in travel direction
@@ -1429,10 +1558,10 @@ final class PhotoGridViewController: NSViewController,
     /// Returns true if the event was consumed.
     func handleKey(_ event: NSEvent) -> Bool {
         switch event.keyCode {
-        case 123: moveSelection(-1); return true            // ←
-        case 124: moveSelection(1); return true             // →
-        case 126: moveSelection(-columnsCount); return true // ↑
-        case 125: moveSelection(columnsCount); return true  // ↓
+        case 123: return arrow(-1, shift: event.modifierFlags.contains(.shift))            // ←
+        case 124: return arrow(1, shift: event.modifierFlags.contains(.shift))             // →
+        case 126: return arrow(-columnsCount, shift: event.modifierFlags.contains(.shift)) // ↑
+        case 125: return arrow(columnsCount, shift: event.modifierFlags.contains(.shift))  // ↓
         case 115: select(index: 0); return true             // home
         case 119: select(index: displayedAssets.count - 1); return true // end
         case 49, 36:                                        // space, return
@@ -1479,6 +1608,10 @@ final class PhotoGridViewController: NSViewController,
             // Photo Mechanic muscle memory: [ rotates CCW, ] rotates CW.
             rotateSelection(by: chars == "]" ? 90 : -90)
             return true
+        case "=", "+":
+            adjustThumbSize(by: 24); return true
+        case "-", "_":
+            adjustThumbSize(by: -24); return true
         case "s":
             // Survey: compare 2–4 selected frames side by side.
             let assets = selectedAssets

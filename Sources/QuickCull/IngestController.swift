@@ -16,6 +16,10 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         controller.prefillActiveJob()
         controller.refreshCards()
         controller.showWindow(nil)
+        // Optically centered EVERY open (Apple's center() sits slightly
+        // above true middle), not just on first creation - the sheet
+        // shouldn't reappear wherever it was last dragged.
+        controller.window?.center()
         controller.window?.makeKeyAndOrderFront(nil)
         // Ride ABOVE the main window until dismissed - clicking the grid
         // must not bury the sheet. Child windows also travel with the
@@ -56,6 +60,9 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     private var selectedShooterPrefix: String?
     private var cardPhotoCount = 0
     private var cardBytes: Int64 = 0
+    /// Per-SECTION totals, so "needs X" and the counts follow the
+    /// checkboxes instead of always billing the whole card.
+    private var sectionBytes: [URL: Int64] = [:]
     private var lastErrors: [String] = []
 
     // Mixed-card chains: totals accumulate across per-shooter runs.
@@ -882,7 +889,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     private var spaceScanGeneration = 0
 
     private func refreshSpace() {
-        let needed = cardBytes
+        let needed = selectedBytes
         let mainTarget: URL? = destinationIsSet ? destination : nil
         let backupTarget = backupDestination
         spaceScanGeneration += 1
@@ -1243,6 +1250,16 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
 
     @objc private func sectionToggled(_ sender: NSButton) { refreshScope() }
 
+    /// Sections the user has actually checked - the basis for "needs X".
+    private var selectedSections: [URL] {
+        cardRows.flatMap { $0.sections.filter { $0.button.state == .on }.map { $0.folder } }
+    }
+    private var selectedBytes: Int64 {
+        // Before detection fills the maps, fall back to the whole-card
+        // figure so the verdict isn't blank mid-scan.
+        guard !sectionBytes.isEmpty else { return cardBytes }
+        return selectedSections.reduce(0) { $0 + (sectionBytes[$1] ?? 0) }
+    }
     private func refreshScope() {
         let total = cardRows.reduce(0) { $0 + $1.sections.count }
         let on = cardRows.reduce(0) { $0 + $1.sections.filter { $0.button.state == .on }.count }
@@ -1261,6 +1278,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         }
         guard !detectedCardName.isEmpty else { return }
         refreshSpecLine(cardName: detectedCardName)
+        refreshSpace()
     }
 
     /// The folder checkboxes, summoned on demand - the drawer stays terse.
@@ -1396,6 +1414,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             detectedSerial = nil; detectedModel = nil; detectedCardUUID = nil
             cardMemoryFolderExists = false
             sectionSerials = [:]; cardPhotoCount = 0; cardBytes = 0
+            sectionBytes = [:]
             refreshShooterInfo(); refreshCrumbs()
             return
         }
@@ -1407,18 +1426,20 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             // EVERY card's sections - two readers at once is a real
             // wedding-night shape, and card 2's serials matter as much
             // as card 1's.
+            var perSectionBytes: [URL: Int64] = [:]
             for cardEntry in found {
                 for section in cardEntry.sections {
                     let files = IngestJob.mediaFiles(under: section)
                     allFiles.append(contentsOf: files)
+                    perSectionBytes[section] = files.reduce(Int64(0)) {
+                        $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                    }
                     if let file = files.first, let info = ShooterStore.cameraInfo(of: file) {
                         perSection[section] = info
                     }
                 }
             }
-            let bytes = allFiles.reduce(Int64(0)) {
-                $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            }
+            let bytes = perSectionBytes.values.reduce(0, +)
             let thumbSources = Array(allFiles.prefix(6))
             let memoryFolderExists: Bool = {
                 guard let uuid, let memory = ShooterStore.shared.cardMemory(volumeUUID: uuid) else { return false }
@@ -1434,6 +1455,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
                 self.cardMemoryFolderExists = memoryFolderExists
                 self.cardPhotoCount = allFiles.count
                 self.cardBytes = bytes
+                self.sectionBytes = perSectionBytes
                 for (_, info) in perSection {
                     if let model = info.model { ShooterStore.shared.noteModel(model, forSerial: info.serial) }
                 }

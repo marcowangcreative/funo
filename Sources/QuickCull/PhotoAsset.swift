@@ -46,20 +46,24 @@ enum FolderScanner {
         let start = Date()
         let fm = FileManager.default
 
-        let contents = (try? fm.contentsOfDirectory(
-            at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        // FAST readdir. The URL API with .skipsHiddenFiles stat-ed EVERY
+        // entry to resolve its hidden flag - measured 7.7 s on a 5,700-file
+        // external folder. contentsOfDirectory(atPath:) is a raw readdir
+        // with zero per-file I/O; we skip dotfiles by name instead (camera
+        // output never sets the hidden FLAG without a leading dot). mtime is
+        // only a capture-sort fallback and streams in later via
+        // scanCaptureDates, so it isn't read here at all.
+        let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
 
         var images: [PhotoAsset] = []
-        images.reserveCapacity(contents.count)
-        for url in contents {
-            let ext = url.pathExtension
+        images.reserveCapacity(names.count)
+        for name in names {
+            if name.hasPrefix(".") { continue }
+            let ext = (name as NSString).pathExtension
             guard PhotoAsset.isImageExtension(ext) else { continue }
             let isRaw = PhotoAsset.rawExtensions.contains(ext.lowercased())
-            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-            images.append(PhotoAsset(url: url, filename: url.lastPathComponent, isRAW: isRaw, modificationDate: mtime))
+            let url = folder.appendingPathComponent(name)
+            images.append(PhotoAsset(url: url, filename: name, isRAW: isRaw, modificationDate: .distantPast))
         }
 
         // RAW+JPEG pairing: same base name → one grid item (the RAW), badged.

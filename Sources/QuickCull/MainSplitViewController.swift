@@ -180,12 +180,19 @@ final class MainSplitViewController: NSSplitViewController {
         tabs.newTab()
     }
 
-    /// ⌘W: close the tab; when it's the last one, close the window.
+    /// Bring the welcome screen (and the aperture ring) back: clear the
+    /// "don't show" flag and open it on a fresh empty tab.
+    func showWelcomeScreen() {
+        UserDefaults.standard.set(false, forKey: "QuickCullHideWelcome")
+        guard previewOverlay == nil, surveyOverlay == nil else { return }
+        tabs.newTab()
+    }
+
+    /// ⌘W: close the active tab. The last tab resets to a fresh empty tab
+    /// rather than quitting - ⌘Q and the red button are the quit gestures.
     func closeTabOrWindow() {
         guard previewOverlay == nil, surveyOverlay == nil else { return }
-        if !tabs.closeActiveTab() {
-            view.window?.performClose(nil)
-        }
+        tabs.closeActiveTab()
     }
 
     /// ⌘[ / ⌘] - folder history of the active tab.

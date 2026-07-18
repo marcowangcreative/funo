@@ -469,17 +469,27 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                     ? FileOps.copy(urls, to: destination, onCollision: policy)
                     : FileOps.move(urls, to: destination, onCollision: policy)
                 DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     FileOpsHistory.push("\(copying ? "copy" : "move") to \(destination.lastPathComponent)",
                                         kind: copying ? .copy : .move, result.records)
-                    node.invalidateChildren()
-                    self?.outlineView.reloadItem(node, reloadChildren: true)
-                    // A moved FOLDER also vanishes from where it was -
-                    // refresh every source branch, not just the target.
-                    if !copying {
-                        let parents = Set(result.records.map { $0.from.deletingLastPathComponent() })
-                        for parent in parents { self?.refreshBranchContaining(parent) }
+                    // Rebuild every affected branch BY URL, never via the
+                    // drop-target `node` reference: refreshing the source
+                    // parent rebuilds its children into NEW node objects,
+                    // orphaning that reference and leaving a moved folder
+                    // invisible in a fresh, collapsed parent until relaunch.
+                    var affected = Set(result.records.map { $0.from.deletingLastPathComponent().path })
+                    affected.insert(destination.path)
+                    for p in affected {
+                        self.refreshBranchContaining(URL(fileURLWithPath: p))
                     }
-                    self?.onFilesMoved?(result.primaries, destination)
+                    // A moved FOLDER should be visible where it landed.
+                    if !copying,
+                       let landed = result.records.first(where: {
+                           (try? $0.to.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                       })?.to {
+                        self.reveal(landed)
+                    }
+                    self.onFilesMoved?(result.primaries, destination)
                 }
             }
             if collisions > 0 {

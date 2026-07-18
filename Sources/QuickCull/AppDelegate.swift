@@ -58,6 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // f/uno runs its OWN tab system - kill macOS's native window
+        // tabbing so it stops auto-injecting a dead "Show Tab Bar" /
+        // "Show All Tabs" into the View menu.
+        NSWindow.allowsAutomaticWindowTabbing = false
         if updaterAvailable { updaterController.startUpdater() }
         #if DEBUG
         MainThreadWatchdog.shared.start()
@@ -307,6 +311,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.colorFirstMenuItem = colorFirstItem
         NotificationCenter.default.addObserver(self, selector: #selector(cullModeDidChange),
                                                name: RatingsStore.cullModeChanged, object: nil)
+        viewMenu.addItem(.separator())
+        let welcomeItem = NSMenuItem(title: "Show Welcome Screen",
+                                     action: #selector(showWelcomeScreen(_:)), keyEquivalent: "")
+        welcomeItem.target = self
+        viewMenu.addItem(welcomeItem)
         viewMenuItem.submenu = viewMenu
 
         // Window menu
@@ -385,6 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ThumbnailLoader.shared.clearMemoryCaches()
         FaceAnalyzer.shared.clearResults()
         mainController.noteCachesCleared()
+    }
+
+    @objc private func showWelcomeScreen(_ sender: Any?) {
+        mainController.showWelcomeScreen()
     }
 
     @objc private func showIngest(_ sender: Any?) {

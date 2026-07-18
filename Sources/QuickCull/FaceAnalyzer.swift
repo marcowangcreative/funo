@@ -209,7 +209,22 @@ final class FaceAnalyzer {
             return
         }
 
-        for asset in pending {
+        // Enqueue in CHUNKS across runloop turns, deferred one turn.
+        // Building 3,000 operations in a single synchronous pass blocked
+        // the main thread for ~2 s at the exact moment the first thumbnails
+        // were trying to paint (they can only paint on main) - a visible
+        // "nothing, then a burst" stall on big folders. Chunking lets the
+        // thumbnail completions interleave and win the race.
+        DispatchQueue.main.async { [weak self] in
+            self?.enqueueAnalysis(pending, from: 0, gen: gen)
+        }
+    }
+
+    private func enqueueAnalysis(_ pending: [PhotoAsset], from start: Int, gen: Int) {
+        guard gen == generation else { return }
+        let end = min(start + 200, pending.count)
+        for index in start..<end {
+            let asset = pending[index]
             let id = asset.id
             let url = asset.url
             let op = BlockOperation()
@@ -240,6 +255,11 @@ final class FaceAnalyzer {
             }
             pendingOps[id] = op
             queue.addOperation(op)
+        }
+        if end < pending.count {
+            DispatchQueue.main.async { [weak self] in
+                self?.enqueueAnalysis(pending, from: end, gen: gen)
+            }
         }
     }
 
