@@ -44,11 +44,15 @@ final class RatingsStore {
     static let cullModeChanged = Notification.Name("QuickCullCullModeChanged")
     private static let colorFirstKey = "QuickCullColorFirstRating"
 
-    /// When true, the bare number keys 1–5 apply COLOR labels and ⌃1–5 apply
-    /// star ratings; when false (default) it's the reverse. Persisted so the
+    /// When true (DEFAULT), the bare number keys 1–5 apply COLOR labels and
+    /// ⌃1–5 apply star ratings; when false it's the reverse. Persisted so the
     /// choice survives launches; posts `cullModeChanged` on change.
     var colorFirstRating: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.colorFirstKey) }
+        get {
+            // Default to color-first when the user has never chosen.
+            if UserDefaults.standard.object(forKey: Self.colorFirstKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: Self.colorFirstKey)
+        }
         set {
             guard newValue != UserDefaults.standard.bool(forKey: Self.colorFirstKey) else { return }
             UserDefaults.standard.set(newValue, forKey: Self.colorFirstKey)

@@ -67,9 +67,9 @@ enum Theme {
     /// A keyboard key drawn as a small keycap chip - how real Mac apps show
     /// shortcuts, instead of typing them into a monospace string. Words stay
     /// in the system font; only the KEY itself is a chip.
-    static func keycap(_ key: String) -> NSView {
+    static func keycap(_ key: String, font: NSFont = Theme.monoEyebrow) -> NSView {
         let label = NSTextField(labelWithString: key)
-        label.font = Theme.monoEyebrow
+        label.font = font
         label.textColor = Theme.tx1
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false

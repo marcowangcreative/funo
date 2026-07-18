@@ -685,12 +685,14 @@ final class PreviewOverlayView: NSView {
         refreshInfoPanel()
         refreshFilmstrip()
 
-        // Keep the shooting rhythm: neighbors decode while you look at this one.
-        if index + 1 < assets.count {
-            ThumbnailLoader.shared.prefetch(assets[index + 1].url, maxPixel: ThumbnailLoader.previewPixelSize)
-        }
-        if index - 1 >= 0 {
-            ThumbnailLoader.shared.prefetch(assets[index - 1].url, maxPixel: ThumbnailLoader.previewPixelSize)
+        // Keep the shooting rhythm: neighbors decode while you look at this
+        // one. ±2 (immediate neighbors first) covers fast arrow-key paging
+        // so the sharp preview is already waiting - no lower-res flash.
+        for offset in [1, -1, 2, -2] {
+            let n = index + offset
+            if n >= 0, n < assets.count {
+                ThumbnailLoader.shared.prefetch(assets[n].url, maxPixel: ThumbnailLoader.previewPixelSize)
+            }
         }
     }
 

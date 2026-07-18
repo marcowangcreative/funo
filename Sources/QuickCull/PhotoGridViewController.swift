@@ -39,11 +39,30 @@ final class CullCollectionView: NSCollectionView {
 /// One cell in the contact sheet, styled after the mockup: rounded graphite
 /// card, thumbnail, meta row (filename + format badge), amber stars overlay,
 /// dimmed + red ✕ when rejected.
+/// Grid thumbnail: a plain layer-backed view (contents = cgImage) instead
+/// of NSImageView - pure GPU compositing, cheaper on fast scroll. .resizeAspect
+/// fits the WHOLE frame (no crop), matching the old scaleProportionallyDown.
+private final class GridThumbView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.contentsGravity = .resizeAspect
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+    func setImage(_ image: NSImage?) {
+        guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            layer?.contents = nil
+            return
+        }
+        layer?.contents = cg
+    }
+}
+
 final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
 
     static let identifier = NSUserInterfaceItemIdentifier("PhotoItem")
 
-    private let thumbView = NSImageView()
+    private let thumbView = GridThumbView(frame: .zero)
     private let nameLabel = NSTextField(labelWithString: "")
     private let starsLabel = NSTextField(labelWithString: "")
     private let badgeLabel = NSTextField(labelWithString: "")
@@ -69,8 +88,6 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         container.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(container)
 
-        thumbView.imageScaling = .scaleProportionallyDown
-        thumbView.wantsLayer = true
         thumbView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(thumbView)
 
@@ -133,7 +150,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         if editingBase != nil { endNameEdit() } // cell reused mid-edit
         representedURL = asset.url
         nameLabel.stringValue = asset.filename
-        thumbView.image = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize)
+        thumbView.setImage(ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize))
         if asset.hasJPEGPair {
             badgeLabel.stringValue = "R+J"
         } else if asset.isRAW {
@@ -146,7 +163,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
 
     func setThumbnail(_ image: NSImage?, for url: URL) {
         guard representedURL == url else { return } // cell was reused; drop stale pixels
-        thumbView.image = image
+        thumbView.setImage(image)
     }
 
     func refreshCullState(assetID: String) {
@@ -614,7 +631,7 @@ final class PhotoGridViewController: NSViewController,
         // the squat mono ƒ.
         let mark = NSTextField(labelWithString: "")
         let lockup = NSMutableAttributedString(string: "ƒ/", attributes: [
-            .font: NSFont(name: "Georgia-Italic", size: 30) ?? Theme.display,
+            .font: NSFont(name: "Georgia-Italic", size: 34) ?? Theme.display,
             .foregroundColor: Theme.accent])
         lockup.append(NSAttributedString(string: "uno", attributes: [
             .font: Theme.monoDisplay, .foregroundColor: Theme.tx0]))

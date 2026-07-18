@@ -192,8 +192,12 @@ final class ThumbnailLoader {
 
             // Disk cache (grid thumbnails only): second open of a folder
             // skips decoding entirely.
+            // Disk-cache thumbnails AND previews (not the 8192 full-res -
+            // too big, rarely revisited). The LRU cache bounds the growth,
+            // so a revisited photo in expanded view is sharp INSTANTLY with
+            // no lower-res buffer flash.
             var diskKey: String?
-            if maxPixel <= Self.thumbnailPixelSize, let identity = CacheDB.identity(for: url) {
+            if maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
                 diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
             }
             var image: NSImage?

@@ -349,6 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         windowMenuItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
+        // Help
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+        let helpMenu = NSMenu(title: "Help")
+        let shortcutsItem = NSMenuItem(title: "Keyboard Shortcuts  (/)",
+                                       action: #selector(showShortcuts(_:)), keyEquivalent: "")
+        shortcutsItem.target = self
+        helpMenu.addItem(shortcutsItem)
+        helpMenuItem.submenu = helpMenu
+        NSApp.helpMenu = helpMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -394,6 +405,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ThumbnailLoader.shared.clearMemoryCaches()
         FaceAnalyzer.shared.clearResults()
         mainController.noteCachesCleared()
+    }
+
+    @objc private func showShortcuts(_ sender: Any?) {
+        mainController.toggleShortcuts()
     }
 
     @objc private func showWelcomeScreen(_ sender: Any?) {

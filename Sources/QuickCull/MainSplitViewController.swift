@@ -10,6 +10,7 @@ final class MainSplitViewController: NSSplitViewController {
     private var previewOverlay: PreviewOverlayView? { didSet { refreshWindowTitle() } }
     private var surveyOverlay: SurveyOverlay? { didSet { refreshWindowTitle() } }
     private var searchPalette: SearchPaletteView?
+    private var shortcutsOverlay: ShortcutsOverlayView?
 
     func showSearchPalette() {
         guard previewOverlay == nil, surveyOverlay == nil, searchPalette == nil,
@@ -27,6 +28,20 @@ final class MainSplitViewController: NSSplitViewController {
         }
         searchPalette = palette
         palette.present(in: container)
+    }
+
+    /// The ? cheat-sheet. Toggles: ? again (or Esc, or a click outside) closes.
+    func toggleShortcuts() {
+        if let open = shortcutsOverlay { open.onDismiss?(); return }
+        guard let container = view.window?.contentView else { return }
+        let overlay = ShortcutsOverlayView(frame: container.bounds)
+        overlay.onDismiss = { [weak self] in
+            self?.shortcutsOverlay?.removeFromSuperview()
+            self?.shortcutsOverlay = nil
+            self?.view.window?.makeFirstResponder(self?.grid.view)
+        }
+        shortcutsOverlay = overlay
+        overlay.present(in: container)
     }
     private var titleFolderURL: URL?
 
@@ -65,6 +80,13 @@ final class MainSplitViewController: NSSplitViewController {
                   window.attachedSheet == nil,
                   !(window.firstResponder is NSTextView) // don't steal keys from text editing
             else { return event }
+            // Cheat-sheet: swallow keys while it's up; ? toggles it (bare
+            // key - just "/", no shift, works in every mode).
+            if let sc = self.shortcutsOverlay { return sc.handleKey(event) ? nil : event }
+            if event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+               event.characters == "/" {
+                self.toggleShortcuts(); return nil
+            }
             // ⌘⇧] / ⌘⇧[ still cycle tabs (Safari/Chrome muscle memory) -
             // the menu shows ⌘→ / ⌘←, so these are handled here directly.
             if event.modifierFlags.contains(.command), event.modifierFlags.contains(.shift),
