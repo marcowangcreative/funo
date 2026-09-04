@@ -21,6 +21,13 @@ DISPLAY_NAME="Funo"   # Plain ASCII everywhere the SYSTEM sees a name (Finder,
 VERSION="${VERSION:-0.9.0}"
 BUNDLE_ID="${BUNDLE_ID:-com.funophoto.funo}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-quickcull-notary}"
+# App Store Connect API key auth - preferred when the .p8 exists. The
+# keychain-profile path 401'd on 2026-09-04 even with freshly validated
+# credentials (dupes deleted, re-stored); direct key-file auth worked every
+# time. The .p8 lives OUTSIDE the repo on purpose - never commit it.
+NOTARY_KEY="${NOTARY_KEY:-$HOME/Documents/funo key8/AuthKey_RJ987854JW.p8}"
+NOTARY_KEY_ID="${NOTARY_KEY_ID:-RJ987854JW}"
+NOTARY_ISSUER="${NOTARY_ISSUER:-aca8bb5e-da3c-4a27-8ae1-509eb47a711c}"
 
 # Universal (arm64 + x86_64) builds need FULL Xcode's build system; with
 # only the Command Line Tools selected, fall back to the Mac's native arch.
@@ -174,7 +181,11 @@ hdiutil create -volname "funo" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
 echo "▸ Notarizing (this waits on Apple — usually 1–5 minutes)…"
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+if [ -f "$NOTARY_KEY" ]; then
+  xcrun notarytool submit "$DMG" --key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --wait
+else
+  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+fi
 
 echo "▸ Stapling ticket…"
 xcrun stapler staple "$DMG"
