@@ -831,13 +831,23 @@ final class PhotoGridViewController: NSViewController,
         let generation = scanGeneration
         firstThumbMS = nil
         scanStartedAt = Date()
-        pushStatus("Opening \(url.lastPathComponent)…")
         emptyLabel.stringValue = ""
+        // Only surface "Opening…" if the scan is actually slow (a cold load).
+        // Fast, cached, or empty folders finish first and jump straight to the
+        // result, so the footer never flickers "Opening…" for no reason.
+        openingStatusWork?.cancel()
+        let openingWork = DispatchWorkItem { [weak self] in
+            guard let self, self.scanGeneration == generation else { return }
+            self.pushStatus("Opening \(url.lastPathComponent)…")
+        }
+        openingStatusWork = openingWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: openingWork)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
                 guard let self, self.scanGeneration == generation else { return }
+                self.openingStatusWork?.cancel()
                 if self.sortKey == .name {
                     self.allAssets = self.sortAscending ? result.assets : result.assets.reversed()
                 } else {
@@ -1182,10 +1192,48 @@ final class PhotoGridViewController: NSViewController,
         return displayedAssets[indexPath.item].url as NSURL
     }
 
+    /// Pickup speed: without this, NSCollectionView snapshots EVERY selected
+    /// item's view to build the drag image - selecting thousands then click-
+    /// holding stalls for a beat. We hand it ONE badge (a card stack + count),
+    /// drawn once, so the grab stays quick regardless of selection size. This
+    /// is the isolated, safe version - no takeover, no drag-item surgery.
+    func collectionView(_ collectionView: NSCollectionView,
+                        draggingImageForItemsAt indexPaths: Set<IndexPath>,
+                        with event: NSEvent, offset dragImageOffset: NSPointPointer) -> NSImage {
+        return Self.dragBadge(count: indexPaths.count)
+    }
+
+    private static func dragBadge(count: Int) -> NSImage {
+        let size = NSSize(width: 58, height: 44)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let front = NSRect(x: 7, y: 6, width: 42, height: 30)
+        for (dx, dy) in [(8, -6), (4, -3)] {
+            NSColor(srgbRed: 0.137, green: 0.149, blue: 0.161, alpha: 0.85).setFill()
+            NSBezierPath(roundedRect: front.offsetBy(dx: CGFloat(dx), dy: CGFloat(dy)),
+                         xRadius: 5, yRadius: 5).fill()
+        }
+        let path = NSBezierPath(roundedRect: front, xRadius: 5, yRadius: 5)
+        Theme.bg2.setFill(); path.fill()
+        Theme.accent.setStroke(); path.lineWidth = 1.5; path.stroke()
+        let text = count > 9999 ? "9999+" : "\(count)"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: Theme.tx0]
+        let ts = text.size(withAttributes: attrs)
+        text.draw(at: NSPoint(x: front.midX - ts.width / 2, y: front.midY - ts.height / 2),
+                  withAttributes: attrs)
+        image.unlockFocus()
+        return image
+    }
+
     // MARK: - Bulk operations
 
     func selectAllVisible() {
         collectionView.selectAll(nil)
+        // A full selection has no single anchor; clear it so the next shift-
+        // click establishes one instead of ranging from photo 0 (the min index).
+        selectionAnchor = nil
         if let first = displayedAssets.first { onSelectionChanged?(first) }
         flash("\(displayedAssets.count) selected")
     }
@@ -1237,10 +1285,25 @@ final class PhotoGridViewController: NSViewController,
             // excluded from the count - pasting in place means "duplicate",
             // and it keeps both without asking.
             let collisions = FileOps.collisionCount(urls, in: folder)
+            let showProgress = true   // the time-based panel decides if it actually appears
+            let total = urls.count
+            let step = max(1, total / 100)
             let run: (FileOps.Collision) -> Void = { policy in
-                let result = isCut ? FileOps.move(urls, to: folder, onCollision: policy)
-                                   : FileOps.copy(urls, to: folder, onCollision: policy)
+                if showProgress {
+                    DispatchQueue.main.async {
+                        FileOpProgress.shared.begin(
+                            "\(isCut ? "Moving" : "Copying") \(total.formatted()) photos", total: total)
+                    }
+                }
+                let progress: ((Int) -> Void)? = showProgress ? { done in
+                    if done % step == 0 || done == total {
+                        DispatchQueue.main.async { FileOpProgress.shared.update(done: done) }
+                    }
+                } : nil
+                let result = isCut ? FileOps.move(urls, to: folder, onCollision: policy, onProgress: progress)
+                                   : FileOps.copy(urls, to: folder, onCollision: policy, onProgress: progress)
                 DispatchQueue.main.async { [weak self] in
+                    if showProgress { FileOpProgress.shared.end() }
                     guard let self else { return }
                     FileOpsHistory.push("\(isCut ? "move" : "copy") to \(folder.lastPathComponent)",
                                         kind: isCut ? .move : .copy, result.records)
@@ -1314,6 +1377,7 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private var pendingSelection: Int?
+    private var openingStatusWork: DispatchWorkItem?
     private var flashTimer: Timer?
     private var aiDone = 0
     private var aiTotal = 0
@@ -1423,6 +1487,12 @@ final class PhotoGridViewController: NSViewController,
         }
         // Our own operations already reload - only react to changes we
         // didn't cause (Finder, another app, an ingest in progress).
+        // A big rating's sidecar flush writes for SECONDS; while our own writes
+        // are still pending, every file is a watcher event but none are
+        // external. Skip entirely until they finish (the 1 s grace below then
+        // covers the OS's buffered-event tail). This is what stopped a 6k
+        // rating from reloading the folder and collapsing the selection.
+        guard !RatingsStore.shared.hasPendingXMPWork else { return }
         guard Date().timeIntervalSince(lastSelfLoadAt) > 1.0 else { return }
         // THROTTLE, not debounce: during an ingest, events never stop -
         // a debounce that resets per event would wait for quiet that never
@@ -1431,6 +1501,7 @@ final class PhotoGridViewController: NSViewController,
         guard externalReloadTimer?.isValid != true else { return }
         externalReloadTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
             guard let self else { return }
+            guard !RatingsStore.shared.hasPendingXMPWork else { return }
             guard Date().timeIntervalSince(self.lastSelfLoadAt) > 1.0 else { return }
             // Quiet during sustained streams (ingest); announce one-off changes.
             if Date().timeIntervalSince(self.lastExternalReloadAt) > 5.0 {
@@ -1517,7 +1588,13 @@ final class PhotoGridViewController: NSViewController,
     /// the clicked item.
     private func selectRange(to target: Int) -> Bool {
         guard target >= 0, target < displayedAssets.count else { return false }
-        let anchor = selectionAnchor ?? selectedIndex ?? target
+        // No established anchor (e.g. right after Select All): this shift-click
+        // BECOMES the anchor and selects just this item, so the next shift-click
+        // extends from here rather than bouncing to the first photo.
+        guard let anchor = selectionAnchor else {
+            select(index: target)
+            return true
+        }
         let range = min(anchor, target)...max(anchor, target)
         let ips = Set(range.map { IndexPath(item: $0, section: 0) })
         collectionView.deselectItems(at: collectionView.selectionIndexPaths)

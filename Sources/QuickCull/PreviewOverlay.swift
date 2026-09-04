@@ -253,6 +253,18 @@ final class PreviewOverlayView: NSView {
     private var infoHeightBeforeCollapse: CGFloat = 396
     private var infoGeneration = 0
     private weak var infoFocusRow: NSView?
+    /// Cull state ON the stage (bottom-left): color chip + stars/reject for
+    /// the CURRENT frame. The filmstrip's 4px strip was the only echo of a
+    /// color label in expanded view - invisible while your eye is on the
+    /// photo, and rate-and-advance means the strip you'd check belongs to a
+    /// frame you already left.
+    private let cullPlate = NSView()
+    private let cullSwatch = NSView()
+    private let cullText = NSTextField(labelWithString: "")
+    /// On-frame per-face triage badges (exceptions only). Pooled + repositioned.
+    private var faceBadges: [RangefinderBadgeView] = []
+    /// Per-photo retry budget for transient per-face score failures.
+    private var faceScoreRetries = 0
     private var showInfoPanel: Bool = {
         UserDefaults.standard.object(forKey: "QuickCullShowInfo") == nil
             ? true
@@ -336,6 +348,36 @@ final class PreviewOverlayView: NSView {
         zoomLabel.textColor = Theme.tx2
         zoomLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(zoomLabel)
+
+        // The cull readout: a dark plate riding the stage's bottom-left, a
+        // proper color swatch (not a hairline) + stars / reject. Hidden when
+        // the frame carries no cull state at all.
+        cullPlate.wantsLayer = true
+        cullPlate.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
+        cullPlate.layer?.cornerRadius = 7
+        cullPlate.layer?.borderWidth = 1
+        cullPlate.layer?.borderColor = Theme.line.cgColor
+        cullPlate.isHidden = true
+        cullPlate.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(cullPlate)
+        cullSwatch.wantsLayer = true
+        cullSwatch.layer?.cornerRadius = 2.5
+        cullSwatch.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(cullSwatch)
+        cullText.font = Theme.monoData
+        cullText.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(cullText)
+        NSLayoutConstraint.activate([
+            cullSwatch.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 9),
+            cullSwatch.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            cullSwatch.widthAnchor.constraint(equalToConstant: 5),
+            cullSwatch.topAnchor.constraint(equalTo: cullPlate.topAnchor, constant: 6),
+            cullSwatch.bottomAnchor.constraint(equalTo: cullPlate.bottomAnchor, constant: -6),
+            cullText.leadingAnchor.constraint(equalTo: cullSwatch.trailingAnchor, constant: 8),
+            cullText.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -10),
+            cullText.topAnchor.constraint(equalTo: cullPlate.topAnchor, constant: 6),
+            cullText.bottomAnchor.constraint(equalTo: cullPlate.bottomAnchor, constant: -6),
+        ])
 
         facesFooterLabel.font = Theme.monoCaption
         facesFooterLabel.textColor = Theme.tx2
@@ -423,6 +465,8 @@ final class PreviewOverlayView: NSView {
         NSLayoutConstraint.activate([
             infoPanel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
             infoPanel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            cullPlate.leadingAnchor.constraint(equalTo: stageScroll.leadingAnchor, constant: 12),
+            cullPlate.bottomAnchor.constraint(equalTo: stageScroll.bottomAnchor, constant: -12),
             infoHeader.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 9),
             infoHeader.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoHistogram.topAnchor.constraint(equalTo: infoHeader.bottomAnchor, constant: 10),
@@ -620,7 +664,15 @@ final class PreviewOverlayView: NSView {
     }
 
     private func applyFilmstripItemSize(for height: CGFloat) {
-        let itemH = height - 4
+        // Clamp to the collection view's REAL height when it's laid out: the
+        // scroll frame minus scroller/insets can be a few points shorter than
+        // the constraint, and a flow-layout item taller than its collection
+        // view triggers the "behavior is not defined" console warning on
+        // every layout pass.
+        var itemH = height - 4
+        let visible = filmstripView.bounds.height
+        if visible > 8 { itemH = min(itemH, visible - 2) }
+        guard itemH > 8 else { return }   // mid-layout zero-height pass: skip
         filmstripLayout.itemSize = NSSize(width: (itemH * 1.5).rounded(), height: itemH.rounded())
         filmstripLayout.invalidateLayout()
     }
@@ -662,10 +714,24 @@ final class PreviewOverlayView: NSView {
             if let thumb = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
                 display(thumb)
             }
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.previewPixelSize) { [weak self] image in
-                guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded, let image else { return }
-                self.display(image)
+            // Retry on nil: a decode can be CANCELLED under rapid arrowing
+            // (or fail transiently on a busy drive), and giving up stranded
+            // the stage on the blurry grid thumb until the user left and
+            // came back. Generation/fit guards cancel the chain on move.
+            func requestPreview(_ attempt: Int) {
+                ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.previewPixelSize) { [weak self] image in
+                    guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
+                    if let image {
+                        self.display(image)
+                    } else if attempt < 3 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                            guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
+                            requestPreview(attempt + 1)
+                        }
+                    }
+                }
             }
+            requestPreview(0)
         }
 
         // Footer: filename + position now, exposure summary async (a tiny
@@ -684,6 +750,10 @@ final class PreviewOverlayView: NSView {
         scheduleFacesRefresh()
         refreshInfoPanel()
         refreshFilmstrip()
+        faceScoreRetries = 0
+        updateFaceBadges()
+        refreshCullPlate()
+        adoptSidecarForCurrentIfPending()
 
         // Keep the shooting rhythm: neighbors decode while you look at this
         // one. ±2 (immediate neighbors first) covers fast arrow-key paging
@@ -774,6 +844,7 @@ final class PreviewOverlayView: NSView {
 
     @objc private func scrollStateChanged(_ note: Notification) {
         updateZoomLabel()
+        updateFaceBadges()
     }
 
     @objc private func liveMagnifyEnded(_ note: Notification) {
@@ -833,6 +904,88 @@ final class PreviewOverlayView: NSView {
         if facesRefreshTimer?.isValid != true { rebuildFacesRow() }
         // Faces just landed → re-score focus on the subject, not the frame.
         refreshInfoPanel()
+        updateFaceBadges()
+    }
+
+    /// Position an on-frame badge over EVERY prominent face - eye state plus
+    /// the rangefinder split graded per face - faded out as
+    /// you push past 1:1. Rides the F toggle with the rest of the face system.
+    /// Cheap: reads cached analysis, converts each face box through the live
+    /// zoom/pan transform. Hidden entirely when F is off or nothing's flagged.
+    private func updateFaceBadges() {
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count,
+              let analysis = FaceAnalyzer.shared.result(for: assets[index].id),
+              !analysis.faces.isEmpty else {
+            faceBadges.forEach { $0.isHidden = true }
+            return
+        }
+        // Grade EVERY face, not just problems: a clean aligned green mark says
+        // "checked, and it's good" - absence only meant "didn't look." (Marco:
+        // seeing green on the keepers is the reassurance.) Cap to the 8 most
+        // prominent so a background crowd never sprouts marks.
+        //
+        // The split is driven by REAL per-face acutance (same metric as the
+        // Focus row), never Vision quality - quality rates a soft face "good"
+        // and drew an aligned green split on an out-of-focus subject. Until the
+        // scores land (sub-second, then memoized) the badges stay hidden; the
+        // completion re-runs this.
+        guard let scores = SharpnessAnalyzer.shared.cachedFaceScores(for: assets[index]) else {
+            faceBadges.forEach { $0.isHidden = true }
+            let gen = showGeneration
+            SharpnessAnalyzer.shared.faceScores(for: assets[index]) { [weak self] result in
+                // Re-run only when scores arrived - a nil result can be
+                // delivered SYNCHRONOUSLY, and re-running on nil in the same
+                // stack frame was the infinite-recursion crash (2026-07-28).
+                // A nil here is a transient decode failure (cold/busy drive):
+                // retry a few times DELAYED (async, so it can't recurse),
+                // generation-guarded so leaving the photo cancels the chain.
+                // Without this, badges just never appeared until the user
+                // backed out and re-entered.
+                guard let self, self.showGeneration == gen else { return }
+                if result != nil {
+                    self.updateFaceBadges()
+                } else if self.faceScoreRetries < 3 {
+                    self.faceScoreRetries += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                        guard let self, self.showGeneration == gen else { return }
+                        self.updateFaceBadges()
+                    }
+                }
+            }
+            return
+        }
+        let graded = Array(analysis.faces.enumerated()
+            .sorted { ($0.element.rect.width * $0.element.rect.height) > ($1.element.rect.width * $1.element.rect.height) }
+            .prefix(8))
+        let imgW = stageView.bounds.width, imgH = stageView.bounds.height
+        guard imgW > 0, imgH > 0 else { faceBadges.forEach { $0.isHidden = true }; return }
+        // Survey aid: fade out between 1:1 and ~1.6:1 as you pixel-peep one face.
+        let zoom = stageScroll.magnification * backingScale
+        let fade = max(0, min(1, 1 - (zoom - 1.0) / 0.6))
+        while faceBadges.count < graded.count {
+            let b = RangefinderBadgeView(frame: .zero)
+            addSubview(b, positioned: .below, relativeTo: infoPanel)
+            faceBadges.append(b)
+        }
+        let stageFrame = stageScroll.frame.insetBy(dx: -24, dy: -24)
+        let sz = RangefinderBadgeView.badgeSize
+        for (i, badge) in faceBadges.enumerated() {
+            guard i < graded.count, fade > 0.02 else { badge.isHidden = true; continue }
+            let (faceIndex, face) = graded[i]
+            // face.rect is Vision-normalized, bottom-left; stageView is sized to
+            // image pixels, also bottom-left. maxY = top of the face.
+            let topCenter = NSPoint(x: face.rect.midX * imgW, y: face.rect.maxY * imgH)
+            let p = stageView.convert(topCenter, to: self)
+            guard stageFrame.contains(p) else { badge.isHidden = true; continue }
+            let focus = faceIndex < scores.count ? scores[faceIndex] : -1
+            guard focus >= 0 else { badge.isHidden = true; continue }
+            badge.configure(quality: CGFloat(focus),
+                            blinking: face.blinking, squinting: face.squinting)
+            badge.setFrameSize(sz)
+            badge.setFrameOrigin(NSPoint(x: p.x - sz.width / 2, y: p.y + 4))
+            badge.alphaValue = fade
+            badge.isHidden = false
+        }
     }
 
     /// Debounce: while the user is flying through frames with the arrow keys,
@@ -864,6 +1017,7 @@ final class PreviewOverlayView: NSView {
             }
         }
         rebuildFacesRow()
+        updateFaceBadges()
     }
 
     private func setInfoPanel(_ shown: Bool) {
@@ -964,8 +1118,31 @@ final class PreviewOverlayView: NSView {
         }
 
         // Focus/sharpness, pinned to the top of the list once it's scored.
-        SharpnessAnalyzer.shared.score(for: asset) { [weak self] acutance in
-            guard let self, self.infoGeneration == gen, let acutance else { return }
+        // score() returns nil when the preview hasn't decoded yet (cold
+        // folder) - its doc says "caller can retry once the preview lands",
+        // and this caller never did: the row just silently missed until the
+        // user backed out and re-entered. Retry a few times, generation-
+        // guarded so leaving the photo cancels the chain.
+        func scoreFocus(_ attempt: Int) {
+            SharpnessAnalyzer.shared.score(for: asset) { [weak self] acutance in
+                guard let self, self.infoGeneration == gen else { return }
+                guard let acutance else {
+                    if attempt < 4 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                            guard let self, self.infoGeneration == gen else { return }
+                            scoreFocus(attempt + 1)
+                        }
+                    }
+                    return
+                }
+                self.focusRowLanded(acutance)
+            }
+        }
+        scoreFocus(0)
+    }
+
+    /// Insert the scored Focus row (split out so the retry chain stays small).
+    private func focusRowLanded(_ acutance: Double) {
             let f = SharpnessAnalyzer.focusFraction(acutance)
             // Color-coded so focus quality reads at a glance - and the tint
             // advertises the metric exists: >=80% green, >=50% amber, else red.
@@ -974,11 +1151,9 @@ final class PreviewOverlayView: NSView {
             if f >= 0.80 { word = "crisp"; tint = NSColor(srgbRed: 0.32, green: 0.74, blue: 0.42, alpha: 1) }
             else if f >= 0.50 { word = "fair"; tint = Theme.accent }
             else { word = "soft"; tint = Theme.red }
-            let row = self.infoRow("Focus", "\(Int(f * 100))%  \(word)", valueColor: tint)
-            self.infoStack.insertArrangedSubview(row, at: 0)
-            self.infoFocusRow = row
-        }
-
+            let row = infoRow("Focus", "\(Int(f * 100))%  \(word)", valueColor: tint)
+            infoStack.insertArrangedSubview(row, at: 0)
+            infoFocusRow = row
     }
 
     /// The Leica info-card pattern: dim key, bright value, same size, same
@@ -1218,7 +1393,74 @@ final class PreviewOverlayView: NSView {
 
     private func cullChanged() {
         refreshFilmstrip()
+        refreshCullPlate(flash: true)
         onCullChanged?()
+    }
+
+    /// The cull readout can BEAT the sidecar stream: a cold 6k folder adopts
+    /// Lightroom/PM sidecar ratings in display order over several seconds, so
+    /// a frame deep in the folder showed "no rating" for 5-10 s after opening.
+    /// Read THIS frame's sidecar immediately (one tiny text file, off-main)
+    /// and adopt it, so the plate is truthful the moment you land. Frames the
+    /// store already knows skip the read; unrated frames cost one stat-miss.
+    private func adoptSidecarForCurrentIfPending() {
+        guard index < assets.count else { return }
+        let asset = assets[index]
+        guard asset.isRAW else { return }
+        let store = RatingsStore.shared
+        guard store.rating(for: asset.id) == 0,
+              store.colorLabel(for: asset.id) == 0,
+              !store.isRejected(asset.id) else { return }
+        let gen = showGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let (rating, label) = XMPSidecar.read(for: asset.url)
+            guard rating != nil || label != nil else { return }
+            DispatchQueue.main.async {
+                guard let self, self.showGeneration == gen else { return }
+                if RatingsStore.shared.adopt(rating: rating, label: label, for: asset.id) {
+                    self.refreshCullPlate()
+                    self.refreshFilmstrip()
+                }
+            }
+        }
+    }
+
+    /// Reflect the CURRENT frame's cull state on the stage. `flash` pulses the
+    /// plate so a rate-and-advance keypress is felt even as the frame changes.
+    private func refreshCullPlate(flash: Bool = false) {
+        guard index < assets.count else { cullPlate.isHidden = true; return }
+        let store = RatingsStore.shared
+        let id = assets[index].id
+        let color = store.colorLabel(for: id)
+        let stars = store.rating(for: id)
+        let rejected = store.isRejected(id)
+        guard color > 0 || stars > 0 || rejected else {
+            cullPlate.isHidden = true
+            return
+        }
+        cullSwatch.isHidden = color == 0
+        cullSwatch.layer?.backgroundColor = color > 0 ? Theme.labelColors[color].cgColor : nil
+        var parts: [String] = []
+        if color > 0 { parts.append(Theme.labelNames[color]) }
+        if rejected {
+            parts.append("✕")
+            cullText.textColor = Theme.red
+        } else {
+            if stars > 0 { parts.append(String(repeating: "★", count: stars)) }
+            cullText.textColor = color > 0 ? Theme.labelColors[color] : Theme.accent
+        }
+        cullText.stringValue = parts.joined(separator: "  ")
+        cullPlate.isHidden = false
+        if flash {
+            // Opacity pulse, not scale: layer-backed NSViews anchor at (0,0),
+            // so a scale pulse would grow from the corner and look lopsided.
+            cullPlate.layer?.removeAllAnimations()
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.35; pulse.toValue = 1.0
+            pulse.duration = 0.22
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            cullPlate.layer?.add(pulse, forKey: "pulse")
+        }
     }
 
     @objc private func cullModeDidChange() { refreshHintLabel() }
@@ -1321,8 +1563,15 @@ final class PreviewOverlayView: NSView {
         if filmstripHeightConstraint != nil, filmstripHeightConstraint.constant > maxFilm {
             filmstripHeightConstraint.constant = maxFilm
             applyFilmstripItemSize(for: maxFilm)
+        } else if filmstripHeightConstraint != nil,
+                  filmstripView.bounds.height > 8,
+                  filmstripLayout.itemSize.height > filmstripView.bounds.height {
+            // The collection view came out shorter than the item (scroller,
+            // rounding, first pass) - re-clamp so the flow layout stays legal.
+            applyFilmstripItemSize(for: filmstripHeightConstraint.constant)
         }
         if atFit { stageScroll.magnify(toFit: stageView.frame) }
+        updateFaceBadges()
         // Window resized meaningfully → re-fit the right rail to the new space.
         if abs(bounds.width - lastFacesLayoutSize.width) > 50 || abs(bounds.height - lastFacesLayoutSize.height) > 50 {
             lastFacesLayoutSize = bounds.size
@@ -1338,7 +1587,21 @@ final class PreviewOverlayView: NSView {
 
 // MARK: - Filmstrip data source
 
-extension PreviewOverlayView: NSCollectionViewDataSource, NSCollectionViewDelegate {
+extension PreviewOverlayView: NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout {
+
+    /// Item size consulted AT LAYOUT TIME and clamped to the collection
+    /// view's real height, so the item can never exceed it - which is what
+    /// fired the "UICollectionViewFlowLayout behavior is not defined"
+    /// console warning on every pass where the strip and its scroller
+    /// disagreed with the constraint-derived size.
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        sizeForItemAt indexPath: IndexPath) -> NSSize {
+        let desired = filmstripLayout.itemSize
+        let maxH = collectionView.bounds.height
+        guard maxH > 8, desired.height > maxH else { return desired }
+        let h = (maxH - 1).rounded(.down)
+        return NSSize(width: (h * 1.5).rounded(), height: h)
+    }
 
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
         assets.count

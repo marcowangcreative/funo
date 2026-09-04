@@ -131,9 +131,18 @@ enum FileOps {
     /// How many of these photos collide in `folder`? (Same-folder moves are
     /// no-ops and don't count.) Callers use this to decide whether to ask.
     static func collisionCount(_ urls: [URL], in folder: URL) -> Int {
-        urls.filter { $0.deletingLastPathComponent().path != folder.path }
-            .filter { wouldCollide($0, in: folder) }
-            .count
+        // ONE directory read of the destination + in-memory name lookups,
+        // instead of a fileExists syscall per source file - that stat storm was
+        // the dead pause before a big drop began to move. An empty destination
+        // cannot collide, so bail instantly. The move itself re-checks each
+        // group authoritatively (companions included); this is only the hint.
+        let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        guard !existing.isEmpty else { return 0 }
+        let folderPath = folder.path
+        return urls.reduce(into: 0) { count, url in
+            guard url.deletingLastPathComponent().path != folderPath else { return }
+            if existing.contains(url.lastPathComponent) { count += 1 }
+        }
     }
 
     /// One unique stem for the whole group - "IMG_1234 2" - so RAW, JPEG
@@ -155,7 +164,8 @@ enum FileOps {
     }
 
     /// Move files (plus companions) into a folder.
-    static func move(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth) -> OperationResult {
+    static func move(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth,
+                     onProgress: ((Int) -> Void)? = nil) -> OperationResult {
         let fm = FileManager.default
         var moved = 0
         var skipped = 0
@@ -198,6 +208,7 @@ enum FileOps {
                 }
             }
             if movedPrimary { moved += 1 }
+            onProgress?(moved)
         }
         if !records.isEmpty {
             let sources = Set(records.map { $0.from.deletingLastPathComponent().path })
@@ -211,7 +222,8 @@ enum FileOps {
 
     /// Copy files (plus companions) into a folder. Pasting into the same
     /// folder duplicates ("name 2.CR3") - that's what the user asked for.
-    static func copy(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth) -> OperationResult {
+    static func copy(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth,
+                     onProgress: ((Int) -> Void)? = nil) -> OperationResult {
         let fm = FileManager.default
         var copied = 0
         var skipped = 0
@@ -258,6 +270,7 @@ enum FileOps {
                 }
             }
             if copiedPrimary { copied += 1 }
+            onProgress?(copied)
         }
         return OperationResult(primaries: copied, records: records, skipped: skipped)
     }

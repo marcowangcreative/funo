@@ -181,8 +181,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // f/uno is built to stay open through a shoot - confirm first so a stray
+        // ⌘Q doesn't close it out from under an active cull.
+        let confirm = NSAlert()
+        confirm.messageText = "Quit f/uno?"
+        confirm.informativeText = "You can leave it open and come back to your cull anytime. Your ratings are saved."
+        confirm.addButton(withTitle: "Quit")     // first = default (Return)
+        confirm.addButton(withTitle: "Cancel")   // Escape
+        guard confirm.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+
+        // Confirmed. Nothing pending → quit immediately. Otherwise drain the sidecar/JSON
+        // backlog in the BACKGROUND while a "Finishing up…" panel renders (the
+        // main thread stays free), then let the app quit. Normal use rarely
+        // reaches this - the background flush finishes while you're still
+        // culling - but quitting right after a big rating won't be a silent
+        // freeze, it'll say what it's doing and get done.
+        guard RatingsStore.shared.hasPendingXMPWork || RatingsStore.shared.hasUnsavedChanges else {
+            return .terminateNow
+        }
+        QuitFlushOverlay.show()
+        RatingsStore.shared.drainForTermination {
+            QuitFlushOverlay.hide()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Never lose the last second of culling to the debounce windows.
+        // Safety net: drainForTermination normally already ran (via
+        // applicationShouldTerminate). This catches anything last-second and is
+        // a fast no-op when the backlog is already clear.
         RatingsStore.shared.flushForTermination()
     }
 

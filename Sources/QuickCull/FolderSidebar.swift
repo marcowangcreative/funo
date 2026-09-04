@@ -71,6 +71,10 @@ final class FolderNode {
         }
     }
 
+    /// Graft children read on a BACKGROUND queue (tree refresh) so the main
+    /// thread never re-lists big folders while rebuilding the sidebar.
+    func preloadChildren(_ kids: [FolderNode]) { loadedChildren = kids }
+
     func invalidateChildren() {
         loadedChildren = nil
     }
@@ -124,6 +128,13 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         workspace.addObserver(self, selector: #selector(volumesChanged(_:)),
                               name: NSWorkspace.didUnmountNotification, object: nil)
 
+        // Folders born in Finder: the tree can't see them until re-read. The
+        // natural moment is coming BACK to f/uno (make folder in Finder,
+        // ⌘-tab return) - refresh then, off-main, keeping expansion.
+        NotificationCenter.default.addObserver(self, selector: #selector(appActivated(_:)),
+                                               name: NSApplication.didBecomeActiveNotification,
+                                               object: nil)
+
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -157,6 +168,94 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         outlineView.reloadData()
         for root in roots { outlineView.expandItem(root) }
     }
+
+    // MARK: - Tree refresh (folders born outside f/uno)
+
+    private var lastTreeRefreshAt = Date.distantPast
+
+    @objc private func appActivated(_ note: Notification) {
+        // Throttle: activation can fire in bursts (launch, dialogs), and a
+        // refresh mid file-op would fight the progress lock.
+        guard Date().timeIntervalSince(lastTreeRefreshAt) > 2.0,
+              !FileOpProgress.shared.isActive else { return }
+        refreshTree()
+    }
+
+    /// Re-read the tree from disk while KEEPING expansion and selection.
+    /// A naive invalidate+reload swaps nodes for new objects and the outline
+    /// collapses everything (the known collapse trap), so: capture the
+    /// expanded/selected URLs, re-list every expanded branch on a BACKGROUND
+    /// queue (an expanded job folder can hold 6k photos on an external drive
+    /// - never re-list that on main), then rebuild, graft the pre-read
+    /// children, and re-expand by URL, parents before children.
+    func refreshTree() {
+        lastTreeRefreshAt = Date()
+        var expandedPaths: [String] = []
+        for row in 0..<outlineView.numberOfRows {
+            if let node = outlineView.item(atRow: row) as? FolderNode,
+               !node.isSectionHeader, outlineView.isItemExpanded(node) {
+                expandedPaths.append(node.url.path)
+            }
+        }
+        let selectedPath: String? = {
+            let row = outlineView.selectedRow
+            guard row >= 0, let node = outlineView.item(atRow: row) as? FolderNode,
+                  !node.isSectionHeader else { return nil }
+            return node.url.path
+        }()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var fresh: [String: [FolderNode]] = [:]
+            for path in expandedPaths {
+                fresh[path] = FolderNode.readChildren(of: URL(fileURLWithPath: path))
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.rebuildSidebar()
+                // Parents before children, so each expand finds a loaded parent.
+                for path in expandedPaths.sorted(by: { $0.count < $1.count }) {
+                    guard let node = self.findNode(path: path) else { continue }
+                    if let kids = fresh[path] { node.preloadChildren(kids) }
+                    self.outlineView.expandItem(node)
+                }
+                if let selectedPath, let node = self.findNode(path: selectedPath) {
+                    let row = self.outlineView.row(forItem: node)
+                    if row >= 0 {
+                        self.outlineView.selectRowIndexes(IndexSet(integer: row),
+                                                          byExtendingSelection: false)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk the loaded tree to the node for `path` (nil if a branch on the
+    /// way isn't loaded/present). Deepest matching top-level node first,
+    /// mirroring reveal().
+    private func findNode(path: String) -> FolderNode? {
+        var topNodes: [FolderNode] = []
+        for group in roots {
+            topNodes.append(contentsOf: placesGroupChildren[ObjectIdentifier(group)] ?? [])
+        }
+        var best: FolderNode?
+        for node in topNodes {
+            let base = node.url.path
+            if path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/") {
+                if base.count > (best?.url.path.count ?? -1) { best = node }
+            }
+        }
+        guard var current = best else { return nil }
+        var hops = 0
+        while current.url.path != path, hops < 64 {
+            guard let next = children(of: current).first(where: {
+                path == $0.url.path || path.hasPrefix($0.url.path + "/")
+            }) else { return nil }
+            current = next
+            hops += 1
+        }
+        return current.url.path == path ? current : nil
+    }
+
+    @objc private func refreshFolders(_ sender: Any?) { refreshTree() }
 
     private func buildRoots() {
         let fm = FileManager.default
@@ -459,16 +558,39 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         guard !urls.isEmpty else { return false }
         let destination = node.url
         let copying = NSEvent.modifierFlags.contains(.option)
+        // A drag out of the SIDEBAR moves folders (tree changes); a drag from
+        // the photo grid moves only files (tree identical). Classify by source
+        // now - info is only valid synchronously - so a photo drop can SKIP the
+        // branch rebuild that would otherwise collapse the sidebar's expansion.
+        let fromSidebar = (info.draggingSource as AnyObject?) === outlineView
+        let externalDrag = info.draggingSource == nil
         // Off the main thread: dropping 2,000 photos must not beach-ball.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Finder semantics for duplicates: ASK (keep both / skip /
             // overwrite) instead of silently minting "Name 2.CR3".
             let collisions = FileOps.collisionCount(urls, in: destination)
             let run: (FileOps.Collision) -> Void = { policy in
+                // Big photo drops get a locked progress bar; folder drags are
+                // one atomic rename (no bar), and small drops stay instant.
+                let showProgress = !fromSidebar   // the time-based panel decides if it actually appears
+                let total = urls.count
+                let step = max(1, total / 100)
+                if showProgress {
+                    DispatchQueue.main.async {
+                        FileOpProgress.shared.begin(
+                            "\(copying ? "Copying" : "Moving") \(total.formatted()) photos", total: total)
+                    }
+                }
+                let progress: ((Int) -> Void)? = showProgress ? { done in
+                    if done % step == 0 || done == total {
+                        DispatchQueue.main.async { FileOpProgress.shared.update(done: done) }
+                    }
+                } : nil
                 let result = copying
-                    ? FileOps.copy(urls, to: destination, onCollision: policy)
-                    : FileOps.move(urls, to: destination, onCollision: policy)
+                    ? FileOps.copy(urls, to: destination, onCollision: policy, onProgress: progress)
+                    : FileOps.move(urls, to: destination, onCollision: policy, onProgress: progress)
                 DispatchQueue.main.async { [weak self] in
+                    if showProgress { FileOpProgress.shared.end() }
                     guard let self else { return }
                     FileOpsHistory.push("\(copying ? "copy" : "move") to \(destination.lastPathComponent)",
                                         kind: copying ? .copy : .move, result.records)
@@ -477,17 +599,27 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                     // parent rebuilds its children into NEW node objects,
                     // orphaning that reference and leaving a moved folder
                     // invisible in a fresh, collapsed parent until relaunch.
-                    var affected = Set(result.records.map { $0.from.deletingLastPathComponent().path })
-                    affected.insert(destination.path)
-                    for p in affected {
-                        self.refreshBranchContaining(URL(fileURLWithPath: p))
-                    }
-                    // A moved FOLDER should be visible where it landed.
-                    if !copying,
-                       let landed = result.records.first(where: {
-                           (try? $0.to.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
-                       })?.to {
-                        self.reveal(landed)
+                    // Only a FOLDER move changes the tree. Rebuilding a branch
+                    // swaps its child nodes for NEW objects and collapses
+                    // everything expanded underneath - that was the tree-
+                    // collapse-on-photo-drop bug. A photo drop leaves the tree
+                    // identical, so skip the rebuild and keep the expansion.
+                    // (Grid drops pay no stat; only sidebar/external drags look
+                    // for a landed folder.)
+                    let landedFolder: URL? = (fromSidebar || externalDrag)
+                        ? result.records.first(where: {
+                            (try? $0.to.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                          })?.to
+                        : nil
+                    if fromSidebar || landedFolder != nil {
+                        var affected = Set(result.records.map { $0.from.deletingLastPathComponent().path })
+                        affected.insert(destination.path)
+                        for p in affected {
+                            self.refreshBranchContaining(URL(fileURLWithPath: p))
+                        }
+                        if !copying, let landed = landedFolder {
+                            self.reveal(landed)
+                        }
                     }
                     self.onFilesMoved?(result.primaries, destination)
                 }
@@ -674,6 +806,7 @@ extension FolderSidebarViewController: NSMenuDelegate {
         for (title, action) in [
             ("New Folder…", #selector(newFolder(_:))),
             ("Rename…", #selector(renameFolder(_:))),
+            ("Refresh Folders", #selector(refreshFolders(_:))),
             ("Reveal in Finder", #selector(revealInFinder(_:)))
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")

@@ -41,8 +41,13 @@ final class CacheDB {
             sqlite3_exec(db, "ALTER TABLE blobs ADD COLUMN atime INTEGER;", nil, nil, nil)
             sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_atime ON blobs(atime);", nil, nil, nil)
         }
-        // Backfill + budget + first prune off the critical path.
-        queue.async { [weak self] in self?.bootstrap(dir: dir) }
+        // Backfill + budget + first prune off the critical path AND out of the
+        // first-folder window: on a cold launch that pass can hold the cache
+        // queue ~1 s, and the grid's thumbnail lookups (queue.sync) would stall
+        // behind it - the cold-open beachball. A few seconds late is harmless;
+        // pruning isn't urgent, and set() defaults keep the cache safe until it
+        // runs (budget starts generous, so nothing over-prunes meanwhile).
+        queue.asyncAfter(deadline: .now() + 4.0) { [weak self] in self?.bootstrap(dir: dir) }
     }
 
     private func now() -> Int64 { Int64(Date().timeIntervalSince1970) }
@@ -77,27 +82,48 @@ final class CacheDB {
         return sqlite3_column_int64(stmt, 0)
     }
 
-    /// Evict oldest-accessed blobs until under 85% of budget. Runs ON the
-    /// cachedb queue (caller holds it), in bounded batches.
+    /// Evict oldest-accessed blobs until under 85% of budget - ONE bounded
+    /// batch per queue turn. get() is queue.sync from every decode thread,
+    /// so a prune that holds the queue for its whole pass stalls ALL
+    /// thumbnail/preview rendering (blank cells while scrolling, appearing
+    /// only after weeks of use, once the cache first fills its budget).
+    /// Yielding between batches lets reads interleave; nothing cares that
+    /// the prune finishes a few hundred ms later.
     private func pruneLocked() {
-        guard let db, estimatedBytes > budget else { return }
-        let target = Int64(Double(budget) * 0.85)
-        var total = currentBytes()
-        var guardCount = 0
-        while total > target, guardCount < 10_000 {
-            guardCount += 1
-            // Delete the 512 oldest, tallying the bytes reclaimed.
-            let sql = """
-            DELETE FROM blobs WHERE k IN (
-                SELECT k FROM blobs ORDER BY atime ASC LIMIT 512
-            );
-            """
-            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { break }
-            let changed = sqlite3_changes(db)
-            if changed == 0 { break }
-            total = currentBytes()
+        guard !pruning, db != nil, estimatedBytes > budget else { return }
+        pruning = true
+        estimatedBytes = currentBytes() // exact starting point, kills drift
+        pruneStep(target: Int64(Double(budget) * 0.85), guardCount: 0)
+    }
+
+    /// One batch: tally the bytes of the 512 oldest (walks the atime index,
+    /// cheap - the old per-batch full-table SUM was most of the stall),
+    /// delete them, re-queue the next batch. Runs on the cachedb queue.
+    private func pruneStep(target: Int64, guardCount: Int) {
+        guard let db, estimatedBytes > target, guardCount < 10_000 else {
+            pruning = false
+            return
         }
-        estimatedBytes = total
+        var batchBytes: Int64 = 0
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT COALESCE(SUM(bytes),0) FROM (SELECT bytes FROM blobs ORDER BY atime ASC LIMIT 512);", -1, &stmt, nil) == SQLITE_OK,
+           sqlite3_step(stmt) == SQLITE_ROW {
+            batchBytes = sqlite3_column_int64(stmt, 0)
+        }
+        sqlite3_finalize(stmt)
+        let sql = """
+        DELETE FROM blobs WHERE k IN (
+            SELECT k FROM blobs ORDER BY atime ASC LIMIT 512
+        );
+        """
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, sqlite3_changes(db) > 0 else {
+            pruning = false
+            return
+        }
+        estimatedBytes = max(0, estimatedBytes - batchBytes)
+        queue.async { [weak self] in
+            self?.pruneStep(target: target, guardCount: guardCount + 1)
+        }
     }
 
     // MARK: - API (unchanged signatures)
@@ -149,7 +175,7 @@ final class CacheDB {
             sqlite3_bind_int64(stmt, 4, self.now())
             sqlite3_step(stmt)
             self.estimatedBytes += Int64(data.count)
-            // Crossed budget → prune in this same background turn.
+            // Crossed budget → kick off a sliced prune (no-op if running).
             if self.estimatedBytes > self.budget { self.pruneLocked() }
         }
     }

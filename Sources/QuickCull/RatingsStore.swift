@@ -21,6 +21,11 @@ final class RatingsStore {
     private var clearedLabels: Set<String> = []
 
     private var saveScheduled = false
+    // Bumped on every change; recorded when a background save actually
+    // lands. Lets quit SKIP the (main-thread) full-store re-encode when the
+    // background saver already persisted the current state.
+    private var changeGeneration = 0
+    private var savedGeneration = -1
 
     private var fileURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -195,6 +200,16 @@ final class RatingsStore {
 
     private var xmpDirty: Set<String> = []
     private var xmpInFlight: Set<String> = []
+
+    /// True while our OWN sidecar writes are pending or mid-flight. The grid's
+    /// folder watcher checks this so a long background flush (thousands of
+    /// files, several seconds) isn't mistaken for an external change and doesn't
+    /// reload the folder - which would collapse the user's selection mid-cull.
+    /// Main-thread only (both sets are mutated only on main).
+    var hasPendingXMPWork: Bool { !xmpDirty.isEmpty || !xmpInFlight.isEmpty }
+
+    /// The JSON store has changes the background saver hasn't persisted yet.
+    var hasUnsavedChanges: Bool { changeGeneration != savedGeneration }
     private var xmpFlushScheduled = false
     /// SERIAL queue: two overlapping bulk edits (all→red, then all→none)
     /// must flush in order - concurrent batches interleave per-file and an
@@ -215,20 +230,31 @@ final class RatingsStore {
             self.xmpInFlight.formUnion(batch.map { $0.0 })
             NotificationCenter.default.post(name: Self.xmpFlushActivity, object: nil)
             self.xmpQueue.async {
-                for (id, rating, label, rotationDegrees) in batch {
+                // ===== BOOKMARK (2026-07-19): parallel WITHIN each batch =====
+                // Serial per-file writes to an external drive (~10-20 ms each)
+                // made a 6k rating's flush take minutes, and quit's
+                // xmpQueue.sync {} blocked on that whole backlog (the 2-minute
+                // quit hang). Batches stay serialized by xmpQueue (overlapping
+                // bulk edits must land in order), but each batch's writes go
+                // parallel - distinct file per id, no shared mutable state
+                // (same verification as flushXMPNow). REVERT to the serial
+                // for-loop first if sidecar writes ever race.
+                DispatchQueue.concurrentPerform(iterations: batch.count) { i in
+                    let (id, rating, label, rotationDegrees) = batch[i]
                     let url = URL(fileURLWithPath: id)
                     // Sidecars for RAW files only - Lightroom ignores JPEG
                     // sidecars, and we never rewrite originals.
                     guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
-                          FileManager.default.fileExists(atPath: url.path) else { continue }
+                          FileManager.default.fileExists(atPath: url.path) else { return }
                     var orientation: Int?
                     if rotationDegrees != 0 {
                         orientation = XMPSidecar.orientationCode(
                             containerOrientation: ImageTransform.containerOrientation(of: url),
                             plusDegreesCW: rotationDegrees)
                     }
-                    XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+                    _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
                 }
+                // ===== END BOOKMARK =====
                 DispatchQueue.main.async {
                     self.xmpInFlight.subtract(batch.map { $0.0 })
                     NotificationCenter.default.post(name: Self.xmpFlushActivity, object: nil)
@@ -248,25 +274,96 @@ final class RatingsStore {
         }
         xmpDirty.removeAll()
         // Drain any in-flight background flush first so we can't interleave.
+        let tDrain = Date()
         xmpQueue.sync {}
-        for (id, rating, label, rotationDegrees) in batch {
+        NSLog("[quit] drained background sidecar backlog in %.0f ms", Date().timeIntervalSince(tDrain) * 1000)
+        let tWrite = Date()
+        // ===== BOOKMARK (2026-07-19): parallelized sidecar drain =====
+        // Was a serial for-loop; a 4,000-photo rate-then-quit wrote sidecars one
+        // at a time and beach-balled quit. Each write hits a DISTINCT file, and
+        // XMPSidecar.write / ImageTransform.containerOrientation hold no shared
+        // mutable state (verified), and `batch` is snapshotted above so the loop
+        // never touches RatingsStore state - so this is race-free and still
+        // SYNCHRONOUS (concurrentPerform blocks until every write lands, which
+        // both quit and the Lightroom hand-off rely on).
+        // IF SIDECAR WRITES EVER MISBEHAVE UNDER LOAD, REVERT TO THE SERIAL LOOP.
+        DispatchQueue.concurrentPerform(iterations: batch.count) { i in
+            let (id, rating, label, rotationDegrees) = batch[i]
             let url = URL(fileURLWithPath: id)
             guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
-                  FileManager.default.fileExists(atPath: url.path) else { continue }
+                  FileManager.default.fileExists(atPath: url.path) else { return }
             var orientation: Int?
             if rotationDegrees != 0 {
                 orientation = XMPSidecar.orientationCode(
                     containerOrientation: ImageTransform.containerOrientation(of: url),
                     plusDegreesCW: rotationDegrees)
             }
-            XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+            _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+        }
+        // ===== END BOOKMARK =====
+        NSLog("[quit] wrote %d final pending sidecars in %.0f ms", batch.count, Date().timeIntervalSince(tWrite) * 1000)
+    }
+
+    /// ASYNC terminate drain for the "Finishing up…" quit path. Snapshots on
+    /// main (state is main-only), then drains the background backlog + writes
+    /// sidecars + JSON on a background thread, and calls completion on main.
+    /// Keeps the run loop free to render the quit message while a big backlog
+    /// drains, instead of a silent main-thread beachball. Completion ALWAYS
+    /// fires (so the terminate reply can't strand the app).
+    func drainForTermination(completion: @escaping () -> Void) {
+        assert(Thread.isMainThread)
+        let batch = xmpDirty.map { id in
+            (id, rating(for: id), colorLabel(for: id), rotation(for: id))
+        }
+        xmpDirty.removeAll()
+        let gen = changeGeneration
+        let snap: Snapshot? = (changeGeneration != savedGeneration)
+            ? Snapshot(ratings: ratings, rejected: Array(rejected),
+                       colorLabels: colorLabels, rotations: rotations,
+                       clearedRatings: Array(clearedRatings), clearedLabels: Array(clearedLabels))
+            : nil
+        let dest = fileURL
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.xmpQueue.sync {}   // drain any in-flight background flush first
+            if !batch.isEmpty {
+                DispatchQueue.concurrentPerform(iterations: batch.count) { i in
+                    let (id, rating, label, rotationDegrees) = batch[i]
+                    let url = URL(fileURLWithPath: id)
+                    guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
+                          FileManager.default.fileExists(atPath: url.path) else { return }
+                    var orientation: Int?
+                    if rotationDegrees != 0 {
+                        orientation = XMPSidecar.orientationCode(
+                            containerOrientation: ImageTransform.containerOrientation(of: url),
+                            plusDegreesCW: rotationDegrees)
+                    }
+                    _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+                }
+            }
+            if let snap, let data = try? JSONEncoder().encode(snap) {
+                try? data.write(to: dest, options: .atomic)
+            }
+            DispatchQueue.main.async {
+                self.savedGeneration = gen
+                completion()
+            }
         }
     }
 
     /// Quit-time flush: pending sidecars + the JSON store, synchronously.
     func flushForTermination() {
+        let tQuit = Date()
         flushXMPNow()
-        // 2. The JSON store, synchronously.
+        // The background saver re-encodes the WHOLE store; if it already
+        // persisted the current state (the common case - user paused before
+        // quitting), the JSON on disk is current and we skip the synchronous
+        // main-thread re-encode that otherwise beach-balls quit after a big
+        // session. Only pay it when there are genuinely-unsaved changes.
+        guard changeGeneration != savedGeneration else {
+            NSLog("[quit] json store already saved (skipped) - total quit flush %.0f ms", Date().timeIntervalSince(tQuit) * 1000)
+            return
+        }
+        let tJSON = Date()
         let snap = Snapshot(ratings: ratings, rejected: Array(rejected),
                             colorLabels: colorLabels, rotations: rotations,
                             clearedRatings: Array(clearedRatings),
@@ -274,6 +371,7 @@ final class RatingsStore {
         if let data = try? JSONEncoder().encode(snap) {
             try? data.write(to: fileURL, options: .atomic)
         }
+        NSLog("[quit] json store re-encoded in %.0f ms; total quit flush %.0f ms", Date().timeIntervalSince(tJSON) * 1000, Date().timeIntervalSince(tQuit) * 1000)
     }
 
     // MARK: - Persistence
@@ -299,6 +397,7 @@ final class RatingsStore {
     }
 
     private func scheduleSave() {
+        changeGeneration += 1
         guard !saveScheduled else { return }
         saveScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -307,6 +406,7 @@ final class RatingsStore {
             // Snapshot on main (state is main-only); encode + write on a
             // background queue - during a rating burst this fires every
             // 0.5 s, and a big store shouldn't cost the keyboard rhythm.
+            let gen = self.changeGeneration
             let snap = Snapshot(ratings: self.ratings, rejected: Array(self.rejected),
                                 colorLabels: self.colorLabels, rotations: self.rotations,
                                 clearedRatings: Array(self.clearedRatings),
@@ -315,6 +415,7 @@ final class RatingsStore {
             DispatchQueue.global(qos: .utility).async {
                 if let data = try? JSONEncoder().encode(snap) {
                     try? data.write(to: dest, options: .atomic)
+                    DispatchQueue.main.async { self.savedGeneration = gen }
                 }
             }
         }

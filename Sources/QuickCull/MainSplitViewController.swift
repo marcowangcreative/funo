@@ -80,6 +80,9 @@ final class MainSplitViewController: NSSplitViewController {
                   window.attachedSheet == nil,
                   !(window.firstResponder is NSTextView) // don't steal keys from text editing
             else { return event }
+            // A big move/copy is locked on screen - swallow keys so nobody can
+            // tab or cull mid-operation.
+            if FileOpProgress.shared.isActive { return nil }
             // Cheat-sheet: swallow keys while it's up; ? toggles it (bare
             // key - just "/", no shift, works in every mode).
             if let sc = self.shortcutsOverlay { return sc.handleKey(event) ? nil : event }
@@ -182,7 +185,8 @@ final class MainSplitViewController: NSSplitViewController {
         addSplitViewItem(gridItem)
 
         sidebar.onSelectFolder = { [weak self] url in
-            self?.tabs.open(url, inNewTab: false)
+            guard let self, !FileOpProgress.shared.isActive else { return }
+            self.tabs.open(url, inNewTab: false)
         }
 
         sidebar.onOpenFolderInNewTab = { [weak self] url in

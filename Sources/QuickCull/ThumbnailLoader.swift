@@ -181,9 +181,14 @@ final class ThumbnailLoader {
             guard let op, !op.isCancelled else {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    if self.pending[key] === op { self.pending[key] = nil }
-                    // Shouldn't happen (cancel spares keys with waiters), but
-                    // never strand a caller.
+                    // Only the AUTHORITATIVE op for this key may fail its
+                    // waiters. A cancelled prefetch can lose this slot to a
+                    // fresh visible-cell request (cancel() clears pending,
+                    // request() re-creates the op); firing that NEW caller's
+                    // waiters with nil from the dead op's corpse left grid
+                    // cells permanently blank during fast scrolls.
+                    guard self.pending[key] === op else { return }
+                    self.pending[key] = nil
                     let stranded = self.waiters.removeValue(forKey: key) ?? []
                     stranded.forEach { $0(nil) }
                 }

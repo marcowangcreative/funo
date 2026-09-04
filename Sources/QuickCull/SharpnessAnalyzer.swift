@@ -20,6 +20,53 @@ final class SharpnessAnalyzer {
     /// Cached acutance if we already have it (main thread, instant).
     func cached(for asset: PhotoAsset) -> Double? { memo[asset.id] }
 
+    // MARK: - Per-face scores (the on-frame triage badges)
+
+    /// asset id → focus fraction (0…1) per face, index-aligned with the
+    /// FaceAnalysis faces array; -1 = couldn't score that face. Main-only.
+    private var faceMemo: [String: [Double]] = [:]
+
+    /// Cached per-face focus fractions, instant (main thread).
+    func cachedFaceScores(for asset: PhotoAsset) -> [Double]? { faceMemo[asset.id] }
+
+    /// Score EVERY detected face's acutance - the same subject-aware metric the
+    /// Focus row uses on the largest face, per face. One decode, N small crops,
+    /// all off-main; completion on main with focus FRACTIONS (0…1). Vision's
+    /// faceCaptureQuality is NOT sharpness (it happily rates a soft face high,
+    /// which put a clean green split on an out-of-focus baby) - only real
+    /// acutance may drive the rangefinder split.
+    func faceScores(for asset: PhotoAsset, completion: @escaping ([Double]?) -> Void) {
+        if let v = faceMemo[asset.id] { completion(v); return }
+        guard let analysis = FaceAnalyzer.shared.result(for: asset.id),
+              !analysis.faces.isEmpty else { completion(nil); return }
+        let id = asset.id
+        let url = asset.url
+        let rects = analysis.faces.map { $0.rect }
+        queue.async { [weak self] in
+            guard let cg = FaceAnalyzer.analysisDecode(url: url, maxPixel: 2048) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let W = CGFloat(cg.width), H = CGFloat(cg.height)
+            var fractions: [Double] = []
+            for r in rects {
+                var px = CGRect(x: r.minX * W, y: (1 - r.maxY) * H,
+                                width: r.width * W, height: r.height * H)
+                px = px.insetBy(dx: -px.width * 0.12, dy: -px.height * 0.12)
+                    .intersection(CGRect(x: 0, y: 0, width: W, height: H))
+                if !px.isNull, px.width > 8, let crop = cg.cropping(to: px) {
+                    fractions.append(Self.focusFraction(Self.acutance(from: crop)))
+                } else {
+                    fractions.append(-1)
+                }
+            }
+            DispatchQueue.main.async {
+                self?.faceMemo[id] = fractions
+                completion(fractions)
+            }
+        }
+    }
+
     /// Acutance for an asset - memo → CacheDB → compute from the decoded
     /// preview. Completion always on the main thread; nil if we couldn't
     /// get a decoded image yet (caller can retry once the preview lands).
