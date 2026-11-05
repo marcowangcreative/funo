@@ -418,7 +418,9 @@ final class PhotoGridViewController: NSViewController,
         onStatusChanged?(text, undo)
     }
 
-    private var scanGeneration = 0
+    /// Bumped on every folder load. A listing that finishes after a newer
+    /// click is dropped, and a path change blanks the grid in the same turn.
+    private var folderLoad = FolderLoadGate()
     private var firstThumbMS: Double?
     private var scanStartedAt: Date?
     private var scanMS: Double = 0
@@ -601,7 +603,7 @@ final class PhotoGridViewController: NSViewController,
             self.sortKey = key
             self.resort(keepSelection: true)
             if key == .capture, self.captureDates.isEmpty, !self.allAssets.isEmpty {
-                self.scanCaptureDates(self.allAssets, generation: self.scanGeneration)
+                self.scanCaptureDates(self.allAssets, generation: self.folderLoad.generation)
             }
         }
         toolbar.addSubview(sortBar)
@@ -978,8 +980,16 @@ final class PhotoGridViewController: NSViewController,
         bannerView.isHidden = true
         watchFolder(url)
         lastSelfLoadAt = Date()
-        scanGeneration += 1
-        let generation = scanGeneration
+        // Blank before the listing returns. Otherwise the cells keep showing
+        // the previous folder for the whole scan, which is the flash.
+        let ticket = folderLoad.begin(to: url.standardizedFileURL.path)
+        let generation = ticket.generation
+        if ticket.blank {
+            allAssets = []
+            displayedAssets = []
+            rebuildSearchIndex()
+            collectionView.reloadData()
+        }
         firstThumbMS = nil
         scanStartedAt = Date()
         emptyLabel.stringValue = ""
@@ -988,7 +998,7 @@ final class PhotoGridViewController: NSViewController,
         // result, so the footer never flickers "Opening…" for no reason.
         openingStatusWork?.cancel()
         let openingWork = DispatchWorkItem { [weak self] in
-            guard let self, self.scanGeneration == generation else { return }
+            guard let self, self.folderLoad.accepts(generation) else { return }
             self.pushStatus("Opening \(url.lastPathComponent)…")
         }
         openingStatusWork = openingWork
@@ -997,7 +1007,7 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
-                guard let self, self.scanGeneration == generation else { return }
+                guard let self, self.folderLoad.accepts(generation) else { return }
                 self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
                 if self.sortKey == .name {
@@ -1024,7 +1034,7 @@ final class PhotoGridViewController: NSViewController,
                 // the drive first; start faces ~2 s later, and bail if the
                 // user has already moved to another folder.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self, self.scanGeneration == generation else { return }
+                    guard let self, self.folderLoad.accepts(generation) else { return }
                     FaceAnalyzer.shared.analyzeFolder(self.allAssets)
                 }
             }
@@ -1047,7 +1057,7 @@ final class PhotoGridViewController: NSViewController,
                 }
             }
             DispatchQueue.main.async {
-                guard let self, self.scanGeneration == generation else { return }
+                guard let self, self.folderLoad.accepts(generation) else { return }
                 self.captureDates = dates
                 if self.sortKey == .capture { self.resort(keepSelection: true) }
             }
@@ -1087,7 +1097,7 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private func applySidecarBatch(_ batch: [(String, Int?, Int?)], generation: Int) {
-        guard scanGeneration == generation else { return }
+        guard folderLoad.accepts(generation) else { return }
         var adoptedAny = false
         for (id, rating, label) in batch {
             if RatingsStore.shared.adopt(rating: rating, label: label, for: id) {
