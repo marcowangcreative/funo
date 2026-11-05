@@ -1159,15 +1159,16 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let path = node.standardizedPath
         var url = node.url
         var values = URLResourceValues()
-        values.tagNames = tags.finderTagNames
         values.labelNumber = tags.finderLabelNumber
+        let names = tags.finderTagNames
+        // `URLResourceValues.tagNames`'s setter is macOS 26+. NSURL has written
+        // this key since the tag API shipped.
         do {
             try url.setResourceValues(values)
+            try (url as NSURL).setResourceValue(names, forKey: .tagNamesKey)
         } catch {
-            var namesOnly = URLResourceValues()
-            namesOnly.tagNames = tags.finderTagNames
             do {
-                try url.setResourceValues(namesOnly)
+                try (url as NSURL).setResourceValue(names, forKey: .tagNamesKey)
             } catch {
                 NSSound.beep()
                 return

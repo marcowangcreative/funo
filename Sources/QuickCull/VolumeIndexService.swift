@@ -202,7 +202,9 @@ final class VolumeIndexService {
         let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, eventFlags, _ in
             guard let info else { return }
             let service = Unmanaged<VolumeIndexService>.fromOpaque(info).takeUnretainedValue()
-            let array = Unmanaged<CFArray>.fromOpaque(OpaquePointer(eventPaths)).takeUnretainedValue() as NSArray
+            // useCFTypes hands the callback a CFArray of paths. That pointer is
+            // not an UnsafeRawPointer, so the cast is a bitcast, not fromOpaque.
+            let array = unsafeBitCast(eventPaths, to: NSArray.self)
             guard let paths = array as? [String] else { return }
             let flags = UnsafeBufferPointer(start: eventFlags, count: numEvents)
             service.ingest(paths: paths, flags: Array(flags))
@@ -214,7 +216,7 @@ final class VolumeIndexService {
             paths as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.5,
-            FSEventStreamCreateFlags([.useCFTypes, .fileEvents, .noDefer])
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
         ) else { return }
         FSEventStreamSetDispatchQueue(created, indexQueue)
         FSEventStreamStart(created)
