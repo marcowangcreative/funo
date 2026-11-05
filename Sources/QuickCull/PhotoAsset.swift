@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import QuickCullCore
 
 /// A single photo in a folder. The file on disk is the source of truth -
 /// this struct is just a lightweight handle to it.
@@ -97,22 +98,30 @@ enum FolderScanner {
         return ScanResult(assets: result, elapsed: Date().timeIntervalSince(start), pairedJPEGCount: pairedJPEGs)
     }
 
-    private static let exifDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return formatter
-    }()
+    struct CaptureRead {
+        var hasDate: Bool
+        var seconds: TimeInterval
+        var subsecMillis: Int
+        var size: Int64
+        var mtime: TimeInterval
+    }
 
-    /// Exact capture time from EXIF (header read only). nil → caller falls
-    /// back to the file's modification date.
-    static func captureDate(of url: URL) -> Date? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+    /// Header only: DateTimeOriginal and SubSecTimeOriginal. No pixel decode.
+    /// Size and mtime ride along so the disk cache can skip this on the next visit.
+    static func readCapture(_ url: URL) -> CaptureRead {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = Int64(values?.fileSize ?? 0)
+        let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
-              let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String else {
-            return nil
+              let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String,
+              let parsed = CaptureSort.parse(dateTime: raw, subsec: exif[kCGImagePropertyExifSubsecTimeOriginal] as? String)
+        else {
+            return CaptureRead(hasDate: false, seconds: 0, subsecMillis: 0, size: size, mtime: mtime)
         }
-        return exifDateFormatter.date(from: raw)
+        return CaptureRead(hasDate: true, seconds: parsed.seconds, subsecMillis: parsed.millis,
+                           size: size, mtime: mtime)
     }
 }

@@ -24,6 +24,10 @@ final class ShortcutsOverlayView: NSView {
         return [
             Group(title: "RATE & LABEL", rows: rate + [
                 ("0", "clear rating"), ("X", "reject"), ("U", "unlabel"), ("`", "swap stars / colors")]),
+            Group(title: "FILTER", rows: [
+                ("6–9", "red, yellow, green, blue"),
+                ("P", "purple"), ("N", "unlabeled"),
+                ("All", "show every color")]),
             Group(title: "LOOK", rows: [
                 ("Space", "expand / collapse"), ("S", "survey compare"),
                 ("Z", "100% zoom"), ("[  ]", "rotate"), ("+  −", "thumbnail size")]),
@@ -54,7 +58,7 @@ final class ShortcutsOverlayView: NSView {
     private func build() {
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 14
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor

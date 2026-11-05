@@ -264,7 +264,7 @@ private final class SurveyCell: NSView {
         self.asset = asset
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = Theme.imageRadius
         layer?.borderColor = Theme.accent.cgColor
         layer?.masksToBounds = true
 

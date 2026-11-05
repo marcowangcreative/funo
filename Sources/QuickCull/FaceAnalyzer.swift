@@ -2,6 +2,7 @@ import AppKit
 import Vision
 import CoreImage
 import ImageIO
+import QuickCullCore
 
 /// One detected face and its grades.
 struct FaceInfo: Codable {
@@ -54,18 +55,31 @@ final class FaceCropper {
         cache.countLimit = 24 // two dozen photos' worth of tiny crops
     }
 
+    /// Crops already in memory, or nil when they still have to be cut.
+    /// An empty array is a settled "no faces" verdict, not a cache miss.
+    /// Safe to call on the keypress path: it does not decode.
+    func cachedCrops(for asset: PhotoAsset, maxFaces: Int = 40) -> [(NSImage, FaceInfo)]? {
+        guard let analysis = FaceAnalyzer.shared.result(for: asset.id) else { return nil }
+        let faces = Array(analysis.faces.prefix(maxFaces))
+        if faces.isEmpty { return [] }
+        guard let cached = cache.object(forKey: asset.id as NSString) as? [NSImage],
+              cached.count == faces.count else { return nil }
+        return Array(zip(cached, faces))
+    }
+
     /// Completion fires on the main thread with (crop, info) pairs in
     /// left-to-right photo order. Empty when unanalyzed or no faces.
-    func crops(for asset: PhotoAsset, maxFaces: Int = 16, completion: @escaping ([(NSImage, FaceInfo)]) -> Void) {
+    /// A cache hit completes synchronously. The decode itself is off the main thread.
+    func crops(for asset: PhotoAsset, maxFaces: Int = 40, completion: @escaping ([(NSImage, FaceInfo)]) -> Void) {
+        if let cached = cachedCrops(for: asset, maxFaces: maxFaces) {
+            completion(cached)
+            return
+        }
         guard let analysis = FaceAnalyzer.shared.result(for: asset.id), !analysis.faces.isEmpty else {
             completion([])
             return
         }
         let faces = Array(analysis.faces.prefix(maxFaces))
-        if let cached = cache.object(forKey: asset.id as NSString) as? [NSImage], cached.count == faces.count {
-            completion(Array(zip(cached, faces)))
-            return
-        }
         let url = asset.url
         let id = asset.id
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -80,7 +94,7 @@ final class FaceCropper {
                     px = px.insetBy(dx: -px.width * 0.18, dy: -px.height * 0.18)
                         .intersection(CGRect(x: 0, y: 0, width: W, height: H))
                     guard !px.isNull, px.width > 4, let crop = cg.cropping(to: px) else { continue }
-                    let image = NSImage(cgImage: crop, size: .zero)
+                    let image = QuickCullImage.fromCGImage(crop)
                     images.append(image)
                     pairs.append((image, face))
                 }
@@ -106,45 +120,83 @@ final class FaceAnalyzer {
     static let shared = FaceAnalyzer()
 
     /// Fired on the main thread as each photo's analysis lands (asset id).
+    /// Prefer `addObserver` — a single closure is replaced by whichever grid
+    /// loaded last, so closing that tab left the faces panel deaf until a
+    /// new grid was created (results were stored, but nothing redrew).
     var onResult: ((String) -> Void)?
     /// Fired on the main thread with (done, total) for the current folder.
     var onProgress: ((Int, Int) -> Void)?
 
+    private struct Observer {
+        let onResult: (String) -> Void
+        let onProgress: (Int, Int) -> Void
+    }
+    private var observers: [UUID: Observer] = [:] // main thread only
+
+    /// Every live grid registers. Closing a tab removes only that grid, so
+    /// the one on screen keeps receiving results.
+    @discardableResult
+    func addObserver(onResult: @escaping (String) -> Void,
+                     onProgress: @escaping (Int, Int) -> Void) -> UUID {
+        let id = UUID()
+        observers[id] = Observer(onResult: onResult, onProgress: onProgress)
+        return id
+    }
+
+    func removeObserver(_ id: UUID) {
+        observers.removeValue(forKey: id)
+    }
+
+    private func notifyResult(_ id: String) {
+        onResult?(id)
+        for observer in observers.values { observer.onResult(id) }
+    }
+
+    private func notifyProgress() {
+        let snapshot = (done, total)
+        onProgress?(snapshot.0, snapshot.1)
+        for observer in observers.values { observer.onProgress(snapshot.0, snapshot.1) }
+    }
+
     private var results: [String: FaceAnalysis] = [:] // main thread only
-    private let queue: OperationQueue
+    /// Retry/abandon bookkeeping for decodes that never produced a verdict.
+    /// Main thread only, same as `results`.
+    private var ledger = FaceResultLedger(maxFailures: 3)
+    /// Bumped from v9: v9 persisted a failed decode as "zero faces", and the
+    /// panel then hid until Rescan. v10 is only written for a real decode.
+    private static let cacheSuffix = "|faces-v10"
     private var generation = 0
     private var done = 0
     private(set) var total = 0
 
     /// Pending operations by asset id - lets the UI bump the photo the user
     /// is actually looking at to the front of the queue.
-    private var pendingOps: [String: Operation] = [:] // main thread only
-
-    private init() {
-        // Serial: one lane can never crowd the decode queues. .utility (not
-        // .background) so macOS doesn't starve it indefinitely under load -
-        // "the scan never happens" was background-QoS starvation.
-        queue = OperationQueue()
-        queue.name = "quickcull.faceanalysis"
-        queue.maxConcurrentOperationCount = 1
-        queue.qualityOfService = .utility
-    }
+    private final class FaceTicket { var job = 0 }
+    private var pendingOps: [String: FaceTicket] = [:] // main thread only
 
     var isScanning: Bool { total > 0 && done < total }
 
     /// The user is looking at this photo - analyze it next.
     func prioritize(_ id: String) {
-        pendingOps[id]?.queuePriority = .veryHigh
+        if let job = pendingOps[id]?.job { WorkRunner.shared.setLane(job, .selected) }
     }
 
     func result(for id: String) -> FaceAnalysis? { results[id] }
     var doneCount: Int { done }
 
+    /// Panel-facing state. A missing result is "still working" until the
+    /// retry budget is spent — never "no faces".
+    func phase(for id: String) -> FacePanelPhase {
+        ledger.phase(id: id, storedFaceCount: results[id]?.faces.count)
+    }
+
     /// Force a fresh scan of specific photos (a verdict went rogue).
     func rescan(_ assets: [PhotoAsset]) {
         for asset in assets {
             results.removeValue(forKey: asset.id)
+            ledger.forget(asset.id)
             if let identity = CacheDB.identity(for: asset.url) {
+                CacheDB.shared.delete(identity + Self.cacheSuffix)
                 CacheDB.shared.delete(identity + "|faces-v9")
             }
         }
@@ -155,12 +207,13 @@ final class FaceAnalyzer {
     /// Testing aid: forget every in-memory verdict.
     func clearResults() {
         generation += 1
-        queue.cancelAllOperations()
+        WorkRunner.shared.cancel(group: "faces")
         pendingOps.removeAll()
         results.removeAll()
+        ledger = FaceResultLedger(maxFailures: 3)
         done = 0
         total = 0
-        onProgress?(0, 0)
+        notifyProgress()
     }
 
     /// THE faces switch - deliberately the same preference as the expanded
@@ -176,10 +229,10 @@ final class FaceAnalyzer {
         set {
             UserDefaults.standard.set(newValue, forKey: "QuickCullShowFaces")
             if !newValue {
-                queue.cancelAllOperations()
+                WorkRunner.shared.cancel(group: "faces")
                 done = 0
                 total = 0
-                onProgress?(0, 0)
+                notifyProgress()
             }
         }
     }
@@ -189,12 +242,12 @@ final class FaceAnalyzer {
     func analyzeFolder(_ assets: [PhotoAsset]) {
         generation += 1
         let gen = generation
-        queue.cancelAllOperations()
+        WorkRunner.shared.cancel(group: "faces")
         pendingOps.removeAll()
         guard isEnabled else {
             done = 0
             total = 0
-            onProgress?(0, 0)
+            notifyProgress()
             return
         }
 
@@ -202,10 +255,14 @@ final class FaceAnalyzer {
         // multi-MB read stealing bandwidth from the thumbnails the user is
         // actually waiting on. Cards get analyzed after ingest, from the SSD.
         let pending = assets.filter { results[$0.id] == nil && !FileOps.isMemoryCard($0.url) }
+        // A new pass gets a fresh retry budget. Without this, a photo that
+        // failed while the card was busy stayed abandoned for the session
+        // even after the folder was reopened onto a quiet disk.
+        for asset in pending { ledger.resetAttempts(asset.id) }
         done = 0
         total = pending.count
         guard !pending.isEmpty else {
-            onProgress?(0, 0)
+            notifyProgress()
             return
         }
 
@@ -224,41 +281,68 @@ final class FaceAnalyzer {
         guard gen == generation else { return }
         let end = min(start + 200, pending.count)
         for index in start..<end {
-            let asset = pending[index]
-            let id = asset.id
-            let url = asset.url
-            let op = BlockOperation()
-            op.addExecutionBlock { [weak self, weak op] in
-                guard let self, let op, !op.isCancelled else { return }
-                // Persistent cache: bump "v" when the detector changes so old
-                // verdicts re-derive.
-                let cacheKey = CacheDB.identity(for: url).map { $0 + "|faces-v9" }
-                var analysis: FaceAnalysis?
-                if let cacheKey, let data = CacheDB.shared.get(cacheKey) {
-                    analysis = try? JSONDecoder().decode(FaceAnalysis.self, from: data)
-                }
-                if analysis == nil {
-                    analysis = Self.analyze(url: url)
-                    if let cacheKey, let analysis, let data = try? JSONEncoder().encode(analysis) {
-                        CacheDB.shared.set(cacheKey, data)
-                    }
-                }
-                let final = analysis ?? FaceAnalysis(faces: [])
-                DispatchQueue.main.async {
-                    guard gen == self.generation else { return }
-                    self.pendingOps[id] = nil
-                    self.results[id] = final
-                    self.done += 1
-                    self.onResult?(id)
-                    self.onProgress?(self.done, self.total)
-                }
-            }
-            pendingOps[id] = op
-            queue.addOperation(op)
+            enqueueOne(pending[index], gen: gen)
         }
         if end < pending.count {
             DispatchQueue.main.async { [weak self] in
                 self?.enqueueAnalysis(pending, from: end, gen: gen)
+            }
+        }
+    }
+
+    /// One photo. Failures retry on the same generation; they are not stored
+    /// as an empty face list (that cache entry is what kept the panel blank).
+    private func enqueueOne(_ asset: PhotoAsset, gen: Int) {
+        guard gen == generation, results[asset.id] == nil, pendingOps[asset.id] == nil else { return }
+        let id = asset.id
+        let url = asset.url
+        let ticket = FaceTicket()
+        pendingOps[id] = ticket
+        let place = WorkRunner.shared.classify(url)
+        WorkRunner.shared.submit(
+            group: "faces", name: url.lastPathComponent, lane: .background,
+            volume: place.volume, pace: .slow, generation: gen,
+            onQueued: { ticket.job = $0 }
+        ) { [weak self] isCancelled in
+            guard let self, !isCancelled() else { return }
+            let cacheKey = CacheDB.identity(for: url).map { $0 + Self.cacheSuffix }
+            var analysis: FaceAnalysis?
+            if let cacheKey, let data = CacheDB.shared.get(cacheKey) {
+                analysis = try? JSONDecoder().decode(FaceAnalysis.self, from: data)
+            }
+            if analysis == nil {
+                analysis = Self.analyze(url: url)
+                // Only a real decode is persisted. `analyze` returns nil when
+                // the file couldn't be read; caching that as [] made the next
+                // launch skip the photo forever.
+                if let cacheKey, let analysis, let data = try? JSONEncoder().encode(analysis) {
+                    CacheDB.shared.set(cacheKey, data)
+                }
+            }
+            let final = analysis
+            DispatchQueue.main.async { [weak self] in
+                guard let self, gen == self.generation else { return }
+                self.pendingOps[id] = nil
+                guard let final else {
+                    switch self.ledger.record(id: id, outcome: .unavailable) {
+                    case .retry:
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                            self?.enqueueOne(asset, gen: gen)
+                        }
+                    case .abandon:
+                        self.done += 1
+                        self.notifyResult(id)
+                        self.notifyProgress()
+                    case .commit:
+                        break
+                    }
+                    return
+                }
+                _ = self.ledger.record(id: id, outcome: .settled(faceCount: final.faces.count))
+                self.results[id] = final
+                self.done += 1
+                self.notifyResult(id)
+                self.notifyProgress()
             }
         }
     }
@@ -271,10 +355,12 @@ final class FaceAnalyzer {
         let smile: CGFloat?
     }
 
-    private static func analyze(url: URL) -> FaceAnalysis {
-        autoreleasepool {
+    /// Nil when the file could not be decoded. An empty `faces` array means
+    /// the decode succeeded and Vision found nobody — those are cached.
+    private static func analyze(url: URL) -> FaceAnalysis? {
+        autoreleasepool { () -> FaceAnalysis? in
             guard let cg = analysisDecode(url: url, maxPixel: 3072) else {
-                return FaceAnalysis(faces: [])
+                return nil
             }
             let W = CGFloat(cg.width), H = CGFloat(cg.height)
 

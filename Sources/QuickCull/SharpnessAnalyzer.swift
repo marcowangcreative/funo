@@ -140,7 +140,7 @@ final class SharpnessAnalyzer {
             if acutance == nil {
                 let image = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.previewPixelSize)
                     ?? ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize)
-                if let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                if let cg = image?.quickCullCGImage() {
                     acutance = Self.acutance(from: cg)
                 }
             }

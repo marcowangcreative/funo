@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import QuickCullCore
 
 /// The heart of the prototype: turn a file URL into pixels on screen as fast
 /// as physically possible, by preferring the camera's own embedded preview
@@ -29,8 +30,14 @@ final class ThumbnailLoader {
     private let previewCache = NSCache<NSString, NSImage>() // fit-to-screen previews
     private let fullCache = NSCache<NSString, NSImage>()    // 100% zoom decodes
 
-    /// Pending operations keyed by cache key. Touched from the main thread only.
-    private var pending: [String: Operation] = [:]
+    /// Pending decodes keyed by cache key. Touched from the main thread only.
+    private var pending: [String: ThumbTicket] = [:]
+
+    private final class ThumbTicket {
+        var job = 0
+        var cancelled = false
+        var tier: Int = 0
+    }
 
     private init() {
         thumbCache.totalCostLimit = 500 * 1_024 * 1_024   // thousands of thumbs
@@ -68,53 +75,17 @@ final class ThumbnailLoader {
     /// mid-poll (very visible on slow memory cards).
     private var waiters: [String: [(NSImage?) -> Void]] = [:] // main thread
 
-    /// Per-volume decode queues: an internal SSD takes all cores, but a
-    /// memory card gets TWO lanes - fifteen parallel readers on one slow
-    /// USB card thrash it into delivering less than two would.
-    private var volumeQueues: [String: OperationQueue] = [:] // main thread
-
-    /// Directory → decode queue memo. queue(for:) runs on the MAIN thread for
-    /// every thumbnail request; resolving .volumeURLKey is a stat, and doing
-    /// one per visible cell against a waking external drive froze the click.
-    /// Every file in a folder shares a volume - the first answers for all.
-    private var dirQueueMemo: [String: OperationQueue] = [:] // main thread
-
-    private func queue(for url: URL) -> OperationQueue {
-        let dir = url.deletingLastPathComponent().path
-        if let memoed = dirQueueMemo[dir] { return memoed }
-        let volumePath = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? "/"
-        if let existing = volumeQueues[volumePath] { dirQueueMemo[dir] = existing; return existing }
-        let values = try? URL(fileURLWithPath: volumePath).resourceValues(
-            forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey])
-        // A genuinely slow memory card (SD/CF/USB flash) is the only volume
-        // that thrashes under parallelism; an external SSD/HDD is CPU-decode-
-        // bound just like the internal, so throttling it to 2 lanes (the old
-        // broad "removable" rule) starved the cores and read as load lag.
-        let isCard = values?.volumeIsRemovable ?? false
-        let isExternal = isCard
-            || (values?.volumeIsEjectable ?? false)
-            || !(values?.volumeIsInternal ?? true)
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let q = OperationQueue()
-        q.name = "quickcull.decode.\(volumePath)"
-        q.qualityOfService = .userInitiated
-        q.maxConcurrentOperationCount = isCard
-            ? 2                                // slow card: more lanes thrash it
-            : (isExternal ? max(4, cores - 2)  // external SSD/HDD: nearly full
-                          : max(4, cores - 1)) // internal SSD: all cores
-        volumeQueues[volumePath] = q
-        dirQueueMemo[dir] = q
-        return q
-    }
-
-    /// Request an image. Completion always fires on the main thread.
-    /// Calls are coalesced: many requests for the same file share one decode.
-    /// Drop every queued decode for files on `volumePath` - ejecting a card
-    /// fails while OUR reads hold it open. Executing decodes finish (they're
-    /// short); queued ones never start. Main thread (queues dict is main-only).
+    /// Drop every queued decode for files on `volumePath` before an eject.
     func cancelPending(underVolumePath volumePath: String) {
         assert(Thread.isMainThread)
-        volumeQueues[volumePath]?.cancelAllOperations()
+        for (key, ticket) in pending {
+            let path = key.split(separator: "#").first.map(String.init) ?? ""
+            let volume = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeURLKey]))?.volume?.path
+            guard volume == volumePath else { continue }
+            ticket.cancelled = true
+            pending[key] = nil
+        }
+        WorkRunner.shared.cancel(volume: volumePath)
     }
 
     func request(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
@@ -127,9 +98,9 @@ final class ThumbnailLoader {
         // A visible caller is waiting - promote an already-queued op (e.g.
         // from a prefetch) over the backlog. Previews go all the way to
         // .veryHigh: the frame on screen preempts everything else.
-        let want: Operation.QueuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
-        if let existing = pending[key], existing.queuePriority.rawValue < want.rawValue {
-            existing.queuePriority = want
+        let want: WorkLane = maxPixel > Self.thumbnailPixelSize ? .selected : .visible
+        if let existing = pending[key] {
+            WorkRunner.shared.setLane(existing.job, want)
         }
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
@@ -147,11 +118,17 @@ final class ThumbnailLoader {
     /// you scrolled PAST run first-come-first-served and the screen you're
     /// looking at starves blank behind them.
     func focusVisible(_ urls: [URL], maxPixel: CGFloat) {
-        let tier = "\(Int(maxPixel))"
+        let tier = Int(maxPixel)
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
-        for (key, op) in pending where op.name == tier {
-            op.queuePriority = visibleKeys.contains(key) ? .high : .low
+        guard !visibleKeys.isEmpty else { return }
+        let floor: WorkLane = maxPixel > Self.thumbnailPixelSize ? .selected : .visible
+        var lanes: [Int: WorkLane] = [:]
+        lanes.reserveCapacity(pending.count)
+        for (key, ticket) in pending where ticket.tier == tier && ticket.job != 0 {
+            let waited = !(waiters[key]?.isEmpty ?? true)
+            lanes[ticket.job] = (visibleKeys.contains(key) || waited) ? floor : .prefetch
         }
+        WorkRunner.shared.replaceLanes(lanes)
     }
 
     /// Cancel a decode that scrolled out of relevance - unless a visible
@@ -159,41 +136,34 @@ final class ThumbnailLoader {
     func cancel(_ url: URL, maxPixel: CGFloat) {
         let key = cacheKey(url, maxPixel)
         guard waiters[key]?.isEmpty ?? true else { return }
-        pending[key]?.cancel()
+        if let ticket = pending[key] {
+            ticket.cancelled = true
+            WorkRunner.shared.cancel(id: ticket.job)
+        }
         pending[key] = nil
     }
 
     private func ensureOperation(key: String, url: URL, maxPixel: CGFloat) {
         guard pending[key] == nil else { return }
         let userRotation = RatingsStore.shared.rotation(for: url.path)
-
-        let op = BlockOperation()
-        op.name = "\(Int(maxPixel))" // tier tag for focusVisible()
-        // Priority tiers: the big preview the user is LOOKING AT preempts
-        // the thumbnail backlog (critical on slow cards, where hundreds of
-        // queued thumbs used to starve the sharp render for minutes).
-        // Priority ladder (2026-09-17): a WAITERLESS preview prefetch (the
-        // arrow-key neighbor warm) must NOT outrank the photo the user is
-        // looking at. The old flat .veryHigh for every >512px op let 3-4
-        // stale neighbor decodes win FIFO over the current frame - the
-        // "low res moment", worst on 2-lane card queues. Prefetches start
-        // .normal; request() promotes the moment a real viewer registers.
-        if !(waiters[key]?.isEmpty ?? true) {
-            op.queuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
-        } else {
-            op.queuePriority = .normal // prefetch of any tier
-        }
-        op.addExecutionBlock { [weak self, weak op] in
-            guard let op, !op.isCancelled else {
+        let ticket = ThumbTicket()
+        ticket.tier = Int(maxPixel)
+        let hasWaiter = !(waiters[key]?.isEmpty ?? true)
+        let lane: WorkLane = hasWaiter
+            ? (maxPixel > Self.thumbnailPixelSize ? .selected : .visible)
+            : .prefetch
+        pending[key] = ticket
+        let place = WorkRunner.shared.classify(url)
+        WorkRunner.shared.submit(
+            group: "thumb", name: url.lastPathComponent, lane: lane,
+            volume: place.volume, pace: place.pace, generation: 0,
+            onQueued: { ticket.job = $0 }
+        ) { [weak self, weak ticket] isCancelled in
+            guard let ticket else { return }
+            if isCancelled() || ticket.cancelled {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    // Only the AUTHORITATIVE op for this key may fail its
-                    // waiters. A cancelled prefetch can lose this slot to a
-                    // fresh visible-cell request (cancel() clears pending,
-                    // request() re-creates the op); firing that NEW caller's
-                    // waiters with nil from the dead op's corpse left grid
-                    // cells permanently blank during fast scrolls.
-                    guard self.pending[key] === op else { return }
+                    guard ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === ticket) else { return }
                     self.pending[key] = nil
                     let stranded = self.waiters.removeValue(forKey: key) ?? []
                     stranded.forEach { $0(nil) }
@@ -239,7 +209,15 @@ final class ThumbnailLoader {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.pending[key] === op { self.pending[key] = nil }
+                // Same rule as the cancel path. A decode that already passed
+                // its isCancelled check can still finish AFTER cancel() nils
+                // this slot and a visible cell starts a replacement op.
+                // Publishing here stole the new waiters (nil or a stale
+                // image) and the replacement completed into silence — blank
+                // or stuck cells while scrolling and after reloads.
+                let authoritative = ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === ticket)
+                guard authoritative else { return }
+                self.pending[key] = nil
                 if let image {
                     let cost = Int(image.size.width * image.size.height * 4)
                     self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
@@ -248,8 +226,6 @@ final class ThumbnailLoader {
                 callbacks.forEach { $0(image) }
             }
         }
-        pending[key] = op
-        queue(for: url).addOperation(op)
     }
 
     // MARK: - Decoding (background threads)
@@ -262,14 +238,14 @@ final class ThumbnailLoader {
               let cg = CGImageSourceCreateImageAtIndex(src, 0, opts) else {
             return NSImage(data: data)
         }
-        return NSImage(cgImage: cg, size: .zero)
+        return QuickCullImage.fromCGImage(cg)
     }
 
     private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> NSImage? {
         guard let image = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }
         guard userRotation != 0 else { return image }
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-        return NSImage(cgImage: ImageTransform.rotate(cg, degreesCW: userRotation), size: .zero)
+        guard let cg = image.quickCullCGImage() else { return image }
+        return QuickCullImage.fromCGImage(ImageTransform.rotate(cg, degreesCW: userRotation))
     }
 
     /// Decode with EXIF/container orientation applied (no user rotation yet).
@@ -310,7 +286,7 @@ final class ThumbnailLoader {
             let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
             let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
             if biggestSide >= bar {
-                return NSImage(cgImage: cg, size: .zero)
+                return QuickCullImage.fromCGImage(cg)
             }
         }
 
@@ -321,7 +297,7 @@ final class ThumbnailLoader {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, forcedOptions as CFDictionary) {
-            return NSImage(cgImage: cg, size: .zero)
+            return QuickCullImage.fromCGImage(cg)
         }
         return nil
     }

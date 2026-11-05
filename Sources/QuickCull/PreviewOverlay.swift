@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Keeps the photo centered when it's smaller than the viewport -
 /// without this, NSScrollView pins the image to the bottom-left and
@@ -41,7 +42,7 @@ final class StageImageView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func setImage(_ cgImage: CGImage?) {
-        layer?.contents = cgImage
+        QuickCullImage.setContents(cgImage, of: layer)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -69,15 +70,16 @@ final class StageImageView: NSView {
     }
 }
 
-/// One frame in the filmstrip: thumbnail, amber ring when current, color
-/// label as a strip along the bottom, stars/reject badge, dimmed when culled.
+/// One frame in the filmstrip. The thumbnail is only the photograph.
+/// The color chip and the star column keep their width when empty.
+/// A labeled frame tints that caption row only.
 final class FilmstripItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("FilmstripItem")
 
     private let thumb = NSImageView()
-    private let colorStrip = NSView()
-    private let badgePlate = NSView()
-    private let badge = NSTextField(labelWithString: "")
+    private let caption = NSView()
+    private let colorDot = NSView()
+    private let markLabel = NSTextField(labelWithString: "")
     private(set) var representedURL: URL?
 
     override func loadView() {
@@ -87,89 +89,92 @@ final class FilmstripItem: NSCollectionViewItem {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.layer?.cornerRadius = 4
-        view.layer?.masksToBounds = true
-        view.layer?.backgroundColor = Theme.bg2.cgColor
-
         thumb.imageScaling = .scaleProportionallyUpOrDown
+        thumb.wantsLayer = true
+        thumb.layer?.cornerRadius = Theme.imageRadius
+        thumb.layer?.borderColor = Theme.tx0.cgColor
         thumb.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumb)
 
-        colorStrip.wantsLayer = true
-        colorStrip.layer?.cornerRadius = 2 // reads as a tag on the photo, not frame chrome
-        colorStrip.isHidden = true
-        colorStrip.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(colorStrip)
+        caption.wantsLayer = true
+        caption.layer?.cornerRadius = Theme.panelRadius
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(caption)
 
-        // Rating/reject chip: stars on a dark scrim so they stay legible over
-        // any thumbnail (bare gold text vanished on bright/warm frames). The
-        // plate hugs the label and hides itself when there's nothing to show.
-        badgePlate.wantsLayer = true
-        badgePlate.layer?.cornerRadius = 3
-        badgePlate.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
-        badgePlate.isHidden = true
-        badgePlate.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(badgePlate)
+        colorDot.wantsLayer = true
+        colorDot.layer?.cornerRadius = Theme.imageRadius
+        colorDot.translatesAutoresizingMaskIntoConstraints = false
+        caption.addSubview(colorDot)
 
-        badge.font = Theme.secondaryStrong
-        badge.translatesAutoresizingMaskIntoConstraints = false
-        badgePlate.addSubview(badge)
+        markLabel.font = Theme.monoCaption
+        markLabel.textColor = Theme.accent
+        markLabel.alignment = .left
+        markLabel.lineBreakMode = .byClipping
+        markLabel.usesSingleLineMode = true
+        markLabel.translatesAutoresizingMaskIntoConstraints = false
+        caption.addSubview(markLabel)
 
+        let markWidth = markLabel.widthAnchor.constraint(equalToConstant: Theme.captionMarkWidth)
+        markWidth.priority = .required
         NSLayoutConstraint.activate([
-            // Gallery mat: content sits 4px inside the cell, so the amber
-            // current-frame ring (drawn on the cell edge) and the color-label
-            // strip (on the photo's own edge) never touch - the dark gap
-            // between them is what kills the amber-on-red clash.
-            thumb.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
-            thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
-            thumb.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
-            thumb.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
+            thumb.topAnchor.constraint(equalTo: view.topAnchor),
+            thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            thumb.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumb.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -3),
 
-            colorStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
-            colorStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
-            colorStrip.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
-            colorStrip.heightAnchor.constraint(equalToConstant: 4),
+            caption.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            caption.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            caption.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            caption.heightAnchor.constraint(equalToConstant: 16),
 
-            badgePlate.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            badgePlate.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
-            badge.leadingAnchor.constraint(equalTo: badgePlate.leadingAnchor, constant: 5),
-            badge.trailingAnchor.constraint(equalTo: badgePlate.trailingAnchor, constant: -5),
-            badge.topAnchor.constraint(equalTo: badgePlate.topAnchor, constant: 1),
-            badge.bottomAnchor.constraint(equalTo: badgePlate.bottomAnchor, constant: -1)
+            colorDot.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
+            colorDot.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            colorDot.widthAnchor.constraint(equalToConstant: Theme.captionChip),
+            colorDot.heightAnchor.constraint(equalToConstant: Theme.captionChip),
+
+            markLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: Theme.captionChipGap),
+            markWidth,
         ])
     }
 
     func configure(asset: PhotoAsset, isCurrent: Bool) {
+        let urlChanged = representedURL != asset.url
         representedURL = asset.url
         let id = asset.id
         let rejected = RatingsStore.shared.isRejected(id)
         let rating = RatingsStore.shared.rating(for: id)
         let color = RatingsStore.shared.colorLabel(for: id)
+        let caption = CellCaption.make(filename: "", format: "", rating: rating,
+                                       rejected: rejected, colorLabel: color)
 
-        view.alphaValue = rejected ? 0.22 : (isCurrent ? 1.0 : 0.55)
-        view.layer?.borderWidth = isCurrent ? 2 : 0
-        view.layer?.borderColor = Theme.accent.cgColor
+        thumb.alphaValue = rejected ? 0.4 : 1
+        thumb.layer?.borderWidth = isCurrent ? 1 : 0
 
-        colorStrip.isHidden = color == 0
-        if color > 0 { colorStrip.layer?.backgroundColor = Theme.labelColors[color].cgColor }
-
-        if rejected {
-            badge.stringValue = "✕"
-            badge.textColor = Theme.red
+        if caption.showsColorDot {
+            let color = Theme.labelColors[caption.colorLabel]
+            colorDot.layer?.backgroundColor = color.cgColor
+            self.caption.layer?.backgroundColor = color.withAlphaComponent(Theme.captionTint).cgColor
         } else {
-            badge.stringValue = rating > 0 ? String(repeating: "★", count: rating) : ""
-            badge.textColor = Theme.accent
+            colorDot.layer?.backgroundColor = NSColor.clear.cgColor
+            self.caption.layer?.backgroundColor = NSColor.clear.cgColor
         }
-        badgePlate.isHidden = badge.stringValue.isEmpty
+        markLabel.stringValue = caption.mark
+        markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
 
         let url = asset.url
+        let rotation = RatingsStore.shared.rotation(for: url.path)
         if let cached = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
             thumb.image = cached
         } else {
-            thumb.image = nil
+            // Same cell, same file (the strip restyles on every arrow): don't
+            // blank a thumb that's already painted. A URL change, or a
+            // rotation (cache key changed, so this is a miss), still fetches.
+            if urlChanged { thumb.image = nil }
             ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self] image in
                 guard let self, self.representedURL == url else { return }
-                self.thumb.image = image
+                guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
+                if let image { self.thumb.image = image }
             }
         }
     }
@@ -189,10 +194,11 @@ final class FilmstripResizeHandle: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeUpDown) }
 
     override func draw(_ dirtyRect: NSRect) {
-        // A visible grab capsule so the affordance reads against the dark
-        // filmstrip: rounded bg3 background + a bright grip line.
+        // A visible grab so the affordance reads against the dark filmstrip:
+        // a flat control-radius plate plus a bright grip line.
         let capsule = bounds.insetBy(dx: 0, dy: 3)
-        let bg = NSBezierPath(roundedRect: capsule, xRadius: capsule.height / 2, yRadius: capsule.height / 2)
+        let bg = NSBezierPath(roundedRect: capsule,
+                              xRadius: Theme.controlRadius, yRadius: Theme.controlRadius)
         Theme.bg3.setFill()
         bg.fill()
         Theme.line.setStroke()
@@ -200,7 +206,7 @@ final class FilmstripResizeHandle: NSView {
         bg.stroke()
         let grip = NSRect(x: bounds.midX - 14, y: bounds.midY - 1.5, width: 28, height: 3)
         Theme.tx1.setFill()
-        NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
+        NSBezierPath(roundedRect: grip, xRadius: Theme.controlRadius, yRadius: Theme.controlRadius).fill()
     }
 
     var onDoubleClick: (() -> Void)?
@@ -213,10 +219,70 @@ final class FilmstripResizeHandle: NSView {
     }
 }
 
+/// One face crop. Reused across photos so navigation replaces the image
+/// instead of destroying and recreating the cell.
+private final class FaceCropView: NSView {
+    let imageView = NSImageView()
+    private var widthConstraint: NSLayoutConstraint!
+    private var heightConstraint: NSLayoutConstraint!
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = Theme.imageRadius
+        layer?.masksToBounds = true
+        layer?.backgroundColor = Theme.bg2.cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+        widthConstraint = widthAnchor.constraint(equalToConstant: 1)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 1)
+        NSLayoutConstraint.activate([
+            widthConstraint, heightConstraint,
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func apply(image: NSImage, face: FaceInfo, index: Int, size: CGFloat) {
+        imageView.image = image
+        identifier = NSUserInterfaceItemIdentifier("\(index)")
+        widthConstraint.constant = size
+        heightConstraint.constant = size
+        // Full triage on every face: red = blinking, amber = soft face or
+        // marginal eyes, green = good. Every face gets a verdict.
+        let ring: NSColor = face.blinking ? Theme.red
+            : (face.lowQuality || face.squinting) ? Theme.accent
+            : Theme.labelColors[3]
+        layer?.borderWidth = 2
+        layer?.borderColor = ring.cgColor
+        var notes: [String] = [face.blinking ? "eyes closed"
+                               : (face.squinting ? "squinting" : "eyes open")]
+        if let q = face.quality { notes.append(String(format: "quality %.2f", q)) }
+        if face.smileScore != nil { notes.append(face.smiling ? "smiling" : "not smiling") }
+        notes.append("click to zoom")
+        toolTip = notes.joined(separator: " · ")
+    }
+
+    /// Drop the photograph without changing the cell's size, so the grid
+    /// doesn't reflow while the next crop is still off the main thread.
+    func blank() {
+        imageView.image = nil
+        layer?.borderWidth = 0
+        toolTip = nil
+        identifier = nil
+    }
+}
+
 /// folder - scrollable, current frame auto-centered, scroller as progress.
 final class PreviewOverlayView: NSView {
 
-    private let stageScroll = NSScrollView()
+    private let stageScroll = GraphiteScrollView()
     private let stageView = StageImageView()
     private var stageBackdrop: NSView?
     private let infoLabel = NSTextField(labelWithString: "")
@@ -224,7 +290,7 @@ final class PreviewOverlayView: NSView {
     private let hintLabel = NSStackView()
     private let filmstripLayout = NSCollectionViewFlowLayout()
     private let filmstripView = NSCollectionView()
-    private let filmstripScroll = NSScrollView()
+    private let filmstripScroll = GraphiteScrollView()
     private let filmstripHandle = FilmstripResizeHandle()
     private var filmstripHeightConstraint: NSLayoutConstraint!
     private var filmDragStartHeight: CGFloat = 60
@@ -274,6 +340,16 @@ final class PreviewOverlayView: NSView {
     private var faceBadges: [RangefinderBadgeView] = []
     /// Per-photo retry budget for transient per-face score failures.
     private var faceScoreRetries = 0
+    /// Crop retries for the photo currently on stage. Reset on navigation.
+    private var faceCropRetries = 0
+    /// Whose crops `currentFacePairs` belongs to.
+    private var currentFaceAssetID: String?
+    /// True while this frame is waiting out the skip window. Layout must not
+    /// tear the panel down into "scanning…" during that window.
+    private var facesAwaitingDecode = false
+    /// Cells currently in the grid. Reused when the next photo has the same count.
+    private var faceCropViews: [FaceCropView] = []
+    private var faceColumnCount = 0
     private var showInfoPanel: Bool = {
         UserDefaults.standard.object(forKey: "QuickCullShowInfo") == nil
             ? true
@@ -283,7 +359,7 @@ final class PreviewOverlayView: NSView {
     // Face side panel - vertical, scrollable, Tab to toggle.
     private let facesPanel = NSView()
     private let facesHeaderLabel = NSTextField(labelWithString: "")
-    private let facesScroll = NSScrollView()
+    private let facesScroll = GraphiteScrollView()
     private let facesStack = NSStackView()
     private var facesPanelWidth: NSLayoutConstraint!
     private var facesTopToInfo: NSLayoutConstraint?
@@ -324,7 +400,7 @@ final class PreviewOverlayView: NSView {
         let stageBackdrop = NSView()
         stageBackdrop.wantsLayer = true
         stageBackdrop.layer?.backgroundColor = Theme.surround.color.cgColor
-        stageBackdrop.layer?.cornerRadius = 6
+        stageBackdrop.layer?.cornerRadius = Theme.imageRadius
         stageBackdrop.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stageBackdrop)
         self.stageBackdrop = stageBackdrop
@@ -361,64 +437,38 @@ final class PreviewOverlayView: NSView {
         zoomLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(zoomLabel)
 
-        // The cull readout: a dark plate riding the stage's bottom-left, a
-        // proper color swatch (not a hairline) + stars / reject. Hidden when
-        // the frame carries no cull state at all.
+        // Caption bar under the stage: filename lives on the left (infoLabel),
+        // color square and stars on the right. Nothing sits on the photograph.
+        // Focus, eyes, and frame stay in the info rail.
         cullPlate.wantsLayer = true
-        cullPlate.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        cullPlate.layer?.cornerRadius = 7
-        cullPlate.layer?.borderWidth = 1
-        cullPlate.layer?.borderColor = Theme.line.cgColor
-        cullPlate.isHidden = true
+        cullPlate.layer?.backgroundColor = Theme.bg1.cgColor
         cullPlate.translatesAutoresizingMaskIntoConstraints = false
         addSubview(cullPlate)
+        let captionLine = NSView()
+        captionLine.wantsLayer = true
+        captionLine.layer?.backgroundColor = Theme.line.cgColor
+        captionLine.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(captionLine)
         cullSwatch.wantsLayer = true
-        cullSwatch.layer?.cornerRadius = 2.5
         cullSwatch.translatesAutoresizingMaskIntoConstraints = false
-        cullText.font = Theme.monoData
-        func readoutPair(_ key: NSTextField, _ value: NSTextField) -> NSStackView {
-            key.font = Theme.monoEyebrow
-            key.textColor = Theme.tx2
-            value.font = Theme.monoData
-            value.textColor = Theme.tx1
-            let v = NSStackView(views: [key, value])
-            v.orientation = .vertical
-            v.alignment = .leading
-            v.spacing = 1
-            return v
-        }
-        func hairline() -> NSView {
-            let v = NSView()
-            v.wantsLayer = true
-            v.layer?.backgroundColor = Theme.line.cgColor
-            v.translatesAutoresizingMaskIntoConstraints = false
-            v.widthAnchor.constraint(equalToConstant: 1).isActive = true
-            v.heightAnchor.constraint(equalToConstant: 22).isActive = true
-            return v
-        }
+        cullText.font = Theme.monoCaption
+        cullText.textColor = Theme.accent
         let cullGroup = NSStackView(views: [cullSwatch, cullText])
         cullGroup.orientation = .horizontal
-        cullGroup.spacing = 8
+        cullGroup.spacing = 6
         cullGroup.alignment = .centerY
-        let readout = NSStackView(views: [
-            cullGroup, hairline(),
-            readoutPair(focusKeyLabel, focusValueLabel), hairline(),
-            readoutPair(eyesKeyLabel, eyesValueLabel), hairline(),
-            readoutPair(frameKeyLabel, frameValueLabel)])
-        readout.orientation = .horizontal
-        readout.spacing = 12
-        readout.alignment = .centerY
-        readout.translatesAutoresizingMaskIntoConstraints = false
-        cullPlate.addSubview(readout)
+        cullGroup.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(cullGroup)
         NSLayoutConstraint.activate([
-            cullSwatch.widthAnchor.constraint(equalToConstant: 5),
-            cullSwatch.heightAnchor.constraint(equalToConstant: 22),
-            readout.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 12),
-            readout.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -12),
-            readout.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
-            cullPlate.heightAnchor.constraint(equalToConstant: 44),
-        ])
-        NSLayoutConstraint.activate([
+            cullSwatch.widthAnchor.constraint(equalToConstant: 8),
+            cullSwatch.heightAnchor.constraint(equalToConstant: 8),
+            captionLine.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor),
+            captionLine.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor),
+            captionLine.topAnchor.constraint(equalTo: cullPlate.topAnchor),
+            captionLine.heightAnchor.constraint(equalToConstant: 1),
+            cullGroup.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -12),
+            cullGroup.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            cullPlate.heightAnchor.constraint(equalToConstant: 28),
         ])
 
         facesFooterLabel.font = Theme.monoCaption
@@ -452,7 +502,9 @@ final class PreviewOverlayView: NSView {
         filmstripScroll.drawsBackground = false
         filmstripScroll.hasHorizontalScroller = true
         filmstripScroll.hasVerticalScroller = false
-        filmstripScroll.autohidesScrollers = true
+        // Stay on screen while the roll overflows. Arrow keys move the strip
+        // without a scroll gesture, so an overlay bar vanishes mid-cull.
+        filmstripScroll.persistentScroller = true
         filmstripScroll.translatesAutoresizingMaskIntoConstraints = false
         addSubview(filmstripScroll)
 
@@ -474,8 +526,8 @@ final class PreviewOverlayView: NSView {
 
         // Info card: histogram + shooting data, top of the right rail.
         infoPanel.wantsLayer = true
-        infoPanel.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        infoPanel.layer?.cornerRadius = 10
+        infoPanel.layer?.backgroundColor = Theme.bg1.cgColor
+        infoPanel.layer?.cornerRadius = Theme.panelRadius
         infoPanel.layer?.borderColor = Theme.line.cgColor
         infoPanel.layer?.borderWidth = 1
         infoPanel.layer?.masksToBounds = true // collapses cleanly to height 0
@@ -507,8 +559,6 @@ final class PreviewOverlayView: NSView {
         NSLayoutConstraint.activate([
             infoPanel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
             infoPanel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            cullPlate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            cullPlate.bottomAnchor.constraint(equalTo: filmstripScroll.bottomAnchor),
             infoHeader.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 9),
             infoHeader.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoHistogram.topAnchor.constraint(equalTo: infoHeader.bottomAnchor, constant: 10),
@@ -570,8 +620,8 @@ final class PreviewOverlayView: NSView {
         // Face side panel: right edge, where landscape photos have room to
         // spare. A contained card, not floating heads on black.
         facesPanel.wantsLayer = true
-        facesPanel.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        facesPanel.layer?.cornerRadius = 10
+        facesPanel.layer?.backgroundColor = Theme.bg1.cgColor
+        facesPanel.layer?.cornerRadius = Theme.panelRadius
         facesPanel.layer?.borderColor = Theme.line.cgColor
         facesPanel.layer?.borderWidth = 1
         facesPanel.translatesAutoresizingMaskIntoConstraints = false
@@ -630,6 +680,7 @@ final class PreviewOverlayView: NSView {
         footerBand.addSubview(footerLine)
 
         stageTrailing = stageScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10)
+        cullPlate.addSubview(infoLabel)
         NSLayoutConstraint.activate([
             // Layout, bottom → top: footer band (flush bottom) · filmstrip ·
             // resize handle (in the gap, never over a thumbnail) · stage.
@@ -642,16 +693,22 @@ final class PreviewOverlayView: NSView {
             footerLine.topAnchor.constraint(equalTo: footerBand.topAnchor),
             footerLine.heightAnchor.constraint(equalToConstant: 1),
 
-            // filename + exposure (left) · zoom % · hints (right), IN the band.
-            infoLabel.leadingAnchor.constraint(equalTo: footerBand.leadingAnchor, constant: 14),
-            infoLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
-            infoLabel.trailingAnchor.constraint(lessThanOrEqualTo: zoomLabel.leadingAnchor, constant: -14),
             zoomLabel.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -16),
             zoomLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
             hintLabel.trailingAnchor.constraint(equalTo: footerBand.trailingAnchor, constant: -14),
             hintLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
 
-            filmstripScroll.leadingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: 8),
+            // Caption bar sits under the stage: filename left, color and
+            // stars right. The filmstrip runs full width beneath it.
+            // infoLabel was added before the bar; lift it above the bar fill.
+            cullPlate.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cullPlate.trailingAnchor.constraint(equalTo: trailingAnchor),
+            cullPlate.bottomAnchor.constraint(equalTo: filmstripHandle.topAnchor, constant: -4),
+            infoLabel.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 12),
+            infoLabel.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            infoLabel.trailingAnchor.constraint(lessThanOrEqualTo: cullGroup.leadingAnchor, constant: -12),
+
+            filmstripScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             filmstripScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             filmstripScroll.bottomAnchor.constraint(equalTo: footerBand.topAnchor, constant: -6),
 
@@ -665,7 +722,7 @@ final class PreviewOverlayView: NSView {
             stageScroll.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             stageScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             stageTrailing,
-            stageScroll.bottomAnchor.constraint(equalTo: filmstripHandle.topAnchor, constant: -4),
+            stageScroll.bottomAnchor.constraint(equalTo: cullPlate.topAnchor),
 
             stageBackdrop.topAnchor.constraint(equalTo: stageScroll.topAnchor),
             stageBackdrop.leadingAnchor.constraint(equalTo: stageScroll.leadingAnchor),
@@ -750,11 +807,15 @@ final class PreviewOverlayView: NSView {
         atFit = true
 
         // Show whatever is already decoded (grid thumb), then sharpen.
-        if let preview = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.previewPixelSize) {
-            display(preview)
-        } else {
+        // display() fails when the cached NSImage can't produce a CGImage
+        // (zero-size images built off the main thread). Falling through to
+        // a fresh request is what stops the stage staying on the PREVIOUS
+        // photo while the filmstrip moves on.
+        let previewShown = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.previewPixelSize)
+            .map { display($0) } ?? false
+        if !previewShown {
             if let thumb = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
-                display(thumb)
+                _ = display(thumb)
             }
             // Retry on nil: a decode can be CANCELLED under rapid arrowing
             // (or fail transiently on a busy drive), and giving up stranded
@@ -763,8 +824,8 @@ final class PreviewOverlayView: NSView {
             func requestPreview(_ attempt: Int) {
                 ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.previewPixelSize) { [weak self] image in
                     guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
-                    if let image {
-                        self.display(image)
+                    if let image, self.display(image) {
+                        // shown
                     } else if attempt < 3 {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                             guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
@@ -790,6 +851,12 @@ final class PreviewOverlayView: NSView {
         }
         FaceAnalyzer.shared.prioritize(asset.id) // scan what's on screen first
         scheduleFacesRefresh()
+        // Already-settled photos are drawn by the debounced refresh. The poll
+        // only covers a verdict that lands after that refresh gave up.
+        if case .pending = FaceAnalyzer.shared.phase(for: asset.id),
+           !FileOps.isMemoryCard(asset.url) {
+            pollFacesIfNeeded(attempt: 0, generation: gen, assetID: asset.id)
+        }
         refreshInfoPanel()
         refreshFilmstrip()
         faceScoreRetries = 0
@@ -811,11 +878,13 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    private func display(_ image: NSImage) {
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+    @discardableResult
+    private func display(_ image: NSImage) -> Bool {
+        guard let cg = image.quickCullCGImage() else { return false }
         stageView.setImage(cg)
         stageView.frame = NSRect(x: 0, y: 0, width: cg.width, height: cg.height)
-        fitToWindow()
+        if atFit { fitToWindow() }
+        return true
     }
 
     // MARK: - Zoom
@@ -824,7 +893,12 @@ final class PreviewOverlayView: NSView {
 
     private func fitToWindow() {
         atFit = true
+        // magnify(toFit:) animates by default. The thumb→preview handoff
+        // called it twice per frame and the stage zoomed visibly.
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
         stageScroll.magnify(toFit: stageView.frame)
+        NSAnimationContext.endGrouping()
         updateZoomLabel()
     }
 
@@ -837,7 +911,7 @@ final class PreviewOverlayView: NSView {
         ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.fullPixelSize) { [weak self] image in
             guard let self, self.showGeneration == gen else { return }
             defer { then() }
-            guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            guard let image, let cg = image.quickCullCGImage() else { return }
             let center = self.visibleCenterFraction()
             let oldWidth = self.stageView.frame.width
             let magnification = self.stageScroll.magnification
@@ -945,8 +1019,12 @@ final class PreviewOverlayView: NSView {
     /// A face analysis landed while the preview is open.
     func noteFaceResult(for id: String) {
         guard index < assets.count, assets[index].id == id else { return }
-        // If a debounced refresh is already queued, let it do the work.
-        if facesRefreshTimer?.isValid != true { rebuildFacesRow() }
+        // A verdict for the photo on stage paints now. Waiting out the skip
+        // timer here is what left the panel on "scanning…" after the result
+        // had already landed.
+        facesRefreshTimer?.invalidate()
+        facesRefreshTimer = nil
+        rebuildFacesRow()
         // Faces just landed → re-score focus on the subject, not the frame.
         refreshInfoPanel()
         updateFaceBadges()
@@ -1034,18 +1112,122 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    /// Debounce: while the user is flying through frames with the arrow keys,
-    /// the panel holds its last layout (slightly dimmed) instead of tearing
-    /// down and rebuilding per keystroke - that rebuild was the UI flashing.
+    /// Armed only for a frame that has no cached crops. Invalidated by the
+    /// next arrow, so a skim never starts a decode.
     private var facesRefreshTimer: Timer?
 
     private func scheduleFacesRefresh() {
-        if !facesPanel.isHidden { facesPanel.alphaValue = 0.35 }
         facesRefreshTimer?.invalidate()
-        facesRefreshTimer = Timer.scheduledTimer(withTimeInterval: 0.28, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.facesPanel.alphaValue = 1
-            self.rebuildFacesRow()
+        facesRefreshTimer = nil
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else {
+            facesAwaitingDecode = false
+            currentFacePairs = []
+            currentFaces = []
+            currentFaceAssetID = nil
+            layoutFacesGrid()
+            return
+        }
+        let asset = assets[index]
+        switch FacesNavigation.onAdvance(cropAvailability(for: asset)) {
+        case .showCached(let count):
+            paintCachedFaces(for: asset, count: count)
+        case .showNoFaces, .showUnavailable:
+            facesAwaitingDecode = false
+            faceCropRetries = 0
+            currentFaceAssetID = asset.id
+            currentFacePairs = []
+            currentFaces = []
+            layoutFacesGrid()
+        case .holdForDecode:
+            beginFacesHold(for: asset.id)
+            let gen = showGeneration
+            let id = asset.id
+            facesRefreshTimer = Timer.scheduledTimer(
+                withTimeInterval: FacesNavigation.settleDelay, repeats: false
+            ) { [weak self] _ in
+                guard let self, self.showGeneration == gen, self.index < self.assets.count,
+                      self.assets[self.index].id == id else { return }
+                self.rebuildFacesRow()
+            }
+        case .showScanning, .showLoading:
+            break
+        }
+    }
+
+    /// Blank the images already on screen without removing them. The previous
+    /// person must not stay up, and destroying the grid is the flash.
+    private func beginFacesHold(for id: String) {
+        let changed = currentFaceAssetID != id
+        currentFaceAssetID = id
+        faceCropRetries = 0
+        facesAwaitingDecode = true
+        guard changed else { return }
+        currentFacePairs = []
+        currentFaces = []
+        for cell in faceCropViews { cell.blank() }
+        if !faceCropViews.isEmpty {
+            facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+            facesFooterLabel.stringValue = ""
+        }
+    }
+
+    private func paintCachedFaces(for asset: PhotoAsset, count: Int) {
+        facesAwaitingDecode = false
+        faceCropRetries = 0
+        guard let pairs = FaceCropper.shared.cachedCrops(for: asset, maxFaces: 40),
+              pairs.count == count else { return }
+        currentFaceAssetID = asset.id
+        currentFacePairs = pairs
+        currentFaces = pairs.map(\.1)
+        layoutFacesGrid()
+        prefetchNeighborCrops()
+    }
+
+    private func cropAvailability(for asset: PhotoAsset) -> FacesCropAvailability {
+        if let cached = FaceCropper.shared.cachedCrops(for: asset, maxFaces: 40) {
+            return cached.isEmpty ? .noFaces : .cropsCached(cached.count)
+        }
+        switch FaceAnalyzer.shared.phase(for: asset.id) {
+        case .pending: return .notAnalyzed
+        case .unavailable: return .unavailable
+        case .noFaces: return .noFaces
+        case .faces(let count): return .facesKnownCropsMissing(count)
+        }
+    }
+
+    /// After the frame on stage has its crops, cut the neighbors so the next
+    /// single arrow is a cache hit. Skipped frames never get here.
+    private func prefetchNeighborCrops() {
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled else { return }
+        for offset in [1, -1] {
+            let n = index + offset
+            guard n >= 0, n < assets.count else { continue }
+            let neighbor = assets[n]
+            guard case .faces = FaceAnalyzer.shared.phase(for: neighbor.id),
+                  FaceCropper.shared.cachedCrops(for: neighbor, maxFaces: 40) == nil else { continue }
+            FaceCropper.shared.crops(for: neighbor, maxFaces: 40) { _ in }
+        }
+    }
+
+    /// The result callback can be missed (a tab closed out from under the
+    /// old single-observer slot, or the decode landed in the gap before the
+    /// debounced refresh). Keep asking until the verdict settles or the
+    /// user has moved on. Generation-guarded, so it can't update a stale frame.
+    private func pollFacesIfNeeded(attempt: Int, generation: Int, assetID: String) {
+        guard attempt < 20 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.showGeneration == generation, self.index < self.assets.count,
+                  self.assets[self.index].id == assetID else { return }
+            switch FaceAnalyzer.shared.phase(for: assetID) {
+            case .pending:
+                self.pollFacesIfNeeded(attempt: attempt + 1, generation: generation, assetID: assetID)
+            case .faces, .noFaces, .unavailable:
+                if self.facesRefreshTimer?.isValid != true {
+                    self.rebuildFacesRow()
+                }
+                self.updateFaceBadges()
+                self.updateEyesReadout()
+            }
         }
     }
 
@@ -1244,16 +1426,71 @@ final class PreviewOverlayView: NSView {
     }
 
     private func rebuildFacesRow() {
-        currentFaces = []
-        currentFacePairs = []
-        layoutFacesGrid()
-        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else { return }
+        facesAwaitingDecode = false
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else {
+            currentFaces = []
+            currentFacePairs = []
+            currentFaceAssetID = nil
+            layoutFacesGrid()
+            return
+        }
+        let asset = assets[index]
+        switch FacesNavigation.onSettle(cropAvailability(for: asset)) {
+        case .showCached(let count):
+            paintCachedFaces(for: asset, count: count)
+        case .showNoFaces, .showUnavailable, .showScanning:
+            faceCropRetries = 0
+            currentFaceAssetID = asset.id
+            currentFacePairs = []
+            currentFaces = []
+            layoutFacesGrid()
+        case .showLoading:
+            startFaceCropDecode(for: asset)
+        case .holdForDecode:
+            break
+        }
+    }
+
+    /// Cut crops for a photo we have committed to. The decode runs off the
+    /// main thread. A transient empty result retries; it does not blank a
+    /// panel that is already showing this photo's previous attempt.
+    private func startFaceCropDecode(for asset: PhotoAsset) {
+        currentFaceAssetID = asset.id
         let gen = showGeneration
-        FaceCropper.shared.crops(for: assets[index], maxFaces: 40) { [weak self] pairs in
-            guard let self, self.showGeneration == gen, !pairs.isEmpty else { return }
+        if faceCropViews.isEmpty {
+            currentFacePairs = []
+            currentFaces = []
+            layoutFacesGrid()
+        } else {
+            facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+            facesFooterLabel.stringValue = "loading faces…"
+            facesFooterLabel.textColor = Theme.tx2
+        }
+        FaceCropper.shared.crops(for: asset, maxFaces: 40) { [weak self] pairs in
+            guard let self, self.showGeneration == gen, self.index < self.assets.count,
+                  self.assets[self.index].id == asset.id else { return }
+            if pairs.isEmpty {
+                // Crops can fail transiently (the analysis image was busy)
+                // even after a verdict with faces landed. Retry; a true
+                // "no faces" settles through layoutFacesGrid.
+                if case .faces = FaceAnalyzer.shared.phase(for: asset.id), self.faceCropRetries < 3 {
+                    self.faceCropRetries += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        guard let self, self.showGeneration == gen else { return }
+                        self.rebuildFacesRow()
+                    }
+                    return
+                }
+                self.currentFacePairs = []
+                self.currentFaces = []
+                self.layoutFacesGrid()
+                return
+            }
+            self.faceCropRetries = 0
             self.currentFacePairs = pairs
-            self.currentFaces = pairs.map { $0.1 }
+            self.currentFaces = pairs.map(\.1)
             self.layoutFacesGrid()
+            self.prefetchNeighborCrops()
         }
     }
 
@@ -1261,36 +1498,49 @@ final class PreviewOverlayView: NSView {
     /// without scrolling, columns capped by a width budget, hidden entirely
     /// when the window is too narrow to share (photo always wins).
     private func layoutFacesGrid() {
-        for sub in facesStack.arrangedSubviews {
-            facesStack.removeArrangedSubview(sub)
-            sub.removeFromSuperview()
-        }
+        // A keypress that hasn't settled yet must not rebuild the grid into
+        // a scanning/loading state. That rebuild was the flash.
+        if currentFacePairs.isEmpty, facesAwaitingDecode { return }
+
         let pairs = currentFacePairs
         guard showFacesPanel, FaceAnalyzer.shared.isEnabled, bounds.width >= 780 else {
-            facesPanelWidth.constant = 0
-            facesPanel.isHidden = true
-            updateStageRail()
+            setFacesChrome(hidden: true, width: 0)
             return
         }
 
-        // No crops yet: distinguish "still scanning" from "won't scan here"
-        // (memory card) from "scanned, no faces" - never a mystery.
+        // No crops yet: distinguish "still scanning" from "couldn't read"
+        // (retry budget spent — not cached, so a reload tries again) from
+        // "faces known, crops in flight" from "scanned, no faces".
+        // A known-but-not-yet-cropped face used to take the "no faces" branch
+        // and hide the panel until the user left and came back.
         if pairs.isEmpty {
-            if index < assets.count, FaceAnalyzer.shared.result(for: assets[index].id) == nil {
+            removeFaceCells()
+            let phase = index < assets.count
+                ? FaceAnalyzer.shared.phase(for: assets[index].id)
+                : FacePanelPhase.pending
+            switch phase {
+            case .noFaces:
+                setFacesChrome(hidden: true, width: 0)
+            case .pending:
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
-                if FileOps.isMemoryCard(assets[index].url) {
+                if index < assets.count, FileOps.isMemoryCard(assets[index].url) {
                     facesFooterLabel.stringValue = "scans after ingest\nto a local drive"
                 } else {
                     facesFooterLabel.stringValue = "scanning…"
                 }
                 facesFooterLabel.textColor = Theme.tx2
-                facesPanelWidth.constant = Self.railWidth
-                facesPanel.isHidden = false
-            } else {
-                facesPanelWidth.constant = 0
-                facesPanel.isHidden = true
+                setFacesChrome(hidden: false, width: Self.railWidth)
+            case .unavailable:
+                facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+                facesFooterLabel.stringValue = "couldn't read this photo\nRescan Faces to retry"
+                facesFooterLabel.textColor = Theme.tx2
+                setFacesChrome(hidden: false, width: Self.railWidth)
+            case .faces:
+                facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+                facesFooterLabel.stringValue = "loading faces…"
+                facesFooterLabel.textColor = Theme.tx2
+                setFacesChrome(hidden: false, width: Self.railWidth)
             }
-            updateStageRail()
             return
         }
 
@@ -1301,29 +1551,23 @@ final class PreviewOverlayView: NSView {
         // Columns come from the COUNT ALONE - so dragging the divider never
         // reshuffles sizes; it only changes how many rows are visible. Fewer
         // faces → fewer columns → bigger crops.
-        let columns: Int
-        switch count {
-        case 1:      columns = 1
-        case 2...6:  columns = 2
-        case 7...12: columns = 3
-        default:     columns = 4
-        }
+        let columns = FacesNavigation.columns(forFaceCount: count)
         // Cells FILL the width (edge to edge), capped so a lone face isn't
         // absurdly large.
         let rawCell = (innerWidth - CGFloat(columns - 1) * gap) / CGFloat(columns)
         let chosenSize = min(rawCell, 150)
+        writeFacesCaption(pairs)
 
-        let blinking = pairs.filter { $0.1.blinking }.count
-        facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces \(count)")
-        if blinking > 0 {
-            facesFooterLabel.stringValue = "\(blinking) of \(count) blinking"
-            facesFooterLabel.textColor = Theme.red
-        } else {
-            facesFooterLabel.stringValue = "All eyes open"
-            facesFooterLabel.textColor = Theme.tx2
+        if FacesNavigation.swapsInPlace(from: faceCropViews.count, to: count), faceColumnCount == columns {
+            for (i, pair) in pairs.enumerated() {
+                faceCropViews[i].apply(image: pair.0, face: pair.1, index: i, size: chosenSize)
+            }
+            setFacesChrome(hidden: false, width: Self.railWidth)
+            return
         }
 
-        // Center rows so partial last rows (and a capped single) sit tidily.
+        removeFaceCells()
+        faceColumnCount = columns
         facesStack.alignment = .centerX
         var row: NSStackView?
         for (i, pair) in pairs.enumerated() {
@@ -1334,58 +1578,47 @@ final class PreviewOverlayView: NSView {
                 facesStack.addArrangedSubview(newRow)
                 row = newRow
             }
-            row?.addArrangedSubview(faceCell(image: pair.0, face: pair.1, faceIndex: i, size: chosenSize))
+            let cell = FaceCropView()
+            cell.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(faceCellTapped(_:))))
+            cell.apply(image: pair.0, face: pair.1, index: i, size: chosenSize)
+            faceCropViews.append(cell)
+            row?.addArrangedSubview(cell)
         }
 
         // The card is pinned to the lower edge and the scroll fills it, so
         // crops sit at the top and the rest of the height is scrollable -
         // no dead gap below the panel, and sizes never depend on height.
-        facesPanelWidth.constant = Self.railWidth
-        facesPanel.isHidden = false
-        updateStageRail()
+        setFacesChrome(hidden: false, width: Self.railWidth)
     }
 
-    private func faceCell(image: NSImage, face: FaceInfo, faceIndex: Int, size: CGFloat) -> NSView {
-        let cell = NSView()
-        cell.wantsLayer = true
-        cell.layer?.cornerRadius = 5
-        cell.layer?.masksToBounds = true
-        cell.layer?.backgroundColor = Theme.bg2.cgColor
-        cell.identifier = NSUserInterfaceItemIdentifier("\(faceIndex)")
-        cell.translatesAutoresizingMaskIntoConstraints = false
+    private func writeFacesCaption(_ pairs: [(NSImage, FaceInfo)]) {
+        let blinking = pairs.filter { $0.1.blinking }.count
+        facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces \(pairs.count)")
+        if blinking > 0 {
+            facesFooterLabel.stringValue = "\(blinking) of \(pairs.count) blinking"
+            facesFooterLabel.textColor = Theme.red
+        } else {
+            facesFooterLabel.stringValue = "All eyes open"
+            facesFooterLabel.textColor = Theme.tx2
+        }
+    }
 
-        let imageView = NSImageView()
-        imageView.image = image
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(imageView)
+    private func removeFaceCells() {
+        for sub in facesStack.arrangedSubviews {
+            facesStack.removeArrangedSubview(sub)
+            sub.removeFromSuperview()
+        }
+        faceCropViews.removeAll()
+        faceColumnCount = 0
+    }
 
-        // Full triage on every face: red = blinking, amber = soft face or
-        // marginal eyes, green = good. Every face gets a verdict.
-        let ring: NSColor = face.blinking ? Theme.red
-            : (face.lowQuality || face.squinting) ? Theme.accent
-            : Theme.labelColors[3]
-        cell.layer?.borderWidth = 2
-        cell.layer?.borderColor = ring.cgColor
-
-        var notes: [String] = [face.blinking ? "eyes closed"
-                               : (face.squinting ? "squinting" : "eyes open")]
-        if let q = face.quality { notes.append(String(format: "quality %.2f", q)) }
-        if face.smileScore != nil { notes.append(face.smiling ? "smiling" : "not smiling") }
-        notes.append("click to zoom")
-        cell.toolTip = notes.joined(separator: " · ")
-
-        cell.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(faceCellTapped(_:))))
-
-        NSLayoutConstraint.activate([
-            cell.widthAnchor.constraint(equalToConstant: size),
-            cell.heightAnchor.constraint(equalToConstant: size),
-            imageView.topAnchor.constraint(equalTo: cell.topAnchor),
-            imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            imageView.bottomAnchor.constraint(equalTo: cell.bottomAnchor)
-        ])
-        return cell
+    /// Width and hidden-state changes move the photo. Skip the constraint
+    /// write when nothing changed so an arrow doesn't reflow the stage.
+    private func setFacesChrome(hidden: Bool, width: CGFloat) {
+        guard facesPanel.isHidden != hidden || facesPanelWidth.constant != width else { return }
+        facesPanel.isHidden = hidden
+        facesPanelWidth.constant = width
+        updateStageRail()
     }
 
     @objc private func faceCellTapped(_ recognizer: NSClickGestureRecognizer) {
@@ -1471,45 +1704,32 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    /// Reflect the CURRENT frame's cull state on the stage. `flash` pulses the
-    /// plate so a rate-and-advance keypress is felt even as the frame changes.
+    /// Color square and stars on the right of the caption bar. The bar itself
+    /// stays up — the filename lives there. Focus and eyes stay in the rail.
     private func refreshCullPlate(flash: Bool = false) {
-        guard index < assets.count else { cullPlate.isHidden = true; return }
+        guard index < assets.count else { return }
         let store = RatingsStore.shared
         let id = assets[index].id
-        let color = store.colorLabel(for: id)
-        let stars = store.rating(for: id)
-        let rejected = store.isRejected(id)
-        cullPlate.isHidden = false
-        guard color > 0 || stars > 0 || rejected else {
-            // Band persists (focus/eyes/frame still live here) - the cull
-            // segment just reads as unset.
-            cullSwatch.isHidden = true
-            cullText.stringValue = "—"
-            cullText.textColor = Theme.tx2
-            return
+        let caption = CellCaption.make(
+            filename: "", format: "",
+            rating: store.rating(for: id),
+            rejected: store.isRejected(id),
+            colorLabel: store.colorLabel(for: id)
+        )
+        cullSwatch.isHidden = !caption.showsColorDot
+        if caption.showsColorDot {
+            cullSwatch.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
         }
-        cullSwatch.isHidden = color == 0
-        cullSwatch.layer?.backgroundColor = color > 0 ? Theme.labelColors[color].cgColor : nil
-        var parts: [String] = []
-        if color > 0 { parts.append(Theme.labelNames[color]) }
-        if rejected {
-            parts.append("✕")
-            cullText.textColor = Theme.red
-        } else {
-            if stars > 0 { parts.append(String(repeating: "★", count: stars)) }
-            cullText.textColor = color > 0 ? Theme.labelColors[color] : Theme.accent
-        }
-        cullText.stringValue = parts.joined(separator: "  ")
-        if flash {
-            // Opacity pulse, not scale: layer-backed NSViews anchor at (0,0),
-            // so a scale pulse would grow from the corner and look lopsided.
-            cullPlate.layer?.removeAllAnimations()
+        cullText.stringValue = caption.mark
+        cullText.textColor = caption.rejected ? Theme.red : Theme.accent
+        if flash, !caption.mark.isEmpty {
+            cullText.layer?.removeAllAnimations()
             let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.35; pulse.toValue = 1.0
+            pulse.fromValue = 0.35
+            pulse.toValue = 1.0
             pulse.duration = 0.22
             pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            cullPlate.layer?.add(pulse, forKey: "pulse")
+            cullText.layer?.add(pulse, forKey: "pulse")
         }
     }
 

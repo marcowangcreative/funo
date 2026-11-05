@@ -68,6 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         #endif
         FolderTemplates.ensureDefaults()
         LicenseManager.shared.revalidateInBackground()
+        VolumeIndexService.shared.start()
+        WorkRunner.shared.startWatchdog()
 
         // Card inserted → offer ingest. ASK is the ceiling - auto-ingest
         // never happens. Pref: defaults write com.funophoto.funo
@@ -386,6 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                        action: #selector(showShortcuts(_:)), keyEquivalent: "")
         shortcutsItem.target = self
         helpMenu.addItem(shortcutsItem)
+        let jobsItem = NSMenuItem(title: "Background Work", action: #selector(showBackgroundWork(_:)), keyEquivalent: "j")
+        jobsItem.keyEquivalentModifierMask = [.command, .option]
+        jobsItem.target = self
+        helpMenu.addItem(jobsItem)
         helpMenuItem.submenu = helpMenu
         NSApp.helpMenu = helpMenu
 
@@ -438,6 +444,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func showShortcuts(_ sender: Any?) {
         mainController.toggleShortcuts()
+    }
+
+    @objc private func showBackgroundWork(_ sender: Any?) {
+        WorkDebugWindow.shared.toggle()
     }
 
     @objc private func showWelcomeScreen(_ sender: Any?) {

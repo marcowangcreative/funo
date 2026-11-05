@@ -1,16 +1,15 @@
 import AppKit
+import QuickCullCore
 
-/// Tabbed contact sheets - the anti-Photo-Mechanic version.
+/// Tabbed contact sheets.
 ///
-/// Philosophy (differs from PM on purpose):
-/// - Tabs are bookmarks you place DELIBERATELY (⌘T, ⌘-click a folder),
-///   never history that piles up. Plain sidebar clicks replace the active
-///   tab, exactly like before tabs existed.
-/// - Background tabs are FROZEN: a folder path, scroll position, selection
-///   and filter - kilobytes. No decoding, no prefetch, no face priority.
-///   Only the visible tab feeds the pipelines. Ten tabs cost what one does.
-/// - The strip itself doesn't exist until there are 2+ tabs; single-folder
-///   sessions look pixel-identical to the pre-tab app.
+/// Opening a folder (sidebar click, Open Folder, search, ingest) gives it
+/// a tab so the one you were just in stays where you left it. A folder
+/// already open is focused, never duplicated. ⌥-click and keyboard moves
+/// in the sidebar stay in the current tab. Background tabs are FROZEN:
+/// a folder path, scroll position, selection and filter. Only the visible
+/// tab feeds the decode and face pipelines. Past a small cap the oldest
+/// background tab is reused.
 final class TabbedContactSheetController: NSViewController {
 
     private let strip = TabStrip()
@@ -68,31 +67,65 @@ final class TabbedContactSheetController: NSViewController {
 
     // MARK: - Public operations
 
-    /// Sidebar click / Open Folder / ingest destination.
+    /// Sidebar click / Open Folder / search / ingest destination.
     ///
-    /// ONE FOLDER = ONE TAB: if the folder is already open in any tab, we
-    /// switch to that tab instead of opening it twice. Two live views of the
-    /// same folder means two watchers reacting to the same disk events and
-    /// two selections fighting over one truth - all cost, no workflow.
+    /// `inNewTab` is kept so ⌘-click and "Open in New Tab" still read as
+    /// an explicit new tab. Plain opens do the same thing now: a different
+    /// folder gets a tab. Both dedupe, fill an empty tab, and honor the cap.
     func open(_ url: URL, inNewTab: Bool) {
+        // Plain opens and explicit new-tab opens share one policy. The
+        // flag stays so ⌘-click and the context menu keep their names.
+        _ = inNewTab
+        performOpen(url, replacingActive: false)
+    }
+
+    /// Keyboard selection and ⌥-click: load into the tab you're in.
+    /// Back/forward inside a tab does not come through here.
+    func relocateOpenFolders(from: String, to: String) {
+        guard !grids.isEmpty else { return }
+        for grid in grids { grid.relocateOpenFolder(from: from, to: to) }
+        refreshStrip()
+        onActiveFolderChanged?(activeGrid.currentFolderURL)
+    }
+
+    func openInActiveTab(_ url: URL) {
+        performOpen(url, replacingActive: true)
+    }
+
+    private func performOpen(_ url: URL, replacingActive: Bool) {
         if grids.isEmpty { _ = view } // force viewDidLoad → first grid
         let path = url.standardizedFileURL.path
-        if let existing = grids.firstIndex(where: { $0.currentFolderURL?.standardizedFileURL.path == path }) {
-            if existing != activeIndex {
-                activate(existing)
+        let snapshot = grids.map {
+            FolderTabPolicy.Tab(path: $0.currentFolderURL?.standardizedFileURL.path)
+        }
+        let action = FolderTabPolicy.decide(
+            opening: path,
+            tabs: snapshot,
+            activeIndex: activeIndex,
+            replacingActive: replacingActive
+        )
+        switch action {
+        case .focusExisting(let index):
+            if index != activeIndex {
+                activate(index)
                 activeGrid.announce("\(url.lastPathComponent) was already open - switched to its tab")
             }
-            return
-        }
-        // Reuse the active tab if it's an empty placeholder - no point
-        // spawning a second tab next to an unused blank "New Tab".
-        if inNewTab, activeGrid.currentFolderURL != nil {
+        case .fillActive:
+            activeGrid.loadFolder(url)
+            refreshStrip()
+            onActiveFolderChanged?(url)
+        case .spawn:
             appendGrid()
             activate(grids.count - 1, notify: false)
+            activeGrid.loadFolder(url)
+            refreshStrip()
+            onActiveFolderChanged?(url)
+        case .reuseOldestBackground(let index):
+            activate(index, notify: false)
+            activeGrid.loadFolder(url)
+            refreshStrip()
+            onActiveFolderChanged?(url)
         }
-        activeGrid.loadFolder(url)
-        refreshStrip()
-        onActiveFolderChanged?(url)
     }
 
     /// ⌘T - a blank tab, browser-style. (It can't duplicate the current
