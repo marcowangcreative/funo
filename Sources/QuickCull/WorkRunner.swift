@@ -12,7 +12,9 @@ final class WorkRunner {
     private var bodies: [Int: ((@escaping () -> Bool) -> Void)] = [:]
     private var paceMemo: [String: (volume: String, pace: VolumePace)] = [:]
     private let paceLock = NSLock()
-    private var watchdog: Timer?
+    private var watchdogSource: DispatchSourceTimer?
+    private var pendingLanes: [Int: WorkLane] = [:]
+    private var laneFlushScheduled = false
 
     private init() {
         pool = OperationQueue()
@@ -22,11 +24,14 @@ final class WorkRunner {
     }
 
     func startWatchdog() {
-        guard watchdog == nil else { return }
-        watchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        guard watchdogSource == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: pump)
+        source.schedule(deadline: .now() + 2, repeating: 2)
+        source.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Date().timeIntervalSinceReferenceDate
-            for job in self.scheduler.overdue(now: now) {
+            let late = self.scheduler.overdue(now: now)
+            for job in late {
                 let started = job.startedAt ?? now
                 NSLog("funo work: \(job.name) [\(job.lane.label) \(job.group)] on \(job.volume) has been running %.0f s", now - started)
                 if job.lane == .background {
@@ -34,11 +39,15 @@ final class WorkRunner {
                 }
             }
         }
+        source.resume()
+        watchdogSource = source
     }
 
     func setFolderLoading(_ loading: Bool) {
-        scheduler.setFolderLoading(loading)
-        pump.async { self.kick() }
+        pump.async {
+            self.scheduler.setFolderLoading(loading)
+            self.kick()
+        }
     }
 
     /// Internal disks get six reads. Anything that can be unplugged, including
@@ -76,29 +85,58 @@ final class WorkRunner {
         }
     }
 
+    /// Fire-and-forget. The caller, including the main thread, never takes
+    /// the scheduler lock. Repeated notes for the same id keep the latest.
     func setLane(_ id: Int, _ lane: WorkLane) {
         guard id != 0 else { return }
-        scheduler.setLane(id, lane)
-        pump.async { self.kick() }
+        pump.async {
+            self.pendingLanes[id] = lane
+            self.scheduleLaneFlush()
+        }
+    }
+
+    /// One scroll posts one set. A newer scroll replaces a set that has not
+    /// been applied yet.
+    func replaceLanes(_ updates: [Int: WorkLane]) {
+        pump.async {
+            self.pendingLanes = updates
+            self.scheduleLaneFlush()
+        }
+    }
+
+    private func scheduleLaneFlush() {
+        guard !laneFlushScheduled else { return }
+        laneFlushScheduled = true
+        pump.async {
+            self.laneFlushScheduled = false
+            let batch = self.pendingLanes
+            self.pendingLanes.removeAll(keepingCapacity: true)
+            if !batch.isEmpty { self.scheduler.applyLanes(batch) }
+            self.kick()
+        }
     }
 
     func cancel(group: String, generation: Int) {
-        scheduler.cancel(group: group, generation: generation)
+        pump.async { self.scheduler.cancel(group: group, generation: generation) }
     }
 
     func cancel(group: String) {
-        scheduler.cancel(group: group)
-        pump.async { self.kick() }
+        pump.async {
+            self.scheduler.cancel(group: group)
+            self.kick()
+        }
     }
 
     func cancel(id: Int) {
         guard id != 0 else { return }
-        scheduler.cancel(id: id)
+        pump.async { self.scheduler.cancel(id: id) }
     }
 
     func cancel(volume: String) {
-        scheduler.cancel(volume: volume)
-        pump.async { self.kick() }
+        pump.async {
+            self.scheduler.cancel(volume: volume)
+            self.kick()
+        }
     }
 
     private func kick() {

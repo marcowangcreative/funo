@@ -189,10 +189,18 @@ final class VolumeIndexService {
         ) else { return [] }
         let keySet = Set(keys)
         var entries: [VolumeNameEntry] = []
+        var sinceYieldCheck = 0
+        var lastYieldCheck = Date()
         while let item = enumerator.nextObject() as? URL {
-            if entries.count.isMultiple(of: 32) {
+            sinceYieldCheck += 1
+            let due = sinceYieldCheck >= 200
+                || (sinceYieldCheck >= 64 && Date().timeIntervalSince(lastYieldCheck) >= 0.05)
+            if due {
+                sinceYieldCheck = 0
+                lastYieldCheck = Date()
                 while WorkRunner.shared.scheduler.backgroundShouldYield {
                     Thread.sleep(forTimeInterval: 0.05)
+                    lastYieldCheck = Date()
                 }
             }
             let url = item.standardizedFileURL

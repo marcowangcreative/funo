@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// What a piece of background work is for. Lower raw value runs first.
 public enum WorkLane: Int, Comparable, Equatable, CaseIterable {
@@ -66,19 +69,71 @@ public struct WorkJob: Equatable {
     }
 }
 
-/// One queue for disk work. Visible cells and the selected photo run before
-/// prefetch, which runs before the volume index and face scan. Leaving a
-/// folder cancels that generation instead of letting it finish in the dark.
+/// 0/1 flag the volume walk can read without taking the job lock.
+private final class YieldFlag: @unchecked Sendable {
+    private let raw: UnsafeMutablePointer<UInt32>
+    init() {
+        raw = .allocate(capacity: 1)
+        raw.initialize(to: 0)
+    }
+    deinit {
+        raw.deinitialize(count: 1)
+        raw.deallocate()
+    }
+    var isSet: Bool {
+        #if canImport(Darwin)
+        return OSAtomicOr32Barrier(0, raw) != 0
+        #else
+        return raw.pointee != 0
+        #endif
+    }
+    func store(_ on: Bool) {
+        #if canImport(Darwin)
+        if on {
+            _ = OSAtomicOr32Barrier(1, raw)
+        } else {
+            _ = OSAtomicAnd32Barrier(0, raw)
+        }
+        #else
+        raw.pointee = on ? 1 : 0
+        #endif
+    }
+}
+
+/// One queue for disk work. Each lane is a FIFO. Promotion pops the front,
+/// so it does not sort the pending list. Lane changes are an unlink and an
+/// append. The yield flag is a separate atomic the index walk can read
+/// without this lock.
 public final class WorkScheduler {
     public var slowLimit: Int
     public var fastLimit: Int
     public var globalLimit: Int
     public var timeout: TimeInterval
+
+    private final class Slot {
+        var job: WorkJob
+        var prev: Slot?
+        var next: Slot?
+        init(job: WorkJob) { self.job = job }
+    }
+
     private let lock = NSLock()
-    private var jobs: [WorkJob] = []
+    private let inboxLock = NSLock()
+    private var laneNotes: [Int: WorkLane] = [:]
+    private var slots: [Int: Slot] = [:]
+    private var head: [WorkLane: Slot] = [:]
+    private var tail: [WorkLane: Slot] = [:]
+    private var queuedOnVolume: [WorkLane: [String: Int]] = [:]
+    private var volumePace: [String: VolumePace] = [:]
+    private var groupIDs: [String: Set<Int>] = [:]
+    private var runningOnVolume: [String: Int] = [:]
+    private var runningCount = 0
+    private var foregroundQueued = 0
+    private var foregroundRunning = 0
     private var nextID = 1
     private var folderLoading = false
     private var cancelledIDs: Set<Int> = []
+    private let yield = YieldFlag()
 
     public init(slowLimit: Int = 2, fastLimit: Int = 6, globalLimit: Int = 8, timeout: TimeInterval = 20) {
         self.slowLimit = slowLimit
@@ -90,6 +145,7 @@ public final class WorkScheduler {
     public func setFolderLoading(_ loading: Bool) {
         lock.lock()
         folderLoading = loading
+        publishYieldLocked()
         lock.unlock()
     }
 
@@ -99,16 +155,8 @@ public final class WorkScheduler {
         return folderLoading
     }
 
-    /// The volume walk should stop reading while a folder is opening or any
-    /// foreground job is waiting or running.
-    public var backgroundShouldYield: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if folderLoading { return true }
-        return jobs.contains {
-            $0.lane != .background && ($0.state == .queued || $0.state == .running)
-        }
-    }
+    /// Lock-free. The volume walk may call this often.
+    public var backgroundShouldYield: Bool { yield.isSet }
 
     @discardableResult
     public func enqueue(group: String, name: String, lane: WorkLane, volume: String,
@@ -117,54 +165,101 @@ public final class WorkScheduler {
         defer { lock.unlock() }
         let id = nextID
         nextID += 1
-        jobs.append(WorkJob(
+        let job = WorkJob(
             id: id, group: group, name: name, lane: lane, volume: volume, pace: pace,
             generation: generation, state: .queued, enqueuedAt: now
-        ))
+        )
+        let slot = Slot(job: job)
+        slots[id] = slot
+        append(slot, to: lane)
+        queuedOnVolume[lane, default: [:]][volume, default: 0] += 1
+        volumePace[volume] = pace
+        groupIDs[group, default: []].insert(id)
+        if lane != .background { foregroundQueued += 1 }
+        publishYieldLocked()
         return id
     }
 
+    /// Moves a queued job to another lane. O(1). Safe on the scheduler queue.
+    /// The main thread must not call this; use `noteLane` instead.
     public func setLane(_ id: Int, _ lane: WorkLane) {
         lock.lock()
-        defer { lock.unlock() }
-        guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].state == .queued else { return }
-        jobs[index].lane = lane
+        setLaneLocked(id, lane)
+        publishYieldLocked()
+        lock.unlock()
     }
 
-    /// Queued work for this generation will not start. Running work is marked
-    /// cancelled so the worker can stop at its next check.
+    /// Apply a batch of lane changes under one lock. Used by the scheduler
+    /// queue after it has coalesced notes from the main thread.
+    public func applyLanes(_ changes: [Int: WorkLane]) {
+        guard !changes.isEmpty else { return }
+        lock.lock()
+        for (id, lane) in changes { setLaneLocked(id, lane) }
+        publishYieldLocked()
+        lock.unlock()
+    }
+
+    /// Records a lane change without taking the job lock. The scheduler
+    /// queue applies the batch later. The latest note for an id wins.
+    public func noteLane(_ id: Int, _ lane: WorkLane) {
+        inboxLock.lock()
+        laneNotes[id] = lane
+        inboxLock.unlock()
+    }
+
+    /// Apply every noted lane change. One lock for the whole batch.
+    public func applyLaneNotes() {
+        inboxLock.lock()
+        let batch = laneNotes
+        laneNotes.removeAll(keepingCapacity: true)
+        inboxLock.unlock()
+        guard !batch.isEmpty else { return }
+        lock.lock()
+        for (id, lane) in batch { setLaneLocked(id, lane) }
+        publishYieldLocked()
+        lock.unlock()
+    }
+
     public func cancel(group: String, generation: Int) {
         lock.lock()
         defer { lock.unlock() }
-        for index in jobs.indices.reversed() where jobs[index].group == group && jobs[index].generation == generation {
-            cancelLocked(index)
+        for id in groupIDs[group] ?? [] {
+            guard let slot = slots[id], slot.job.generation == generation else { continue }
+            cancelLocked(slot)
         }
+        publishYieldLocked()
     }
 
     public func cancel(group: String) {
         lock.lock()
         defer { lock.unlock() }
-        for index in jobs.indices.reversed() where jobs[index].group == group {
-            cancelLocked(index)
+        for id in groupIDs[group] ?? [] {
+            guard let slot = slots[id] else { continue }
+            cancelLocked(slot)
         }
+        publishYieldLocked()
     }
 
     public func cancel(id: Int) {
         lock.lock()
         defer { lock.unlock() }
-        guard let index = jobs.firstIndex(where: { $0.id == id }) else {
+        guard let slot = slots[id] else {
             cancelledIDs.insert(id)
             return
         }
-        cancelLocked(index)
+        cancelLocked(slot)
+        publishYieldLocked()
     }
 
     public func cancel(volume: String) {
         lock.lock()
         defer { lock.unlock() }
-        for index in jobs.indices.reversed() where jobs[index].volume == volume {
-            cancelLocked(index)
+        let ids = slots.values.filter { $0.job.volume == volume }.map(\.job.id)
+        for id in ids {
+            guard let slot = slots[id] else { continue }
+            cancelLocked(slot)
         }
+        publishYieldLocked()
     }
 
     public func isCancelled(_ id: Int) -> Bool {
@@ -173,27 +268,38 @@ public final class WorkScheduler {
         return cancelledIDs.contains(id)
     }
 
-    /// Start the most important job that still fits on its volume.
+    /// Pop the next job that may start. The common case is the front of the
+    /// highest lane, which is O(1). A full volume is skipped without walking
+    /// every waiting thumbnail.
     public func promoteNext(now: TimeInterval) -> WorkJob? {
         lock.lock()
         defer { lock.unlock() }
-        let running = jobs.filter(occupiesSlot)
-        if running.count >= globalLimit { return nil }
-        let queued = jobs.enumerated().filter { $0.element.state == .queued }
-            .sorted { a, b in
-                if a.element.lane != b.element.lane { return a.element.lane < b.element.lane }
-                if a.element.enqueuedAt != b.element.enqueuedAt { return a.element.enqueuedAt < b.element.enqueuedAt }
-                return a.element.id < b.element.id
+        if runningCount >= globalLimit { return nil }
+        for lane in WorkLane.allCases.sorted() {
+            if folderLoading && lane == .background { continue }
+            guard laneHasRoom(lane) else { continue }
+            var slot = head[lane]
+            var spins = 0
+            let volumeCount = queuedOnVolume[lane]?.count ?? 0
+            while let current = slot {
+                let limit = current.job.pace == .slow ? slowLimit : fastLimit
+                if (runningOnVolume[current.job.volume] ?? 0) < limit {
+                    detach(current)
+                    current.job.state = .running
+                    current.job.startedAt = now
+                    runningCount += 1
+                    runningOnVolume[current.job.volume, default: 0] += 1
+                    if lane != .background {
+                        foregroundQueued -= 1
+                        foregroundRunning += 1
+                    }
+                    publishYieldLocked()
+                    return current.job
+                }
+                slot = current.next
+                spins += 1
+                if spins > max(volumeCount, 1) { break }
             }
-        for candidate in queued {
-            let job = candidate.element
-            if folderLoading && job.lane == .background { continue }
-            let limit = job.pace == .slow ? slowLimit : fastLimit
-            let onVolume = running.filter { $0.volume == job.volume }.count
-            if onVolume >= limit { continue }
-            jobs[candidate.offset].state = .running
-            jobs[candidate.offset].startedAt = now
-            return jobs[candidate.offset]
         }
         return nil
     }
@@ -201,14 +307,24 @@ public final class WorkScheduler {
     public func finish(_ id: Int) {
         lock.lock()
         defer { lock.unlock() }
-        jobs.removeAll { $0.id == id }
+        guard let slot = slots.removeValue(forKey: id) else { return }
+        groupIDs[slot.job.group]?.remove(id)
+        if slot.job.startedAt != nil {
+            runningCount = max(0, runningCount - 1)
+            let volume = slot.job.volume
+            runningOnVolume[volume] = max(0, (runningOnVolume[volume] ?? 1) - 1)
+            if slot.job.lane != .background {
+                foregroundRunning = max(0, foregroundRunning - 1)
+            }
+        }
+        publishYieldLocked()
     }
 
     public func markTimedOut(_ id: Int, now: TimeInterval) {
         lock.lock()
         defer { lock.unlock() }
-        guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].state == .running else { return }
-        jobs[index].state = .timedOut
+        guard let slot = slots[id], slot.job.state == .running else { return }
+        slot.job.state = .timedOut
         cancelledIDs.insert(id)
         _ = now
     }
@@ -216,41 +332,86 @@ public final class WorkScheduler {
     public func overdue(now: TimeInterval) -> [WorkJob] {
         lock.lock()
         defer { lock.unlock() }
-        return jobs.filter { job in
-            guard job.state == .running, let started = job.startedAt else { return false }
-            return now - started > timeout
+        var late: [WorkJob] = []
+        for slot in slots.values where slot.job.state == .running {
+            guard let started = slot.job.startedAt, now - started > timeout else { continue }
+            late.append(slot.job)
         }
+        return late
     }
 
     public func live() -> [WorkJob] {
         lock.lock()
         defer { lock.unlock() }
-        return jobs.filter(isLive)
-            .sorted { a, b in
-                if a.lane != b.lane { return a.lane < b.lane }
-                return a.enqueuedAt < b.enqueuedAt
+        var running: [WorkJob] = []
+        for slot in slots.values where slot.job.state == .running || slot.job.state == .timedOut {
+            running.append(slot.job)
+        }
+        running.sort { $0.lane < $1.lane }
+        return running
+    }
+
+    private func append(_ slot: Slot, to lane: WorkLane) {
+        slot.job.lane = lane
+        slot.prev = tail[lane]
+        slot.next = nil
+        if let last = tail[lane] {
+            last.next = slot
+        } else {
+            head[lane] = slot
+        }
+        tail[lane] = slot
+    }
+
+    private func detach(_ slot: Slot) {
+        let lane = slot.job.lane
+        if let prev = slot.prev { prev.next = slot.next } else { head[lane] = slot.next }
+        if let next = slot.next { next.prev = slot.prev } else { tail[lane] = slot.prev }
+        slot.prev = nil
+        slot.next = nil
+        if slot.job.state == .queued {
+            let volume = slot.job.volume
+            if var counts = queuedOnVolume[lane] {
+                counts[volume] = max(0, (counts[volume] ?? 1) - 1)
+                if counts[volume] == 0 { counts.removeValue(forKey: volume) }
+                queuedOnVolume[lane] = counts
             }
-    }
-
-    private func occupiesSlot(_ job: WorkJob) -> Bool {
-        if job.state == .running || job.state == .timedOut { return true }
-        return job.state == .cancelled && job.startedAt != nil
-    }
-
-    private func isLive(_ job: WorkJob) -> Bool {
-        switch job.state {
-        case .queued, .running, .timedOut: return true
-        case .cancelled: return job.startedAt != nil
-        case .finished: return false
         }
     }
 
-    private func cancelLocked(_ index: Int) {
-        cancelledIDs.insert(jobs[index].id)
-        if jobs[index].state == .queued {
-            jobs.remove(at: index)
-        } else if jobs[index].state == .running || jobs[index].state == .timedOut {
-            jobs[index].state = .cancelled
+    private func setLaneLocked(_ id: Int, _ lane: WorkLane) {
+        guard let slot = slots[id], slot.job.state == .queued, slot.job.lane != lane else { return }
+        let old = slot.job.lane
+        detach(slot)
+        append(slot, to: lane)
+        queuedOnVolume[lane, default: [:]][slot.job.volume, default: 0] += 1
+        if old != .background { foregroundQueued -= 1 }
+        if lane != .background { foregroundQueued += 1 }
+    }
+
+    private func cancelLocked(_ slot: Slot) {
+        cancelledIDs.insert(slot.job.id)
+        if slot.job.state == .queued {
+            if slot.job.lane != .background { foregroundQueued = max(0, foregroundQueued - 1) }
+            detach(slot)
+            slots[slot.job.id] = nil
+            groupIDs[slot.job.group]?.remove(slot.job.id)
+        } else if slot.job.state == .running || slot.job.state == .timedOut {
+            slot.job.state = .cancelled
         }
+    }
+
+    private func laneHasRoom(_ lane: WorkLane) -> Bool {
+        guard let counts = queuedOnVolume[lane] else { return false }
+        for (volume, waiting) in counts where waiting > 0 {
+            let pace = volumePace[volume] ?? .fast
+            let limit = pace == .slow ? slowLimit : fastLimit
+            if (runningOnVolume[volume] ?? 0) < limit { return true }
+        }
+        return false
+    }
+
+    private func publishYieldLocked() {
+        yield.store(folderLoading || foregroundQueued > 0 || foregroundRunning > 0)
     }
 }

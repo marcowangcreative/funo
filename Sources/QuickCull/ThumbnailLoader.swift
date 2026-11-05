@@ -122,14 +122,13 @@ final class ThumbnailLoader {
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
         guard !visibleKeys.isEmpty else { return }
         let floor: WorkLane = maxPixel > Self.thumbnailPixelSize ? .selected : .visible
-        for (key, ticket) in pending where ticket.tier == tier {
+        var lanes: [Int: WorkLane] = [:]
+        lanes.reserveCapacity(pending.count)
+        for (key, ticket) in pending where ticket.tier == tier && ticket.job != 0 {
             let waited = !(waiters[key]?.isEmpty ?? true)
-            if visibleKeys.contains(key) || waited {
-                WorkRunner.shared.setLane(ticket.job, floor)
-            } else {
-                WorkRunner.shared.setLane(ticket.job, .prefetch)
-            }
+            lanes[ticket.job] = (visibleKeys.contains(key) || waited) ? floor : .prefetch
         }
+        WorkRunner.shared.replaceLanes(lanes)
     }
 
     /// Cancel a decode that scrolled out of relevance - unless a visible

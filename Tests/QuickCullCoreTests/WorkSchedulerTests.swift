@@ -64,6 +64,56 @@ final class WorkSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.promoteNext(now: 4)?.name, "walk")
     }
 
+    func testTwentyThousandJobsPromoteAndChangeLanesQuickly() {
+        let scheduler = WorkScheduler()
+        var ids: [Int] = []
+        ids.reserveCapacity(20_000)
+        for index in 0..<20_000 {
+            ids.append(scheduler.enqueue(
+                group: "thumb", name: "file \(index)", lane: .prefetch, volume: "/fast",
+                pace: .fast, generation: 1, now: TimeInterval(index)))
+        }
+        let started = Date()
+        for id in ids.prefix(1_000) {
+            scheduler.noteLane(id, .visible)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
+        scheduler.applyLaneNotes()
+        let move = Date()
+        for id in ids.dropFirst(1_000).prefix(1_000) {
+            scheduler.setLane(id, .selected)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(move), 0.05)
+        var startedCount = 0
+        var sawVisible = false
+        while let job = scheduler.promoteNext(now: 1) {
+            if job.lane == .visible { sawVisible = true }
+            startedCount += 1
+        }
+        XCTAssertTrue(sawVisible)
+        XCTAssertEqual(startedCount, 6)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
+    }
+
+    func testNoteLaneDoesNotBlockTheCallerOnTheJobLock() {
+        let scheduler = WorkScheduler()
+        let id = scheduler.enqueue(
+            group: "thumb", name: "cell", lane: .prefetch, volume: "/",
+            pace: .fast, generation: 1, now: 0)
+        scheduler.noteLane(id, .visible)
+        let before = scheduler.promoteNext(now: 1)
+        XCTAssertEqual(before?.id, id)
+        XCTAssertEqual(before?.lane, .prefetch)
+        scheduler.finish(id)
+        scheduler.applyLaneNotes()
+        let again = scheduler.enqueue(
+            group: "thumb", name: "next", lane: .prefetch, volume: "/",
+            pace: .fast, generation: 1, now: 2)
+        scheduler.noteLane(again, .visible)
+        scheduler.applyLaneNotes()
+        XCTAssertEqual(scheduler.promoteNext(now: 3)?.lane, .visible)
+    }
+
     func testWatchdogFindsAJobThatRunsTooLong() {
         let scheduler = WorkScheduler(timeout: 5)
         scheduler.enqueue(
