@@ -187,7 +187,8 @@ public enum IngestPlanner {
         preserveFolders: Bool,
         skipDuplicates: Bool,
         existing: [IngestExisting],
-        job: String = ""
+        job: String = "",
+        incremental: Bool = false
     ) -> [IngestPreviewRow] {
         let ordered = files.sorted {
             if $0.id != $1.id { return $0.id < $1.id }
@@ -226,6 +227,7 @@ public enum IngestPlanner {
                 folder: folder,
                 size: file.size,
                 skipDuplicates: skipDuplicates,
+                incremental: incremental,
                 existingSize: existingSize,
                 used: &used
             )
@@ -292,10 +294,16 @@ public enum IngestPlanner {
         folder: String,
         size: Int64,
         skipDuplicates: Bool,
+        incremental: Bool = false,
         existingSize: [String: Int64],
         used: inout Set<String>
     ) -> (name: String, skip: Bool) {
         let exists = existingSize[key(folder, desired)]
+        // Incremental: the name is already at the destination, whatever the size.
+        if incremental, exists != nil, !used.contains(key(folder, desired)) {
+            used.insert(key(folder, desired))
+            return (desired, true)
+        }
         if used.contains(key(folder, desired)) || exists != nil {
             if !used.contains(key(folder, desired)), let exists, exists == size, skipDuplicates {
                 used.insert(key(folder, desired))
@@ -316,6 +324,54 @@ public enum IngestPlanner {
         }
         used.insert(key(folder, desired))
         return (desired, false)
+    }
+}
+
+/// Which files an ingest will even consider. Unchecked kinds are omitted
+/// before naming, so they never appear in the preview or the copy.
+public enum IngestFileKinds {
+    private static let raw: Set<String> = [
+        "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf",
+        "rw2", "dng", "pef", "srw", "x3f", "3fr", "erf", "iiq", "mos", "rwl", "raw"
+    ]
+    private static let jpeg: Set<String> = ["jpg", "jpeg"]
+
+    public static func allows(extension ext: String, raw: Bool, jpeg: Bool, other: Bool) -> Bool {
+        let kind = ext.lowercased()
+        if Self.raw.contains(kind) { return raw }
+        if Self.jpeg.contains(kind) { return jpeg }
+        return other
+    }
+}
+
+/// The one-line rename proof. Off means the arrow points at the same name.
+public enum IngestRenamePreview {
+    public static func line(
+        original: String,
+        enabled: Bool,
+        pattern: String,
+        job: String = "",
+        date: Date = Date(timeIntervalSince1970: 1_710_000_000),
+        calendar: Calendar = {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+            return calendar
+        }()
+    ) -> String {
+        let stem = (original as NSString).deletingPathExtension
+        let ext = (original as NSString).pathExtension
+        let rendered = IngestNaming.renderStem(
+            pattern: pattern,
+            renameEnabled: enabled,
+            sequence: 1,
+            ingest: 1,
+            date: date,
+            originalStem: stem,
+            job: job,
+            calendar: calendar
+        )
+        let name = ext.isEmpty ? rendered : rendered + "." + ext
+        return "\(original) → \(name)"
     }
 }
 

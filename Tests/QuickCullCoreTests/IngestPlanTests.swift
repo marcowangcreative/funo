@@ -116,6 +116,21 @@ final class IngestTemplateTests: XCTestCase {
         XCTAssertFalse(path.contains(".."))
         XCTAssertTrue(path.hasPrefix("Job"))
     }
+
+    func testLiveFolderPreviewResolvesTheTemplate() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let date = Date(timeIntervalSince1970: 1_762_300_800)
+        let path = IngestTemplates.render(
+            pattern: "{Job}/{YYYYMMDD}/{Camera}",
+            job: "Chen Wedding",
+            camera: "EOS R5",
+            card: "EOS_DIGITAL",
+            date: date,
+            calendar: cal
+        )
+        XCTAssertEqual(path, "Chen Wedding/20251105/EOS R5")
+    }
 }
 
 final class IngestPlannerTests: XCTestCase {
@@ -183,6 +198,39 @@ final class IngestPlannerTests: XCTestCase {
         XCTAssertEqual(second?.note, .numbered)
         XCTAssertEqual(second?.newName, "IMG_2 2.CR3")
         XCTAssertEqual(second?.relativePath, "100CANON/IMG_2 2.CR3")
+    }
+
+    func testRenamePreviewShowsTheArrowAndStaysPutWhenOff() {
+        XCTAssertEqual(
+            IngestRenamePreview.line(original: "IMG_1234.CR3", enabled: false, pattern: "{job}_{seq}"),
+            "IMG_1234.CR3 → IMG_1234.CR3"
+        )
+        XCTAssertEqual(
+            IngestRenamePreview.line(original: "IMG_1234.CR3", enabled: true, pattern: "{job}_{seq}", job: "Chen"),
+            "IMG_1234.CR3 → Chen_0001.CR3"
+        )
+    }
+
+    func testIncrementalSkipsADifferentSizeWithTheSameName() {
+        let rows = IngestPlanner.rows(
+            files: [file("IMG_1.CR3", stem: "IMG_1", ext: "CR3", size: 20)],
+            renameEnabled: false,
+            pattern: "{name}",
+            ingestNumber: 1,
+            preserveFolders: false,
+            skipDuplicates: false,
+            existing: [IngestExisting(folder: "", name: "IMG_1.CR3", size: 10)],
+            incremental: true
+        )
+        XCTAssertEqual(rows.first?.note, .skipDuplicate)
+    }
+
+    func testFileKindFilter() {
+        XCTAssertTrue(IngestFileKinds.allows(extension: "CR3", raw: true, jpeg: false, other: false))
+        XCTAssertFalse(IngestFileKinds.allows(extension: "JPG", raw: true, jpeg: false, other: false))
+        XCTAssertTrue(IngestFileKinds.allows(extension: "jpg", raw: false, jpeg: true, other: false))
+        XCTAssertTrue(IngestFileKinds.allows(extension: "MOV", raw: false, jpeg: false, other: true))
+        XCTAssertFalse(IngestFileKinds.allows(extension: "MOV", raw: true, jpeg: true, other: false))
     }
 
     func testSummaryCountsBytesOfWhatWillCopy() {

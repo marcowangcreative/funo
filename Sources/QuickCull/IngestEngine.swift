@@ -13,7 +13,8 @@ import QuickCullCore
 ///   blocking the transfer.
 /// - Writes land as ".qcpart" then rename: a yanked cable can't leave a
 ///   half-file that looks real.
-/// - Sources are NEVER modified or deleted. Cards are sacred.
+/// - The source stays unless Delete originals is on. That option removes a
+///   file only after its copy has verified. A failed copy never touches it.
 final class IngestJob {
 
     struct Progress {
@@ -37,6 +38,8 @@ final class IngestJob {
     var ingestNumber = 1
     /// NEW ONLY: same name + same size already at destination → skip.
     var skipExisting = true
+    /// Off unless the window's Delete originals box is checked.
+    var removeVerifiedSource = false
     /// STRUCTURE: true = keep the card's DCIM subfolders at destination.
     var preserveFolders = false
     private var stemMap: [String: String] = [:]
@@ -157,8 +160,9 @@ final class IngestJob {
     }
 
     /// Copies `copies` into `destination`. Names and collisions are already
-    /// decided (the preview). The card is only read. A failed copy deletes
-    /// the partial we wrote, never the source.
+    /// decided (the preview). The source is only read unless Delete originals
+    /// is on, and then only after that file's copy verifies. A failed copy
+    /// deletes the partial we wrote, never the source.
     func start(copies: [Copy], destination: URL, backupRoot: URL?, jobName: String, writeMetadata: Bool) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -264,6 +268,16 @@ final class IngestJob {
                     progress.filesDone += 1
                     progress.bytesDone += copy.sourceSize
                     progress.currentFile = finalDest.lastPathComponent
+                }
+                if removeVerifiedSource,
+                   copy.source.standardizedFileURL.path != finalDest.standardizedFileURL.path {
+                    do {
+                        try fm.removeItem(at: copy.source)
+                    } catch {
+                        accounting.sync {
+                            errors.append("\(copy.source.lastPathComponent): copied, but the original could not be deleted")
+                        }
+                    }
                 }
                 appendLog(IngestLog.line(when: Date(), result: "OK", original: copy.source.lastPathComponent,
                                          relative: relativePath(of: finalDest, under: destination),
