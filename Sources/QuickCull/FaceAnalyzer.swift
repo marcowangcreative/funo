@@ -55,18 +55,31 @@ final class FaceCropper {
         cache.countLimit = 24 // two dozen photos' worth of tiny crops
     }
 
+    /// Crops already in memory, or nil when they still have to be cut.
+    /// An empty array is a settled "no faces" verdict, not a cache miss.
+    /// Safe to call on the keypress path: it does not decode.
+    func cachedCrops(for asset: PhotoAsset, maxFaces: Int = 40) -> [(NSImage, FaceInfo)]? {
+        guard let analysis = FaceAnalyzer.shared.result(for: asset.id) else { return nil }
+        let faces = Array(analysis.faces.prefix(maxFaces))
+        if faces.isEmpty { return [] }
+        guard let cached = cache.object(forKey: asset.id as NSString) as? [NSImage],
+              cached.count == faces.count else { return nil }
+        return Array(zip(cached, faces))
+    }
+
     /// Completion fires on the main thread with (crop, info) pairs in
     /// left-to-right photo order. Empty when unanalyzed or no faces.
-    func crops(for asset: PhotoAsset, maxFaces: Int = 16, completion: @escaping ([(NSImage, FaceInfo)]) -> Void) {
+    /// A cache hit completes synchronously. The decode itself is off the main thread.
+    func crops(for asset: PhotoAsset, maxFaces: Int = 40, completion: @escaping ([(NSImage, FaceInfo)]) -> Void) {
+        if let cached = cachedCrops(for: asset, maxFaces: maxFaces) {
+            completion(cached)
+            return
+        }
         guard let analysis = FaceAnalyzer.shared.result(for: asset.id), !analysis.faces.isEmpty else {
             completion([])
             return
         }
         let faces = Array(analysis.faces.prefix(maxFaces))
-        if let cached = cache.object(forKey: asset.id as NSString) as? [NSImage], cached.count == faces.count {
-            completion(Array(zip(cached, faces)))
-            return
-        }
         let url = asset.url
         let id = asset.id
         DispatchQueue.global(qos: .utility).async { [weak self] in

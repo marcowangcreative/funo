@@ -203,6 +203,66 @@ final class FilmstripResizeHandle: NSView {
     }
 }
 
+/// One face crop. Reused across photos so navigation replaces the image
+/// instead of destroying and recreating the cell.
+private final class FaceCropView: NSView {
+    let imageView = NSImageView()
+    private var widthConstraint: NSLayoutConstraint!
+    private var heightConstraint: NSLayoutConstraint!
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = Theme.imageRadius
+        layer?.masksToBounds = true
+        layer?.backgroundColor = Theme.bg2.cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+        widthConstraint = widthAnchor.constraint(equalToConstant: 1)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 1)
+        NSLayoutConstraint.activate([
+            widthConstraint, heightConstraint,
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func apply(image: NSImage, face: FaceInfo, index: Int, size: CGFloat) {
+        imageView.image = image
+        identifier = NSUserInterfaceItemIdentifier("\(index)")
+        widthConstraint.constant = size
+        heightConstraint.constant = size
+        // Full triage on every face: red = blinking, amber = soft face or
+        // marginal eyes, green = good. Every face gets a verdict.
+        let ring: NSColor = face.blinking ? Theme.red
+            : (face.lowQuality || face.squinting) ? Theme.accent
+            : Theme.labelColors[3]
+        layer?.borderWidth = 2
+        layer?.borderColor = ring.cgColor
+        var notes: [String] = [face.blinking ? "eyes closed"
+                               : (face.squinting ? "squinting" : "eyes open")]
+        if let q = face.quality { notes.append(String(format: "quality %.2f", q)) }
+        if face.smileScore != nil { notes.append(face.smiling ? "smiling" : "not smiling") }
+        notes.append("click to zoom")
+        toolTip = notes.joined(separator: " · ")
+    }
+
+    /// Drop the photograph without changing the cell's size, so the grid
+    /// doesn't reflow while the next crop is still off the main thread.
+    func blank() {
+        imageView.image = nil
+        layer?.borderWidth = 0
+        toolTip = nil
+        identifier = nil
+    }
+}
+
 /// folder - scrollable, current frame auto-centered, scroller as progress.
 final class PreviewOverlayView: NSView {
 
@@ -266,10 +326,14 @@ final class PreviewOverlayView: NSView {
     private var faceScoreRetries = 0
     /// Crop retries for the photo currently on stage. Reset on navigation.
     private var faceCropRetries = 0
-    /// Whose crops `currentFacePairs` belongs to. Keeps the previous photo's
-    /// faces from staying on screen after an arrow, and keeps a refresh from
-    /// tearing the panel down when it's already showing this photo.
+    /// Whose crops `currentFacePairs` belongs to.
     private var currentFaceAssetID: String?
+    /// True while this frame is waiting out the skip window. Layout must not
+    /// tear the panel down into "scanning…" during that window.
+    private var facesAwaitingDecode = false
+    /// Cells currently in the grid. Reused when the next photo has the same count.
+    private var faceCropViews: [FaceCropView] = []
+    private var faceColumnCount = 0
     private var showInfoPanel: Bool = {
         UserDefaults.standard.object(forKey: "QuickCullShowInfo") == nil
             ? true
@@ -937,8 +1001,12 @@ final class PreviewOverlayView: NSView {
     /// A face analysis landed while the preview is open.
     func noteFaceResult(for id: String) {
         guard index < assets.count, assets[index].id == id else { return }
-        // If a debounced refresh is already queued, let it do the work.
-        if facesRefreshTimer?.isValid != true { rebuildFacesRow() }
+        // A verdict for the photo on stage paints now. Waiting out the skip
+        // timer here is what left the panel on "scanning…" after the result
+        // had already landed.
+        facesRefreshTimer?.invalidate()
+        facesRefreshTimer = nil
+        rebuildFacesRow()
         // Faces just landed → re-score focus on the subject, not the frame.
         refreshInfoPanel()
         updateFaceBadges()
@@ -1026,24 +1094,100 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    /// Debounce the crop fetch while the user is flying through frames.
-    /// The previous photo's faces are cleared immediately — holding that
-    /// layout (the old dimmed panel) showed the wrong people on the new frame.
+    /// Armed only for a frame that has no cached crops. Invalidated by the
+    /// next arrow, so a skim never starts a decode.
     private var facesRefreshTimer: Timer?
 
     private func scheduleFacesRefresh() {
-        let assetID = index < assets.count ? assets[index].id : nil
-        if currentFaceAssetID != assetID {
+        facesRefreshTimer?.invalidate()
+        facesRefreshTimer = nil
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else {
+            facesAwaitingDecode = false
             currentFacePairs = []
             currentFaces = []
-            currentFaceAssetID = assetID
-            faceCropRetries = 0
+            currentFaceAssetID = nil
             layoutFacesGrid()
+            return
         }
-        facesPanel.alphaValue = 1
-        facesRefreshTimer?.invalidate()
-        facesRefreshTimer = Timer.scheduledTimer(withTimeInterval: 0.28, repeats: false) { [weak self] _ in
-            self?.rebuildFacesRow()
+        let asset = assets[index]
+        switch FacesNavigation.onAdvance(cropAvailability(for: asset)) {
+        case .showCached(let count):
+            paintCachedFaces(for: asset, count: count)
+        case .showNoFaces, .showUnavailable:
+            facesAwaitingDecode = false
+            faceCropRetries = 0
+            currentFaceAssetID = asset.id
+            currentFacePairs = []
+            currentFaces = []
+            layoutFacesGrid()
+        case .holdForDecode:
+            beginFacesHold(for: asset.id)
+            let gen = showGeneration
+            let id = asset.id
+            facesRefreshTimer = Timer.scheduledTimer(
+                withTimeInterval: FacesNavigation.settleDelay, repeats: false
+            ) { [weak self] _ in
+                guard let self, self.showGeneration == gen, self.index < self.assets.count,
+                      self.assets[self.index].id == id else { return }
+                self.rebuildFacesRow()
+            }
+        case .showScanning, .showLoading:
+            break
+        }
+    }
+
+    /// Blank the images already on screen without removing them. The previous
+    /// person must not stay up, and destroying the grid is the flash.
+    private func beginFacesHold(for id: String) {
+        let changed = currentFaceAssetID != id
+        currentFaceAssetID = id
+        faceCropRetries = 0
+        facesAwaitingDecode = true
+        guard changed else { return }
+        currentFacePairs = []
+        currentFaces = []
+        for cell in faceCropViews { cell.blank() }
+        if !faceCropViews.isEmpty {
+            facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+            facesFooterLabel.stringValue = ""
+        }
+    }
+
+    private func paintCachedFaces(for asset: PhotoAsset, count: Int) {
+        facesAwaitingDecode = false
+        faceCropRetries = 0
+        guard let pairs = FaceCropper.shared.cachedCrops(for: asset, maxFaces: 40),
+              pairs.count == count else { return }
+        currentFaceAssetID = asset.id
+        currentFacePairs = pairs
+        currentFaces = pairs.map(\.1)
+        layoutFacesGrid()
+        prefetchNeighborCrops()
+    }
+
+    private func cropAvailability(for asset: PhotoAsset) -> FacesCropAvailability {
+        if let cached = FaceCropper.shared.cachedCrops(for: asset, maxFaces: 40) {
+            return cached.isEmpty ? .noFaces : .cropsCached(cached.count)
+        }
+        switch FaceAnalyzer.shared.phase(for: asset.id) {
+        case .pending: return .notAnalyzed
+        case .unavailable: return .unavailable
+        case .noFaces: return .noFaces
+        case .faces(let count): return .facesKnownCropsMissing(count)
+        }
+    }
+
+    /// After the frame on stage has its crops, cut the neighbors so the next
+    /// single arrow is a cache hit. Skipped frames never get here.
+    private func prefetchNeighborCrops() {
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled else { return }
+        for offset in [1, -1] {
+            let n = index + offset
+            guard n >= 0, n < assets.count else { continue }
+            let neighbor = assets[n]
+            guard case .faces = FaceAnalyzer.shared.phase(for: neighbor.id),
+                  FaceCropper.shared.cachedCrops(for: neighbor, maxFaces: 40) == nil else { continue }
+            FaceCropper.shared.crops(for: neighbor, maxFaces: 40) { _ in }
         }
     }
 
@@ -1264,6 +1408,7 @@ final class PreviewOverlayView: NSView {
     }
 
     private func rebuildFacesRow() {
+        facesAwaitingDecode = false
         guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else {
             currentFaces = []
             currentFacePairs = []
@@ -1272,14 +1417,37 @@ final class PreviewOverlayView: NSView {
             return
         }
         let asset = assets[index]
-        if currentFaceAssetID != asset.id {
-            currentFaces = []
-            currentFacePairs = []
-            currentFaceAssetID = asset.id
+        switch FacesNavigation.onSettle(cropAvailability(for: asset)) {
+        case .showCached(let count):
+            paintCachedFaces(for: asset, count: count)
+        case .showNoFaces, .showUnavailable, .showScanning:
             faceCropRetries = 0
+            currentFaceAssetID = asset.id
+            currentFacePairs = []
+            currentFaces = []
             layoutFacesGrid()
+        case .showLoading:
+            startFaceCropDecode(for: asset)
+        case .holdForDecode:
+            break
         }
+    }
+
+    /// Cut crops for a photo we have committed to. The decode runs off the
+    /// main thread. A transient empty result retries; it does not blank a
+    /// panel that is already showing this photo's previous attempt.
+    private func startFaceCropDecode(for asset: PhotoAsset) {
+        currentFaceAssetID = asset.id
         let gen = showGeneration
+        if faceCropViews.isEmpty {
+            currentFacePairs = []
+            currentFaces = []
+            layoutFacesGrid()
+        } else {
+            facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+            facesFooterLabel.stringValue = "loading faces…"
+            facesFooterLabel.textColor = Theme.tx2
+        }
         FaceCropper.shared.crops(for: asset, maxFaces: 40) { [weak self] pairs in
             guard let self, self.showGeneration == gen, self.index < self.assets.count,
                   self.assets[self.index].id == asset.id else { return }
@@ -1293,7 +1461,6 @@ final class PreviewOverlayView: NSView {
                         guard let self, self.showGeneration == gen else { return }
                         self.rebuildFacesRow()
                     }
-                    self.layoutFacesGrid()
                     return
                 }
                 self.currentFacePairs = []
@@ -1303,8 +1470,9 @@ final class PreviewOverlayView: NSView {
             }
             self.faceCropRetries = 0
             self.currentFacePairs = pairs
-            self.currentFaces = pairs.map { $0.1 }
+            self.currentFaces = pairs.map(\.1)
             self.layoutFacesGrid()
+            self.prefetchNeighborCrops()
         }
     }
 
@@ -1312,15 +1480,13 @@ final class PreviewOverlayView: NSView {
     /// without scrolling, columns capped by a width budget, hidden entirely
     /// when the window is too narrow to share (photo always wins).
     private func layoutFacesGrid() {
-        for sub in facesStack.arrangedSubviews {
-            facesStack.removeArrangedSubview(sub)
-            sub.removeFromSuperview()
-        }
+        // A keypress that hasn't settled yet must not rebuild the grid into
+        // a scanning/loading state. That rebuild was the flash.
+        if currentFacePairs.isEmpty, facesAwaitingDecode { return }
+
         let pairs = currentFacePairs
         guard showFacesPanel, FaceAnalyzer.shared.isEnabled, bounds.width >= 780 else {
-            facesPanelWidth.constant = 0
-            facesPanel.isHidden = true
-            updateStageRail()
+            setFacesChrome(hidden: true, width: 0)
             return
         }
 
@@ -1330,13 +1496,13 @@ final class PreviewOverlayView: NSView {
         // A known-but-not-yet-cropped face used to take the "no faces" branch
         // and hide the panel until the user left and came back.
         if pairs.isEmpty {
+            removeFaceCells()
             let phase = index < assets.count
                 ? FaceAnalyzer.shared.phase(for: assets[index].id)
                 : FacePanelPhase.pending
             switch phase {
             case .noFaces:
-                facesPanelWidth.constant = 0
-                facesPanel.isHidden = true
+                setFacesChrome(hidden: true, width: 0)
             case .pending:
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
                 if index < assets.count, FileOps.isMemoryCard(assets[index].url) {
@@ -1345,22 +1511,18 @@ final class PreviewOverlayView: NSView {
                     facesFooterLabel.stringValue = "scanning…"
                 }
                 facesFooterLabel.textColor = Theme.tx2
-                facesPanelWidth.constant = Self.railWidth
-                facesPanel.isHidden = false
+                setFacesChrome(hidden: false, width: Self.railWidth)
             case .unavailable:
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
                 facesFooterLabel.stringValue = "couldn't read this photo\nRescan Faces to retry"
                 facesFooterLabel.textColor = Theme.tx2
-                facesPanelWidth.constant = Self.railWidth
-                facesPanel.isHidden = false
+                setFacesChrome(hidden: false, width: Self.railWidth)
             case .faces:
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
                 facesFooterLabel.stringValue = "loading faces…"
                 facesFooterLabel.textColor = Theme.tx2
-                facesPanelWidth.constant = Self.railWidth
-                facesPanel.isHidden = false
+                setFacesChrome(hidden: false, width: Self.railWidth)
             }
-            updateStageRail()
             return
         }
 
@@ -1371,29 +1533,23 @@ final class PreviewOverlayView: NSView {
         // Columns come from the COUNT ALONE - so dragging the divider never
         // reshuffles sizes; it only changes how many rows are visible. Fewer
         // faces → fewer columns → bigger crops.
-        let columns: Int
-        switch count {
-        case 1:      columns = 1
-        case 2...6:  columns = 2
-        case 7...12: columns = 3
-        default:     columns = 4
-        }
+        let columns = FacesNavigation.columns(forFaceCount: count)
         // Cells FILL the width (edge to edge), capped so a lone face isn't
         // absurdly large.
         let rawCell = (innerWidth - CGFloat(columns - 1) * gap) / CGFloat(columns)
         let chosenSize = min(rawCell, 150)
+        writeFacesCaption(pairs)
 
-        let blinking = pairs.filter { $0.1.blinking }.count
-        facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces \(count)")
-        if blinking > 0 {
-            facesFooterLabel.stringValue = "\(blinking) of \(count) blinking"
-            facesFooterLabel.textColor = Theme.red
-        } else {
-            facesFooterLabel.stringValue = "All eyes open"
-            facesFooterLabel.textColor = Theme.tx2
+        if FacesNavigation.swapsInPlace(from: faceCropViews.count, to: count), faceColumnCount == columns {
+            for (i, pair) in pairs.enumerated() {
+                faceCropViews[i].apply(image: pair.0, face: pair.1, index: i, size: chosenSize)
+            }
+            setFacesChrome(hidden: false, width: Self.railWidth)
+            return
         }
 
-        // Center rows so partial last rows (and a capped single) sit tidily.
+        removeFaceCells()
+        faceColumnCount = columns
         facesStack.alignment = .centerX
         var row: NSStackView?
         for (i, pair) in pairs.enumerated() {
@@ -1404,58 +1560,47 @@ final class PreviewOverlayView: NSView {
                 facesStack.addArrangedSubview(newRow)
                 row = newRow
             }
-            row?.addArrangedSubview(faceCell(image: pair.0, face: pair.1, faceIndex: i, size: chosenSize))
+            let cell = FaceCropView()
+            cell.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(faceCellTapped(_:))))
+            cell.apply(image: pair.0, face: pair.1, index: i, size: chosenSize)
+            faceCropViews.append(cell)
+            row?.addArrangedSubview(cell)
         }
 
         // The card is pinned to the lower edge and the scroll fills it, so
         // crops sit at the top and the rest of the height is scrollable -
         // no dead gap below the panel, and sizes never depend on height.
-        facesPanelWidth.constant = Self.railWidth
-        facesPanel.isHidden = false
-        updateStageRail()
+        setFacesChrome(hidden: false, width: Self.railWidth)
     }
 
-    private func faceCell(image: NSImage, face: FaceInfo, faceIndex: Int, size: CGFloat) -> NSView {
-        let cell = NSView()
-        cell.wantsLayer = true
-        cell.layer?.cornerRadius = Theme.imageRadius
-        cell.layer?.masksToBounds = true
-        cell.layer?.backgroundColor = Theme.bg2.cgColor
-        cell.identifier = NSUserInterfaceItemIdentifier("\(faceIndex)")
-        cell.translatesAutoresizingMaskIntoConstraints = false
+    private func writeFacesCaption(_ pairs: [(NSImage, FaceInfo)]) {
+        let blinking = pairs.filter { $0.1.blinking }.count
+        facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces \(pairs.count)")
+        if blinking > 0 {
+            facesFooterLabel.stringValue = "\(blinking) of \(pairs.count) blinking"
+            facesFooterLabel.textColor = Theme.red
+        } else {
+            facesFooterLabel.stringValue = "All eyes open"
+            facesFooterLabel.textColor = Theme.tx2
+        }
+    }
 
-        let imageView = NSImageView()
-        imageView.image = image
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(imageView)
+    private func removeFaceCells() {
+        for sub in facesStack.arrangedSubviews {
+            facesStack.removeArrangedSubview(sub)
+            sub.removeFromSuperview()
+        }
+        faceCropViews.removeAll()
+        faceColumnCount = 0
+    }
 
-        // Full triage on every face: red = blinking, amber = soft face or
-        // marginal eyes, green = good. Every face gets a verdict.
-        let ring: NSColor = face.blinking ? Theme.red
-            : (face.lowQuality || face.squinting) ? Theme.accent
-            : Theme.labelColors[3]
-        cell.layer?.borderWidth = 2
-        cell.layer?.borderColor = ring.cgColor
-
-        var notes: [String] = [face.blinking ? "eyes closed"
-                               : (face.squinting ? "squinting" : "eyes open")]
-        if let q = face.quality { notes.append(String(format: "quality %.2f", q)) }
-        if face.smileScore != nil { notes.append(face.smiling ? "smiling" : "not smiling") }
-        notes.append("click to zoom")
-        cell.toolTip = notes.joined(separator: " · ")
-
-        cell.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(faceCellTapped(_:))))
-
-        NSLayoutConstraint.activate([
-            cell.widthAnchor.constraint(equalToConstant: size),
-            cell.heightAnchor.constraint(equalToConstant: size),
-            imageView.topAnchor.constraint(equalTo: cell.topAnchor),
-            imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            imageView.bottomAnchor.constraint(equalTo: cell.bottomAnchor)
-        ])
-        return cell
+    /// Width and hidden-state changes move the photo. Skip the constraint
+    /// write when nothing changed so an arrow doesn't reflow the stage.
+    private func setFacesChrome(hidden: Bool, width: CGFloat) {
+        guard facesPanel.isHidden != hidden || facesPanelWidth.constant != width else { return }
+        facesPanel.isHidden = hidden
+        facesPanelWidth.constant = width
+        updateStageRail()
     }
 
     @objc private func faceCellTapped(_ recognizer: NSClickGestureRecognizer) {
