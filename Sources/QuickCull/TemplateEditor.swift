@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// A small editor window for folder templates: pick a template, edit its
 /// name and folder list (one per line, "/" nests), save or delete.
@@ -16,6 +17,8 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
 
     private let popup = NSPopUpButton()
     private let nameField = NSTextField()
+    private let patternField = NSTextField()
+    private let exampleLabel = NSTextField(labelWithString: "")
     private let textView = NSTextView()
     private var editingName: String? // nil = creating a new template
 
@@ -66,6 +69,22 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         nameField.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(nameField)
 
+        let patternLabel = NSTextField(labelWithString: "Path")
+        patternLabel.textColor = .secondaryLabelColor
+        patternLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(patternLabel)
+
+        patternField.placeholderString = "{Job}/{YYYY}/{MM}/{DD}"
+        patternField.font = Theme.monoData
+        patternField.delegate = self
+        patternField.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(patternField)
+
+        exampleLabel.font = Theme.monoCaption
+        exampleLabel.textColor = Theme.tx2
+        exampleLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(exampleLabel)
+
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
@@ -79,7 +98,7 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         scroll.documentView = textView
         content.addSubview(scroll)
 
-        let hint = NSTextField(labelWithString: "One folder per line · use / to nest (e.g. Reception/Speeches)")
+        let hint = NSTextField(labelWithString: "Path tokens: {Job} {YYYY} {MM} {DD} {YYYYMMDD} {Camera} {Card}. Folders below are created inside that path, one per line.")
         hint.font = Theme.caption
         hint.textColor = .tertiaryLabelColor
         hint.translatesAutoresizingMaskIntoConstraints = false
@@ -106,7 +125,16 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
             nameField.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 10),
             nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
-            scroll.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 12),
+            patternLabel.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 14),
+            patternLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            patternField.centerYAnchor.constraint(equalTo: patternLabel.centerYAnchor),
+            patternField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            patternField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            exampleLabel.topAnchor.constraint(equalTo: patternField.bottomAnchor, constant: 6),
+            exampleLabel.leadingAnchor.constraint(equalTo: patternField.leadingAnchor),
+            exampleLabel.trailingAnchor.constraint(equalTo: patternField.trailingAnchor),
+
+            scroll.topAnchor.constraint(equalTo: exampleLabel.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             scroll.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -10),
@@ -138,14 +166,24 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         editingName = name
         nameField.stringValue = name
         textView.string = (FolderTemplates.all[name] ?? []).joined(separator: "\n")
+        patternField.stringValue = FolderTemplates.pathPatterns[name] ?? "{Job}"
+        refreshExample()
     }
 
     private func startNew() {
         editingName = nil
         nameField.stringValue = ""
         textView.string = ""
+        patternField.stringValue = "{Job}/{YYYY}/{MM}/{DD}"
         popup.select(nil)
+        refreshExample()
         window?.makeFirstResponder(nameField)
+    }
+
+    private func refreshExample() {
+        let job = nameField.stringValue.isEmpty ? "Chen Wedding" : nameField.stringValue
+        let path = IngestTemplates.render(pattern: patternField.stringValue, job: job, camera: "EOS R5", card: "Card")
+        exampleLabel.stringValue = "Example: Pictures / " + path.replacingOccurrences(of: "/", with: " / ")
     }
 
     // MARK: - Actions
@@ -172,11 +210,18 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        guard !paths.isEmpty else { NSSound.beep(); return }
+        let pattern = patternField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paths.isEmpty || !pattern.isEmpty else { NSSound.beep(); return }
         if let old = editingName, old != name {
             FolderTemplates.delete(old) // renamed
         }
-        FolderTemplates.save(name: name, paths: paths)
+        FolderTemplates.save(name: name, paths: paths, pathPattern: pattern.isEmpty ? "{Job}" : pattern)
         reload(selecting: name)
+    }
+}
+
+extension TemplateEditor: NSTextFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        refreshExample()
     }
 }
