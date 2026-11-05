@@ -94,7 +94,7 @@ final class FileOpProgressOverlayView: NSView {
         // Fixed, centered panel: the bar is 300 wide, so a 364-wide panel
         // leaves an even 32 margin each side and can never clip on the window.
         NSLayoutConstraint.activate([
-            panel.widthAnchor.constraint(equalToConstant: 364),
+            panel.widthAnchor.constraint(equalToConstant: Theme.Panel.width),
             content.topAnchor.constraint(equalTo: panel.topAnchor, constant: 26),
             panel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: 22),
             content.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
@@ -110,7 +110,7 @@ final class FileOpProgressOverlayView: NSView {
         window?.makeFirstResponder(self)
         alphaValue = 0
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.12
+            ctx.duration = Theme.Panel.fadeIn
             animator().alphaValue = 1
         }
     }

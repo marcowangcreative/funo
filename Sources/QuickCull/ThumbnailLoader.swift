@@ -124,10 +124,12 @@ final class ThumbnailLoader {
             return
         }
         waiters[key, default: []].append(completion)
-        // A visible caller is waiting - make sure an already-queued op
-        // (e.g. from a prefetch) doesn't languish behind the backlog.
-        if let existing = pending[key], existing.queuePriority.rawValue < Operation.QueuePriority.high.rawValue {
-            existing.queuePriority = .high
+        // A visible caller is waiting - promote an already-queued op (e.g.
+        // from a prefetch) over the backlog. Previews go all the way to
+        // .veryHigh: the frame on screen preempts everything else.
+        let want: Operation.QueuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
+        if let existing = pending[key], existing.queuePriority.rawValue < want.rawValue {
+            existing.queuePriority = want
         }
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
@@ -170,12 +172,16 @@ final class ThumbnailLoader {
         // Priority tiers: the big preview the user is LOOKING AT preempts
         // the thumbnail backlog (critical on slow cards, where hundreds of
         // queued thumbs used to starve the sharp render for minutes).
-        if maxPixel > Self.thumbnailPixelSize {
-            op.queuePriority = .veryHigh
-        } else if !(waiters[key]?.isEmpty ?? true) {
-            op.queuePriority = .high   // visible cell
+        // Priority ladder (2026-09-17): a WAITERLESS preview prefetch (the
+        // arrow-key neighbor warm) must NOT outrank the photo the user is
+        // looking at. The old flat .veryHigh for every >512px op let 3-4
+        // stale neighbor decodes win FIFO over the current frame - the
+        // "low res moment", worst on 2-lane card queues. Prefetches start
+        // .normal; request() promotes the moment a real viewer registers.
+        if !(waiters[key]?.isEmpty ?? true) {
+            op.queuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
         } else {
-            op.queuePriority = .normal // prefetch
+            op.queuePriority = .normal // prefetch of any tier
         }
         op.addExecutionBlock { [weak self, weak op] in
             guard let op, !op.isCancelled else {
@@ -207,12 +213,24 @@ final class ThumbnailLoader {
             }
             var image: NSImage?
             if let diskKey, let data = CacheDB.shared.get(diskKey) {
-                image = NSImage(data: data)
+                // Force-decode NOW, on this background lane. NSImage(data:)
+                // keeps the JPEG compressed and pays decompression on MAIN
+                // at first draw - 25-100ms hitches per screenful of warm
+                // cells, and a per-arrow-press hitch on cached previews.
+                image = Self.decodeImmediate(data)
             }
+            var freshlyDecoded = false
             if image == nil {
                 image = Self.decode(url: url, maxPixel: maxPixel, userRotation: userRotation)
-                if let image, let diskKey,
-                   let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                freshlyDecoded = image != nil
+            }
+            // Persist AFTER delivery, off the decode lane: the JPEG encode
+            // of a 3200px preview is 50-150ms the viewer used to wait out
+            // before pixels appeared, and it held the lane the next decode
+            // needed.
+            if freshlyDecoded, let image, let diskKey {
+                DispatchQueue.global(qos: .utility).async {
+                    guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
                     let rep = NSBitmapImageRep(cgImage: cg)
                     if let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.82]) {
                         CacheDB.shared.set(diskKey, jpeg)
@@ -235,6 +253,17 @@ final class ThumbnailLoader {
     }
 
     // MARK: - Decoding (background threads)
+
+    /// Decode a cached JPEG blob to REAL pixels on the calling (background)
+    /// thread. NSImage(data:) defers decompression to first draw on main.
+    private static func decodeImmediate(_ data: Data) -> NSImage? {
+        let opts = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, opts) else {
+            return NSImage(data: data)
+        }
+        return NSImage(cgImage: cg, size: .zero)
+    }
 
     private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> NSImage? {
         guard let image = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }

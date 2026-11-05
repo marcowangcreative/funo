@@ -261,6 +261,15 @@ final class PreviewOverlayView: NSView {
     private let cullPlate = NSView()
     private let cullSwatch = NSView()
     private let cullText = NSTextField(labelWithString: "")
+    // Decision Band (docked left of the filmstrip): cull state, focus
+    // verdict, eyes, frame position - one baseline, one glance. Kills the
+    // reviewer's "my eyes have to bounce" tour for good.
+    private let focusKeyLabel = NSTextField(labelWithString: "FOCUS")
+    private let focusValueLabel = NSTextField(labelWithString: "—")
+    private let eyesKeyLabel = NSTextField(labelWithString: "EYES")
+    private let eyesValueLabel = NSTextField(labelWithString: "—")
+    private let frameKeyLabel = NSTextField(labelWithString: "FRAME")
+    private let frameValueLabel = NSTextField(labelWithString: "")
     /// On-frame per-face triage badges (exceptions only). Pooled + repositioned.
     private var faceBadges: [RangefinderBadgeView] = []
     /// Per-photo retry budget for transient per-face score failures.
@@ -299,6 +308,9 @@ final class PreviewOverlayView: NSView {
     var onClose: ((Int) -> Void)?
     /// Called whenever a rating/reject/color changes, so the grid can repaint.
     var onCullChanged: (() -> Void)?
+    /// The user trashed a frame from the expanded view - the grid reloads
+    /// its folder while the overlay carries on with its own trimmed roll.
+    var onTrashed: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -363,20 +375,50 @@ final class PreviewOverlayView: NSView {
         cullSwatch.wantsLayer = true
         cullSwatch.layer?.cornerRadius = 2.5
         cullSwatch.translatesAutoresizingMaskIntoConstraints = false
-        cullPlate.addSubview(cullSwatch)
         cullText.font = Theme.monoData
-        cullText.translatesAutoresizingMaskIntoConstraints = false
-        cullPlate.addSubview(cullText)
+        func readoutPair(_ key: NSTextField, _ value: NSTextField) -> NSStackView {
+            key.font = Theme.monoEyebrow
+            key.textColor = Theme.tx2
+            value.font = Theme.monoData
+            value.textColor = Theme.tx1
+            let v = NSStackView(views: [key, value])
+            v.orientation = .vertical
+            v.alignment = .leading
+            v.spacing = 1
+            return v
+        }
+        func hairline() -> NSView {
+            let v = NSView()
+            v.wantsLayer = true
+            v.layer?.backgroundColor = Theme.line.cgColor
+            v.translatesAutoresizingMaskIntoConstraints = false
+            v.widthAnchor.constraint(equalToConstant: 1).isActive = true
+            v.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            return v
+        }
+        let cullGroup = NSStackView(views: [cullSwatch, cullText])
+        cullGroup.orientation = .horizontal
+        cullGroup.spacing = 8
+        cullGroup.alignment = .centerY
+        let readout = NSStackView(views: [
+            cullGroup, hairline(),
+            readoutPair(focusKeyLabel, focusValueLabel), hairline(),
+            readoutPair(eyesKeyLabel, eyesValueLabel), hairline(),
+            readoutPair(frameKeyLabel, frameValueLabel)])
+        readout.orientation = .horizontal
+        readout.spacing = 12
+        readout.alignment = .centerY
+        readout.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(readout)
         NSLayoutConstraint.activate([
-            cullSwatch.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 9),
-            cullSwatch.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
             cullSwatch.widthAnchor.constraint(equalToConstant: 5),
-            cullSwatch.topAnchor.constraint(equalTo: cullPlate.topAnchor, constant: 6),
-            cullSwatch.bottomAnchor.constraint(equalTo: cullPlate.bottomAnchor, constant: -6),
-            cullText.leadingAnchor.constraint(equalTo: cullSwatch.trailingAnchor, constant: 8),
-            cullText.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -10),
-            cullText.topAnchor.constraint(equalTo: cullPlate.topAnchor, constant: 6),
-            cullText.bottomAnchor.constraint(equalTo: cullPlate.bottomAnchor, constant: -6),
+            cullSwatch.heightAnchor.constraint(equalToConstant: 22),
+            readout.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 12),
+            readout.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -12),
+            readout.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            cullPlate.heightAnchor.constraint(equalToConstant: 44),
+        ])
+        NSLayoutConstraint.activate([
         ])
 
         facesFooterLabel.font = Theme.monoCaption
@@ -465,8 +507,8 @@ final class PreviewOverlayView: NSView {
         NSLayoutConstraint.activate([
             infoPanel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
             infoPanel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            cullPlate.leadingAnchor.constraint(equalTo: stageScroll.leadingAnchor, constant: 12),
-            cullPlate.bottomAnchor.constraint(equalTo: stageScroll.bottomAnchor, constant: -12),
+            cullPlate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            cullPlate.bottomAnchor.constraint(equalTo: filmstripScroll.bottomAnchor),
             infoHeader.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 9),
             infoHeader.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoHistogram.topAnchor.constraint(equalTo: infoHeader.bottomAnchor, constant: 10),
@@ -609,7 +651,7 @@ final class PreviewOverlayView: NSView {
             hintLabel.trailingAnchor.constraint(equalTo: footerBand.trailingAnchor, constant: -14),
             hintLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
 
-            filmstripScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            filmstripScroll.leadingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: 8),
             filmstripScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             filmstripScroll.bottomAnchor.constraint(equalTo: footerBand.topAnchor, constant: -6),
 
@@ -753,6 +795,9 @@ final class PreviewOverlayView: NSView {
         faceScoreRetries = 0
         updateFaceBadges()
         refreshCullPlate()
+        frameValueLabel.stringValue = "\(index + 1) / \(assets.count)"
+        updateFocusReadout()
+        updateEyesReadout()
         adoptSidecarForCurrentIfPending()
 
         // Keep the shooting rhythm: neighbors decode while you look at this
@@ -905,6 +950,7 @@ final class PreviewOverlayView: NSView {
         // Faces just landed → re-score focus on the subject, not the frame.
         refreshInfoPanel()
         updateFaceBadges()
+        updateEyesReadout()
     }
 
     /// Position an on-frame badge over EVERY prominent face - eye state plus
@@ -1434,8 +1480,13 @@ final class PreviewOverlayView: NSView {
         let color = store.colorLabel(for: id)
         let stars = store.rating(for: id)
         let rejected = store.isRejected(id)
+        cullPlate.isHidden = false
         guard color > 0 || stars > 0 || rejected else {
-            cullPlate.isHidden = true
+            // Band persists (focus/eyes/frame still live here) - the cull
+            // segment just reads as unset.
+            cullSwatch.isHidden = true
+            cullText.stringValue = "—"
+            cullText.textColor = Theme.tx2
             return
         }
         cullSwatch.isHidden = color == 0
@@ -1450,7 +1501,6 @@ final class PreviewOverlayView: NSView {
             cullText.textColor = color > 0 ? Theme.labelColors[color] : Theme.accent
         }
         cullText.stringValue = parts.joined(separator: "  ")
-        cullPlate.isHidden = false
         if flash {
             // Opacity pulse, not scale: layer-backed NSViews anchor at (0,0),
             // so a scale pulse would grow from the corner and look lopsided.
@@ -1460,6 +1510,50 @@ final class PreviewOverlayView: NSView {
             pulse.duration = 0.22
             pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
             cullPlate.layer?.add(pulse, forKey: "pulse")
+        }
+    }
+
+    /// Decision Band: focus verdict for the frame on stage (same bands and
+    /// tints as the info-rail Focus row).
+    private func updateFocusReadout() {
+        focusValueLabel.stringValue = "—"
+        focusValueLabel.textColor = Theme.tx2
+        guard index < assets.count else { return }
+        let gen = showGeneration
+        SharpnessAnalyzer.shared.score(for: assets[index]) { [weak self] acutance in
+            guard let self, self.showGeneration == gen, let acutance else { return }
+            let f = SharpnessAnalyzer.focusFraction(acutance)
+            if f >= 0.80 {
+                self.focusValueLabel.textColor = NSColor(srgbRed: 0.32, green: 0.74, blue: 0.42, alpha: 1)
+            } else if f >= 0.50 {
+                self.focusValueLabel.textColor = Theme.accent
+            } else {
+                self.focusValueLabel.textColor = Theme.red
+            }
+            self.focusValueLabel.stringValue = "\(Int(f * 100))%"
+        }
+    }
+
+    /// Decision Band: eyes verdict - blinks outrank squints outrank open.
+    private func updateEyesReadout() {
+        guard index < assets.count,
+              let analysis = FaceAnalyzer.shared.result(for: assets[index].id),
+              !analysis.faces.isEmpty else {
+            eyesValueLabel.stringValue = "—"
+            eyesValueLabel.textColor = Theme.tx2
+            return
+        }
+        let blinks = analysis.faces.filter { $0.blinking }.count
+        let squints = analysis.faces.filter { $0.squinting }.count
+        if blinks > 0 {
+            eyesValueLabel.stringValue = blinks == 1 ? "1 blink" : "\(blinks) blinks"
+            eyesValueLabel.textColor = Theme.red
+        } else if squints > 0 {
+            eyesValueLabel.stringValue = squints == 1 ? "1 squint" : "\(squints) squints"
+            eyesValueLabel.textColor = Theme.accent
+        } else {
+            eyesValueLabel.stringValue = "open"
+            eyesValueLabel.textColor = NSColor(srgbRed: 0.32, green: 0.74, blue: 0.42, alpha: 1)
         }
     }
 
@@ -1486,6 +1580,8 @@ final class PreviewOverlayView: NSView {
         case 124: step(1); return true        // right arrow
         case 48: toggleRail(); return true // tab: whole rail (both cards)
         case 53, 49, 36: close(); return true // esc, space, return
+        case 51 where event.modifierFlags.contains(.command):
+            trashCurrent(); return true       // ⌘⌫ - same gesture as the grid
         default: break
         }
         guard let chars = event.charactersIgnoringModifiers, !chars.isEmpty else { return false }
@@ -1553,6 +1649,27 @@ final class PreviewOverlayView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if !handleKey(event) { super.keyDown(with: event) }
+    }
+
+    /// ⌘⌫ - trash the frame on screen without leaving the flow: the photo
+    /// leaves the roll, the next frame takes the stage. Sound fires ON the
+    /// gesture (Finder feel); the actual trash runs off-main.
+    private func trashCurrent() {
+        guard index < assets.count else { return }
+        let asset = assets.remove(at: index)
+        PhotoGridViewController.trashSound?.stop()
+        PhotoGridViewController.trashSound?.play()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = FileOps.trash([asset.url])
+            DispatchQueue.main.async {
+                FileOpsHistory.push("move to Trash", result.records)
+                self?.onTrashed?()
+            }
+        }
+        guard !assets.isEmpty else { close(); return }
+        if index >= assets.count { index = assets.count - 1 }
+        filmstripView.reloadData()
+        showCurrent()
     }
 
     override func layout() {

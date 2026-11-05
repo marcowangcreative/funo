@@ -371,6 +371,9 @@ final class MainSplitViewController: NSSplitViewController {
                 self.grid.select(index: gridIndex)
             }
         }
+        overlay.onTrashed = { [weak self] in
+            self?.grid.noteExternalChange(message: nil)
+        }
         overlay.onCullChanged = { [weak self] in
             self?.grid.refreshVisibleCullStates()
         }

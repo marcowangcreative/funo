@@ -66,6 +66,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     private let nameLabel = NSTextField(labelWithString: "")
     private let starsLabel = NSTextField(labelWithString: "")
     private let badgeLabel = NSTextField(labelWithString: "")
+    private let chipLabel = NSTextField(labelWithString: "")
     private let container = NSView()
 
     private(set) var representedURL: URL?
@@ -119,6 +120,17 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         starsLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(starsLabel)
 
+        // Scale-aware cull chip: once thumbs shrink past the point where a
+        // star row can survive, the cull state compresses into a solid chip
+        // with constant pixel weight (see applyCullScale).
+        chipLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        chipLabel.alignment = .center
+        chipLabel.wantsLayer = true
+        chipLabel.layer?.cornerRadius = 3
+        chipLabel.isHidden = true
+        chipLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(chipLabel)
+
         NSLayoutConstraint.activate([
             container.topAnchor.constraint(equalTo: view.topAnchor),
             container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -128,6 +140,11 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
             starsLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
             starsLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             starsLabel.heightAnchor.constraint(equalToConstant: 15),
+
+            chipLabel.centerYAnchor.constraint(equalTo: starsLabel.centerYAnchor),
+            chipLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            chipLabel.heightAnchor.constraint(equalToConstant: 14),
+            chipLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 18),
 
             thumbView.topAnchor.constraint(equalTo: container.topAnchor, constant: 25),
             thumbView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
@@ -186,6 +203,37 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         } else {
             container.layer?.backgroundColor = Theme.bg2.cgColor
         }
+        // Chip content mirrors the star row (the card tint already carries
+        // the color label at every size, so the chip earns its place only
+        // for rejects and star counts - the two states the row loses).
+        if isRejected {
+            chipLabel.stringValue = "✕"
+            chipLabel.layer?.backgroundColor = Theme.red.cgColor
+            chipLabel.textColor = .white
+        } else if rating > 0 {
+            chipLabel.stringValue = "★\(rating)"
+            let bg = color > 0 ? Theme.labelColors[color] : Theme.accent
+            chipLabel.layer?.backgroundColor = bg.cgColor
+            chipLabel.textColor = color > 0 ? .white : Theme.bg1
+        } else {
+            chipLabel.stringValue = ""
+        }
+        applyCullScale()
+    }
+
+    /// The star-row-vs-chip switch: the elegant row at generous card sizes,
+    /// the solid chip once the card narrows past ~100pt and the row stops
+    /// reading. One rule, driven by the size slider the grid already has.
+    private func applyCullScale() {
+        let compact = view.bounds.width < 100
+        let hasChip = !chipLabel.stringValue.isEmpty
+        chipLabel.isHidden = !(compact && hasChip)
+        starsLabel.isHidden = compact && hasChip
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        applyCullScale()
     }
 
     override var isSelected: Bool {
@@ -1068,8 +1116,12 @@ final class PhotoGridViewController: NSViewController,
         parts.append("\(allAssets.count) photos")
         if isFiltering { parts.append("showing \(displayedAssets.count)") }
         if pairedHidden > 0 { parts.append("+\(pairedHidden) paired JPEGs hidden") }
+        #if DEBUG
+        // Developer telemetry stays in dev builds only - a shipping
+        // instrument shouldn't read like a prototype.
         parts.append(String(format: "folder read %.0f ms", scanMS))
         if let ms = firstThumbMS { parts.append(String(format: "first thumb %.0f ms", ms)) }
+        #endif
         let rated = allAssets.filter { RatingsStore.shared.rating(for: $0.id) > 0 }.count
         let rejected = allAssets.filter { RatingsStore.shared.isRejected($0.id) }.count
         if rated > 0 || rejected > 0 { parts.append("\(rated) rated · \(rejected) rejected") }
@@ -1133,6 +1185,8 @@ final class PhotoGridViewController: NSViewController,
     /// Coalesced "what's on screen now" report to the loader - keeps the
     /// visible cells at the front of slow-volume decode queues.
     private var focusPassScheduled = false
+    /// Top visible item from the last focus pass - gives the scroll DIRECTION.
+    private var lastVisibleTop: Int?
 
     private func scheduleFocusPass() {
         guard isActiveTab, !focusPassScheduled else { return }
@@ -1140,9 +1194,39 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
             self.focusPassScheduled = false
-            let visibleURLs = self.collectionView.indexPathsForVisibleItems()
-                .compactMap { $0.item < self.displayedAssets.count ? self.displayedAssets[$0.item].url : nil }
+            let items = self.collectionView.indexPathsForVisibleItems().map(\.item)
+                .filter { $0 < self.displayedAssets.count }
+            let visibleURLs = items.map { self.displayedAssets[$0].url }
             ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
+
+            // Direction-aware lookahead: warm ~3 screens of thumbs ahead of
+            // the scroll (and one behind) so a steady scroll lands on cells
+            // whose decode already finished - NSCollectionView's own prefetch
+            // window is only a handful of items, which is the "patch of blank
+            // thumbnails for a split second" on fast scrolls. Prefetch ops
+            // run at .normal priority; visible cells (.high) always preempt,
+            // and cache hits return before creating any op, so a warm folder
+            // pays nothing.
+            guard let lo = items.min(), let hi = items.max() else { return }
+            let goingForward = self.lastVisibleTop.map { lo >= $0 } ?? true
+            self.lastVisibleTop = lo
+            let span = max(1, hi - lo + 1)
+            let ahead = min(span * 3, 240), behind = min(span, 80)
+            let count = self.displayedAssets.count
+            func warm(_ a: Int, _ b: Int) {
+                let lo2 = max(0, a), hi2 = min(count - 1, b)
+                guard lo2 <= hi2 else { return }
+                for i in lo2...hi2 {
+                    ThumbnailLoader.shared.prefetch(self.displayedAssets[i].url, maxPixel: ThumbnailLoader.thumbnailPixelSize)
+                }
+            }
+            if goingForward {
+                warm(hi + 1, hi + ahead)
+                warm(lo - behind, lo - 1)
+            } else {
+                warm(lo - ahead, lo - 1)
+                warm(hi + 1, hi + behind)
+            }
         }
     }
 
@@ -1277,8 +1361,11 @@ final class PhotoGridViewController: NSViewController,
             flash("Nothing to paste")
             return
         }
-        let isCut = Self.cutPendingPaths == Set(urls.map { $0.path })
+        let cutRequested = Self.cutPendingPaths == Set(urls.map { $0.path })
         Self.cutPendingPaths = nil
+        // Cards are sacred: even an explicit ⌘X off a memory card pastes as
+        // a COPY - no gesture may ever delete from a card.
+        let isCut = cutRequested && !FileOps.anyOnMemoryCard(urls)
         flash("\(isCut ? "Moving" : "Copying") \(urls.count) photo\(urls.count == 1 ? "" : "s")…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Cross-folder collisions ask, like Finder. Same-folder ⌘V is
@@ -1308,7 +1395,8 @@ final class PhotoGridViewController: NSViewController,
                     FileOpsHistory.push("\(isCut ? "move" : "copy") to \(folder.lastPathComponent)",
                                         kind: isCut ? .move : .copy, result.records)
                     let skippedNote = result.skipped > 0 ? " - \(result.skipped) skipped" : ""
-                    self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)")
+                    let cardNote = (cutRequested && !isCut) ? " (memory card untouched)" : ""
+                    self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)\(cardNote)")
                     self.reloadCurrentFolderPreservingSelection()
                 }
             }
@@ -1326,7 +1414,7 @@ final class PhotoGridViewController: NSViewController,
 
     /// The Finder "move to trash" sound - the canonical system path
     /// (stable across macOS versions). Silent if it can't be found.
-    private static let trashSound: NSSound? = {
+    static let trashSound: NSSound? = {   // shared with PreviewOverlay ⌘⌫
         let path = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/finder/empty trash.aif"
         return NSSound(contentsOfFile: path, byReference: true)
     }()
@@ -1577,7 +1665,11 @@ final class PhotoGridViewController: NSViewController,
         // card, where arrow-scrolling would trigger a multi-MB read per
         // keystroke and starve the thumbnails.
         let url = displayedAssets[index].url
-        if !FileOps.isOnRemovableVolume(url) {
+        // isMemoryCard, not isOnRemovableVolume: the broad check counted
+        // external SSDs as removable and silently disabled preview warming
+        // on them - the "low res moment" when culling off an external
+        // working drive. Only actual cards skip the warm.
+        if !FileOps.isMemoryCard(url) {
             ThumbnailLoader.shared.prefetch(url, maxPixel: ThumbnailLoader.previewPixelSize)
         }
         FaceAnalyzer.shared.prioritize(displayedAssets[index].id)
@@ -1609,7 +1701,7 @@ final class PhotoGridViewController: NSViewController,
             // Plain and ⌘ clicks move the range anchor (Finder behavior).
             selectionAnchor = ip.item
             let url = displayedAssets[ip.item].url
-            if !FileOps.isOnRemovableVolume(url) {
+            if !FileOps.isMemoryCard(url) { // see select(index:) - cards only
                 ThumbnailLoader.shared.prefetch(url, maxPixel: ThumbnailLoader.previewPixelSize)
             }
             onSelectionChanged?(displayedAssets[ip.item])
@@ -2038,7 +2130,9 @@ final class PhotoGridViewController: NSViewController,
             change(asset.id)
             (collectionView.item(at: ip) as? PhotoItem)?.refreshCullState(assetID: asset.id)
         }
-        updateStatus()
+        // Coalesced: updateStatus() is a 2x O(n) recount - per RATING
+        // KEYPRESS on a 10k folder that was 2-8ms in the hottest input loop.
+        scheduleStatusUpdate()
         if let last = ips.last, last.item < displayedAssets.count {
             onSelectionChanged?(displayedAssets[last.item]) // inspector stays in sync
             // Photo Mechanic muscle memory: rate/reject a SINGLE frame advances
@@ -2063,6 +2157,6 @@ final class PhotoGridViewController: NSViewController,
                 }
             }
         }
-        updateStatus()
+        scheduleStatusUpdate() // coalesced O(n) recount, see applyToSelection
     }
 }

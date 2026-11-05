@@ -35,16 +35,28 @@ final class SharpnessAnalyzer {
     /// faceCaptureQuality is NOT sharpness (it happily rates a soft face high,
     /// which put a clean green split on an out-of-focus baby) - only real
     /// acutance may drive the rangefinder split.
+    /// Completions waiting on an in-flight per-face score job. Main thread.
+    private var faceInFlight: [String: [([Double]?) -> Void]] = [:]
+
     func faceScores(for asset: PhotoAsset, completion: @escaping ([Double]?) -> Void) {
         if let v = faceMemo[asset.id] { completion(v); return }
         guard let analysis = FaceAnalyzer.shared.result(for: asset.id),
               !analysis.faces.isEmpty else { completion(nil); return }
+        // Coalesce: pan/zoom fires updateFaceBadges dozens of times before
+        // the first decode lands, and every miss used to enqueue a FRESH
+        // 2048px decode job on the serial queue - seconds of duplicate work
+        // hammering the same disk the preview decoder is reading.
+        if faceInFlight[asset.id] != nil {
+            faceInFlight[asset.id]?.append(completion)
+            return
+        }
+        faceInFlight[asset.id] = [completion]
         let id = asset.id
         let url = asset.url
         let rects = analysis.faces.map { $0.rect }
         queue.async { [weak self] in
             guard let cg = FaceAnalyzer.analysisDecode(url: url, maxPixel: 2048) else {
-                DispatchQueue.main.async { completion(nil) }
+                DispatchQueue.main.async { self?.deliverFaceScores(id: id, result: nil) }
                 return
             }
             let W = CGFloat(cg.width), H = CGFloat(cg.height)
@@ -61,10 +73,16 @@ final class SharpnessAnalyzer {
                 }
             }
             DispatchQueue.main.async {
-                self?.faceMemo[id] = fractions
-                completion(fractions)
+                self?.deliverFaceScores(id: id, result: fractions)
             }
         }
+    }
+
+    /// Main thread: memoize a landed result and drain every waiter.
+    private func deliverFaceScores(id: String, result: [Double]?) {
+        if let result { faceMemo[id] = result }
+        let callbacks = faceInFlight.removeValue(forKey: id) ?? []
+        callbacks.forEach { $0(result) }
     }
 
     /// Acutance for an asset - memo → CacheDB → compute from the decoded

@@ -557,7 +557,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let urls = (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
         guard !urls.isEmpty else { return false }
         let destination = node.url
-        let copying = NSEvent.modifierFlags.contains(.option)
+        let optionCopy = NSEvent.modifierFlags.contains(.option)
         // A drag out of the SIDEBAR moves folders (tree changes); a drag from
         // the photo grid moves only files (tree identical). Classify by source
         // now - info is only valid synchronously - so a photo drop can SKIP the
@@ -566,6 +566,11 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let externalDrag = info.draggingSource == nil
         // Off the main thread: dropping 2,000 photos must not beach-ball.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Cards are sacred: a drag whose source sits on removable media
+            // (memory card) ALWAYS copies - no gesture may delete from a
+            // card. (Safety invariant; the check is one stat per source
+            // folder, done off-main.)
+            let copying = optionCopy || FileOps.anyOnMemoryCard(urls)
             // Finder semantics for duplicates: ASK (keep both / skip /
             // overwrite) instead of silently minting "Name 2.CR3".
             let collisions = FileOps.collisionCount(urls, in: destination)

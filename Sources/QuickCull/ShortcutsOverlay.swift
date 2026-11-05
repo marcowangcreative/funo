@@ -90,7 +90,7 @@ final class ShortcutsOverlayView: NSView {
         content.addArrangedSubview(hint)
         panel.addSubview(content)
 
-        let margin: CGFloat = 40
+        let margin = Theme.Panel.margin
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: panel.topAnchor),
             content.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
@@ -132,7 +132,7 @@ final class ShortcutsOverlayView: NSView {
         window?.makeFirstResponder(self)
         alphaValue = 0
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.13
+            ctx.duration = Theme.Panel.fadeIn
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
@@ -143,7 +143,7 @@ final class ShortcutsOverlayView: NSView {
         guard !dismissing else { return }
         dismissing = true
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.11
+            ctx.duration = Theme.Panel.fadeOut
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in self?.onDismiss?() })

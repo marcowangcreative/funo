@@ -164,6 +164,24 @@ enum FileOps {
     }
 
     /// Move files (plus companions) into a folder.
+    /// Cards are sacred: culling may READ a memory card, but no gesture may
+    /// ever delete from one - the card is the only copy of a shoot until
+    /// ingest lands. NARROW isMemoryCard semantics on purpose (external
+    /// SSDs/HDDs keep normal move behavior). Background-safe: uses a local
+    /// memo (one volume stat per distinct parent folder), NOT the main-only
+    /// caches above - drops call this from a background queue.
+    static func anyOnMemoryCard(_ urls: [URL]) -> Bool {
+        var dirMemo: [String: Bool] = [:]
+        for u in urls {
+            let dir = u.deletingLastPathComponent().path
+            if let hit = dirMemo[dir] { if hit { return true }; continue }
+            let isCard = (try? u.resourceValues(forKeys: [.volumeIsRemovableKey]))?.volumeIsRemovable ?? false
+            dirMemo[dir] = isCard
+            if isCard { return true }
+        }
+        return false
+    }
+
     static func move(_ urls: [URL], to folder: URL, onCollision: Collision = .keepBoth,
                      onProgress: ((Int) -> Void)? = nil) -> OperationResult {
         let fm = FileManager.default

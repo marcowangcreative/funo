@@ -618,3 +618,22 @@ final class FilterBar: NSView {
         if hovered != nil { hovered = nil; restyle() }
     }
 }
+
+// MARK: - Panel kit
+
+/// One spec for every floating panel (shortcuts, progress, quit flush, and
+/// anything future): shared width, interior margin, and fade timings, so a
+/// new panel inherits the house feel instead of re-fighting margins - the
+/// shortcuts sheet alone burned three iterations on exactly that.
+extension Theme {
+    enum Panel {
+        /// Fixed width for centered dialog-style panels.
+        static let width: CGFloat = 364
+        /// Interior margin between a panel edge and its content - the 40pt
+        /// the shortcuts sheet finally settled on after three margin fights.
+        static let margin: CGFloat = 40
+        /// Pop-up / put-away fade pair.
+        static let fadeIn: TimeInterval = 0.13
+        static let fadeOut: TimeInterval = 0.11
+    }
+}
