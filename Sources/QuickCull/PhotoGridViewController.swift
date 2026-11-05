@@ -377,6 +377,8 @@ final class PhotoGridViewController: NSViewController,
 
     private var allAssets: [PhotoAsset] = []
     private(set) var displayedAssets: [PhotoAsset] = []
+    /// Whole-folder ⌘F index. Rebuilt only when `allAssets` is replaced.
+    private(set) var folderSearchIndex = FolderSearchIndex(photos: [])
     /// Stars filter as a THRESHOLD (click the 3rd star = 3★ & up, like
     /// Lightroom) because ratings are a scale; colors multi-select because
     /// labels are categories. nil / empty = no filter.
@@ -1001,6 +1003,7 @@ final class PhotoGridViewController: NSViewController,
                 } else {
                     self.allAssets = self.sorted(result.assets)
                 }
+                self.rebuildSearchIndex()
                 self.scanMS = result.elapsed * 1000
                 self.pairedHidden = result.pairedJPEGCount
                 self.captureDates = [:]
@@ -1122,6 +1125,7 @@ final class PhotoGridViewController: NSViewController,
 
     private func resort(keepSelection: Bool) {
         allAssets = sorted(allAssets)
+        rebuildSearchIndex()
         applyFilter(keepSelection: keepSelection)
     }
 
@@ -1811,10 +1815,19 @@ final class PhotoGridViewController: NSViewController,
         if let asset = selectedAsset { onSelectionChanged?(asset) }
     }
 
-    /// (index, filename) pairs for the ⌘F palette - visible photos only,
-    /// so a jump target is always somewhere the grid can actually go.
-    func searchablePhotos() -> [(Int, String)] {
-        displayedAssets.enumerated().map { ($0.offset, $0.element.filename) }
+    private func rebuildSearchIndex() {
+        folderSearchIndex = FolderSearchIndex(photos: allAssets.map { ($0.id, $0.filename) })
+    }
+
+    /// Jump to a ⌘F hit. The index is the whole folder, so a photo hidden
+    /// by the color, star, or reject filter is brought back first.
+    func revealSearchHit(_ id: String) {
+        guard allAssets.contains(where: { $0.id == id }) else { return }
+        if displayedAssets.firstIndex(where: { $0.id == id }) == nil {
+            clearAllFilters(nil)
+        }
+        guard let index = displayedAssets.firstIndex(where: { $0.id == id }) else { return }
+        select(index: index)
     }
 
     func select(index: Int) {

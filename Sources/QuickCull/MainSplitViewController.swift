@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Window layout: folder tree | contact sheet. (The metadata inspector is
 /// the third column in the mockup; it joins in milestone 2.)
@@ -16,8 +17,8 @@ final class MainSplitViewController: NSSplitViewController {
         guard previewOverlay == nil, surveyOverlay == nil, searchPalette == nil,
               let container = view.window?.contentView else { return }
         let palette = SearchPaletteView(frame: container.bounds)
-        palette.photoSource = { [weak self] in self?.grid.searchablePhotos() ?? [] }
-        palette.onJumpToPhoto = { [weak self] index in self?.grid.select(index: index) }
+        palette.photoSource = { [weak self] in self?.grid.folderSearchIndex ?? FolderSearchIndex(photos: []) }
+        palette.onJumpToPhoto = { [weak self] id in self?.grid.revealSearchHit(id) }
         palette.onOpenFolder = { [weak self] url, newTab in
             self?.tabs.open(url, inNewTab: newTab)
             self?.sidebar.reveal(url)   // the tree shows where you landed

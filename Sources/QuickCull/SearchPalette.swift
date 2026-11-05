@@ -1,10 +1,12 @@
 import AppKit
+import QuickCullCore
 
 /// ⌘F - the Spotlight-style palette. No persistent search bar (chrome you
 /// aren't using), no catalog (the filesystem stays the only truth). One
 /// field, two kinds of answers:
-///   · photos in the CURRENT folder - "6954" jumps to MWP36954.CR3 (clients
-///     reference gallery frame numbers; suffix digits are the hero match)
+///   · photos in the CURRENT folder, the whole folder, not the filtered
+///     grid - "6954" jumps to MWP36954.CR3 (clients reference gallery frame
+///     numbers; suffix digits are the hero match)
 ///   · folders ANYWHERE - instant hits from places you've been (MRU, tabs),
 ///     then async hits from Spotlight's own index (NSMetadataQuery - we
 ///     borrow the OS's index rather than building one).
@@ -13,15 +15,15 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     // MARK: results
 
     enum Result {
-        case photo(index: Int, name: String)
+        case photo(id: String, name: String)
         case folder(url: URL, detail: String)
     }
 
-    var onJumpToPhoto: ((Int) -> Void)?
+    var onJumpToPhoto: ((String) -> Void)?
     var onOpenFolder: ((URL, _ newTab: Bool) -> Void)?
     var onDismiss: (() -> Void)?
-    /// Supplied by the grid each time the palette opens.
-    var photoSource: (() -> [(Int, String)])?
+    /// The active folder's full index. Rebuilt when that folder's file list changes.
+    var photoSource: (() -> FolderSearchIndex)?
 
     private let panel = NSView()
     private let field = NSTextField()
@@ -180,27 +182,14 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             return
         }
 
-        // 1. Photos in the current folder - suffix-digit matches first.
-        let q = query.lowercased()
-        let qIsDigits = !q.isEmpty && q.allSatisfy(\.isNumber)
-        var photoHits: [(Int, String, Int)] = []   // (index, name, rank)
-        for (index, name) in photoSource?() ?? [] {
-            let lower = name.lowercased()
-            let stem = (lower as NSString).deletingPathExtension
-            if qIsDigits {
-                if stem.hasSuffix(q) { photoHits.append((index, name, 0)) }
-                else if stem.contains(q) { photoHits.append((index, name, 1)) }
-            } else if lower.contains(q) {
-                photoHits.append((index, name, stem.hasPrefix(q) ? 0 : 1))
-            }
-        }
-        photoHits.sort { ($0.2, $0.0) < ($1.2, $1.0) }
-        for (index, name, _) in photoHits.prefix(5) {
-            results.append(.photo(index: index, name: name))
+        // 1. Photos in the current folder. The index is already folded.
+        let q = FolderSearchIndex.fold(query)
+        for hit in (photoSource?() ?? FolderSearchIndex(photos: [])).hits(query: query, limit: 8) {
+            results.append(.photo(id: hit.id, name: hit.name))
         }
 
         // 2. Folders you've been to - instant.
-        for url in Self.recents() where url.lastPathComponent.lowercased().contains(q) {
+        for url in Self.recents() where FolderSearchIndex.fold(url.lastPathComponent).contains(q) {
             if results.count >= 11 { break }
             results.append(.folder(url: url, detail: shortPath(url)))
         }
@@ -349,9 +338,9 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     private func activate(_ index: Int, newTab: Bool) {
         guard index < results.count else { return }
         switch results[index] {
-        case .photo(let photoIndex, _):
+        case .photo(let id, _):
             dismiss()
-            onJumpToPhoto?(photoIndex)
+            onJumpToPhoto?(id)
         case .folder(let url, _):
             dismiss()
             onOpenFolder?(url, newTab)
