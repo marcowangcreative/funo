@@ -186,12 +186,18 @@ final class MainSplitViewController: NSSplitViewController {
 
         sidebar.onSelectFolder = { [weak self] url in
             guard let self, !FileOpProgress.shared.isActive else { return }
-            self.tabs.open(url, inNewTab: false)
+            self.tabs.open(url, inNewTab: true)
         }
 
         sidebar.onOpenFolderInNewTab = { [weak self] url in
             guard let self, self.previewOverlay == nil, self.surveyOverlay == nil else { return }
             self.tabs.open(url, inNewTab: true)
+        }
+
+        sidebar.onOpenFolderInPlace = { [weak self] url in
+            guard let self, !FileOpProgress.shared.isActive else { return }
+            guard self.previewOverlay == nil, self.surveyOverlay == nil else { return }
+            self.tabs.openInActiveTab(url)
         }
 
         sidebar.onFilesMoved = { [weak self] count, destination in
@@ -247,13 +253,6 @@ final class MainSplitViewController: NSSplitViewController {
     // Called from the Edit menu (AppDelegate).
     func selectAllPhotos() { grid.selectAllVisible() }
     func deselectAllPhotos() { grid.deselectAll() }
-
-    /// Edit ▸ Select by Color Label, and ⌘⇧1–5 / ⌘⇧0. Works on the grid
-    /// even while the preview is up — the preview holds its own copy of the
-    /// working set, and the contact sheet is what this command selects.
-    func selectByColorLabel(_ label: Int) {
-        grid.selectByColorLabel(label)
-    }
     func trashSelection() { grid.trashSelection() }
 
     func copyPhotos() {

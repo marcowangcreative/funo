@@ -307,31 +307,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let deselectItem = NSMenuItem(title: "Deselect All", action: #selector(deselectAllPhotos(_:)), keyEquivalent: "d")
         deselectItem.target = self
         editMenu.addItem(deselectItem)
-
-        // Photo Mechanic's "select by color class": keep only one label.
-        // ⌘1–⌘9 belong to tabs, so the shifted number keys are the cull
-        // selection. ⌘⇧0 is unlabeled. Bare 1–5 still SET the label.
-        let selectColorMenu = NSMenu()
-        for label in 1...5 {
-            let item = NSMenuItem(title: Theme.labelNames[label],
-                                  action: #selector(selectByColorLabel(_:)),
-                                  keyEquivalent: "\(label)")
-            item.keyEquivalentModifierMask = [.command, .shift]
-            item.target = self
-            item.tag = label
-            selectColorMenu.addItem(item)
-        }
-        selectColorMenu.addItem(.separator())
-        let unlabeled = NSMenuItem(title: "Unlabeled",
-                                   action: #selector(selectByColorLabel(_:)),
-                                   keyEquivalent: "0")
-        unlabeled.keyEquivalentModifierMask = [.command, .shift]
-        unlabeled.target = self
-        unlabeled.tag = 0
-        selectColorMenu.addItem(unlabeled)
-        let selectColorRoot = NSMenuItem(title: "Select by Color Label", action: nil, keyEquivalent: "")
-        selectColorRoot.submenu = selectColorMenu
-        editMenu.addItem(selectColorRoot)
         editMenuItem.submenu = editMenu
 
         // View menu - navigation + photo surround
@@ -532,12 +507,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func deselectAllPhotos(_ sender: Any?) {
         mainController.deselectAllPhotos()
-    }
-
-    @objc private func selectByColorLabel(_ sender: NSMenuItem) {
-        // A text field owns ⌘⇧-digits while someone is typing (rename).
-        guard activeTextEditor == nil else { return }
-        mainController.selectByColorLabel(sender.tag)
     }
 
     @objc private func trashSelection(_ sender: Any?) {

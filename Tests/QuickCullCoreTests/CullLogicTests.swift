@@ -168,3 +168,118 @@ final class ThumbnailDeliveryTests: XCTestCase {
         XCTAssertFalse(ThumbnailDelivery.shouldPublish(pendingOpIsSelf: false))
     }
 }
+
+final class ColorLabelFilterTests: XCTestCase {
+
+    func testEmptyFilterShowsEveryLabel() {
+        for label in 0...5 {
+            XCTAssertTrue(ColorLabelFilter.shows(label: label, active: []))
+        }
+    }
+
+    func testActiveSetIsOR() {
+        let active: Set<Int> = [1, 4]
+        XCTAssertTrue(ColorLabelFilter.shows(label: 1, active: active))
+        XCTAssertTrue(ColorLabelFilter.shows(label: 4, active: active))
+        XCTAssertFalse(ColorLabelFilter.shows(label: 2, active: active))
+        XCTAssertFalse(ColorLabelFilter.shows(label: 0, active: active))
+    }
+
+    func testToggleAddsThenRemovesBackToAll() {
+        var active: Set<Int> = []
+        active = ColorLabelFilter.toggle(1, in: active)
+        XCTAssertEqual(active, [1])
+        active = ColorLabelFilter.toggle(3, in: active)
+        XCTAssertEqual(active, [1, 3])
+        active = ColorLabelFilter.toggle(1, in: active)
+        XCTAssertEqual(active, [3])
+        active = ColorLabelFilter.toggle(3, in: active)
+        XCTAssertTrue(active.isEmpty)
+        XCTAssertTrue(ColorLabelFilter.shows(label: 2, active: active))
+    }
+
+    func testUnlabeledIsItsOwnClass() {
+        let active = ColorLabelFilter.toggle(0, in: [])
+        XCTAssertTrue(ColorLabelFilter.shows(label: 0, active: active))
+        XCTAssertFalse(ColorLabelFilter.shows(label: 1, active: active))
+    }
+}
+
+final class FolderTabPolicyTests: XCTestCase {
+
+    private func tabs(_ paths: [String?]) -> [FolderTabPolicy.Tab] {
+        paths.map { FolderTabPolicy.Tab(path: $0) }
+    }
+
+    func testAlreadyOpenFolderIsFocused() {
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/a",
+            tabs: tabs(["/shoots/a", "/shoots/b"]),
+            activeIndex: 1,
+            replacingActive: false
+        )
+        XCTAssertEqual(action, .focusExisting(0))
+    }
+
+    func testEmptyActiveTabIsFilled() {
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/a",
+            tabs: tabs([nil]),
+            activeIndex: 0,
+            replacingActive: false
+        )
+        XCTAssertEqual(action, .fillActive)
+    }
+
+    func testDifferentFolderSpawnsATab() {
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/b",
+            tabs: tabs(["/shoots/a"]),
+            activeIndex: 0,
+            replacingActive: false
+        )
+        XCTAssertEqual(action, .spawn)
+    }
+
+    func testReplaceStaysInTheActiveTab() {
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/b",
+            tabs: tabs(["/shoots/a", "/shoots/c"]),
+            activeIndex: 0,
+            replacingActive: true
+        )
+        XCTAssertEqual(action, .fillActive)
+    }
+
+    func testReplaceStillDedupesAnOpenFolder() {
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/c",
+            tabs: tabs(["/shoots/a", "/shoots/c"]),
+            activeIndex: 0,
+            replacingActive: true
+        )
+        XCTAssertEqual(action, .focusExisting(1))
+    }
+
+    func testCapReusesTheOldestBackgroundTab() {
+        let paths = (0..<12).map { "/shoots/\($0)" }
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/new",
+            tabs: tabs(paths),
+            activeIndex: 5,
+            replacingActive: false
+        )
+        XCTAssertEqual(action, .reuseOldestBackground(0))
+    }
+
+    func testCapSkipsTheActiveTabWhenItIsTheOldest() {
+        let paths = (0..<12).map { "/shoots/\($0)" }
+        let action = FolderTabPolicy.decide(
+            opening: "/shoots/new",
+            tabs: tabs(paths),
+            activeIndex: 0,
+            replacingActive: false
+        )
+        XCTAssertEqual(action, .reuseOldestBackground(1))
+    }
+}

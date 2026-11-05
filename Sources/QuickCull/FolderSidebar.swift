@@ -88,6 +88,8 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
     var onSelectFolder: ((URL) -> Void)?
     var onOpenFolderInNewTab: ((URL) -> Void)?
+    /// ⌥-click and keyboard: load into the current tab instead of spawning one.
+    var onOpenFolderInPlace: ((URL) -> Void)?
     /// Fired after photos are dropped onto a folder (count, destination).
     var onFilesMoved: ((Int, URL) -> Void)?
 
@@ -448,14 +450,21 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         if let event = NSApp.currentEvent, event.type == .rightMouseDown {
             return
         }
-        // ⌘-click a folder → open it in a new tab (browser convention).
-        // Keyboard selection changes (arrows) never spawn tabs.
+        // A click opens a tab (the previous folder stays put). ⌥-click and
+        // keyboard moves (arrows) load into the tab you're already in, so
+        // walking the tree doesn't mint a tab per row. ⌘-click is the same
+        // as a plain click now; the menu still has both.
         if let event = NSApp.currentEvent,
-           event.type == .leftMouseDown || event.type == .leftMouseUp,
-           event.modifierFlags.contains(.command) {
-            onOpenFolderInNewTab?(node.url)
+           event.type == .leftMouseDown || event.type == .leftMouseUp {
+            if event.modifierFlags.contains(.option), !event.modifierFlags.contains(.command) {
+                onOpenFolderInPlace?(node.url)
+            } else if event.modifierFlags.contains(.command) {
+                onOpenFolderInNewTab?(node.url)
+            } else {
+                onSelectFolder?(node.url)
+            }
         } else {
-            onSelectFolder?(node.url)
+            onOpenFolderInPlace?(node.url)
         }
     }
 
@@ -768,6 +777,11 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         onOpenFolderInNewTab?(node.url)
     }
 
+    @objc private func openInThisTab(_ sender: Any?) {
+        guard let node = clickedNode else { return }
+        onOpenFolderInPlace?(node.url)
+    }
+
     @objc private func toggleFavorite(_ sender: Any?) {
         guard let node = clickedNode else { return }
         var favs = favoritePaths
@@ -793,6 +807,10 @@ extension FolderSidebarViewController: NSMenuDelegate {
                                 action: #selector(openInNewTab(_:)), keyEquivalent: "")
         newTab.target = self
         menu.addItem(newTab)
+        let here = NSMenuItem(title: "Open in This Tab",
+                              action: #selector(openInThisTab(_:)), keyEquivalent: "")
+        here.target = self
+        menu.addItem(here)
         let fav = NSMenuItem(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
                              action: #selector(toggleFavorite(_:)), keyEquivalent: "")
         fav.target = self

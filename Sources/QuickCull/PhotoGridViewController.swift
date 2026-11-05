@@ -1209,8 +1209,8 @@ final class PhotoGridViewController: NSViewController,
                 case .atMost:  guard rating <= starThreshold else { return false }
                 }
             }
-            if !colorFilter.isEmpty {
-                guard colorFilter.contains(store.colorLabel(for: asset.id)) else { return false }
+            if !ColorLabelFilter.shows(label: store.colorLabel(for: asset.id), active: colorFilter) {
+                return false
             }
             return true
         }
@@ -1505,9 +1505,27 @@ final class PhotoGridViewController: NSViewController,
         flash("Selection cleared")
     }
 
-    /// Select by color label (Photo Mechanic's color class). A multi-selection
-    /// is narrowed to that label; otherwise every match in the current
-    /// filtered folder is selected. `label` 0 is unlabeled.
+    /// Toolbar / keyboard color filter. Toggles one label in the OR set.
+    /// Stars and rejects stay as they are. The last swatch turning off is All.
+    @discardableResult
+    private func toggleColorFilter(_ label: Int) -> Bool {
+        let next = ColorLabelFilter.toggle(label, in: colorFilter)
+        colorFilter = next
+        colorFilterBar.setSelection(next)
+        applyFilter(keepSelection: true)
+        if next.isEmpty {
+            flash("Showing all color labels")
+        } else {
+            let names = next.sorted().map { $0 == 0 ? "unlabeled" : Theme.labelNames[$0].lowercased() }
+            flash("Showing \(names.joined(separator: ", "))")
+        }
+        return true
+    }
+
+    /// Secondary to the view filter: select the photos that wear `label`
+    /// without hiding the rest. A multi-selection is narrowed to that label;
+    /// otherwise every match in the current filtered folder is selected.
+    /// `label` 0 is unlabeled.
     func selectByColorLabel(_ label: Int) {
         let displayed = displayedAssets.map {
             ColorLabelSelection.Photo(id: $0.id, label: RatingsStore.shared.colorLabel(for: $0.id))
@@ -1992,6 +2010,12 @@ final class PhotoGridViewController: NSViewController,
             // Unlabel - clears the color outright (vs. re-pressing its key).
             applyToSelection(advance: false) { RatingsStore.shared.setColorLabel(0, for: $0) }
             return true
+        case "6": return toggleColorFilter(1)
+        case "7": return toggleColorFilter(2)
+        case "8": return toggleColorFilter(3)
+        case "9": return toggleColorFilter(4)
+        case "p": return toggleColorFilter(5)
+        case "n": return toggleColorFilter(0)
         case "[", "]":
             // Photo Mechanic muscle memory: [ rotates CCW, ] rotates CW.
             rotateSelection(by: chars == "]" ? 90 : -90)
@@ -2091,12 +2115,12 @@ final class PhotoGridViewController: NSViewController,
         selectNone.target = self
         selectNone.tag = 0
         selectColorMenu.addItem(selectNone)
-        let selectColorRoot = NSMenuItem(title: "Select by Color Label", action: nil, keyEquivalent: "")
+        let selectColorRoot = NSMenuItem(title: "Select All with Label", action: nil, keyEquivalent: "")
         selectColorRoot.submenu = selectColorMenu
         menu.addItem(selectColorRoot)
         let clickedLabel = RatingsStore.shared.colorLabel(for: displayedAssets[ip.item].id)
         if clickedLabel > 0 {
-            let only = NSMenuItem(title: "Select Only \(Theme.labelNames[clickedLabel])",
+            let only = NSMenuItem(title: "Select All \(Theme.labelNames[clickedLabel])",
                                   action: #selector(menuSelectColor(_:)), keyEquivalent: "")
             only.target = self
             only.tag = clickedLabel

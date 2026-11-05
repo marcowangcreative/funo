@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Photo surround: the background photos are judged against. Chrome stays
 /// graphite; only the stage and contact-sheet backdrop change. 18% gray is
@@ -179,6 +180,7 @@ final class ColorFilterBar: NSView {
     var onChange: ((Set<Int>) -> Void)?
     private(set) var selected: Set<Int> = []
     private var buttons: [NSButton] = []
+    private let allButton = NSButton(title: "All", target: nil, action: nil)
     private var hovered: Int?
 
     init() {
@@ -195,6 +197,18 @@ final class ColorFilterBar: NSView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             heightAnchor.constraint(equalToConstant: 24)
         ])
+
+        // "All" is the unfiltered state (nothing hidden). A swatch hides
+        // every other label; more swatches add back (OR). All clears them.
+        allButton.target = self
+        allButton.action = #selector(allTapped(_:))
+        allButton.isBordered = false
+        allButton.setButtonType(.momentaryChange)
+        allButton.font = Theme.monoCaption
+        allButton.toolTip = "Show every color label"
+        allButton.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(allButton)
+
         // Ring-and-gap dots: an 18pt button whose border is the selection
         // ring, with the 12pt color dot inset as a sublayer - selecting
         // draws a ring *around* the dot with breathing room instead of
@@ -215,11 +229,11 @@ final class ColorFilterBar: NSView {
                 dot.backgroundColor = NSColor(white: 0.42, alpha: 1).cgColor
                 dot.borderColor = Theme.line.cgColor
                 dot.borderWidth = 1
-                b.toolTip = "Show photos with no color label"
+                b.toolTip = "Show only unlabeled photos (N). Click again to clear."
             } else {
                 dot.backgroundColor = Theme.labelColors[label].cgColor
                 let key = label == 5 ? "P" : "\(label + 5)"
-                b.toolTip = "Show \(Theme.labelNames[label].lowercased())-labeled (key \(key))"
+                b.toolTip = "Show only \(Theme.labelNames[label].lowercased()) (key \(key)). Click another color to include it."
             }
             b.layer?.addSublayer(dot)
             b.translatesAutoresizingMaskIntoConstraints = false
@@ -235,30 +249,42 @@ final class ColorFilterBar: NSView {
 
     @objc private func tapped(_ sender: NSButton) {
         // Multi-select: each dot toggles; selected colors combine as OR.
-        if selected.contains(sender.tag) {
-            selected.remove(sender.tag)
-        } else {
-            selected.insert(sender.tag)
-        }
-        restyle(animated: true)
-        onChange?(selected)
+        // The last one turning off is All — nothing is hidden.
+        setSelection(ColorLabelFilter.toggle(sender.tag, in: selected), notify: true)
+    }
+
+    @objc private func allTapped(_ sender: NSButton) {
+        guard !selected.isEmpty else { return }
+        setSelection([], notify: true)
     }
 
     /// Programmatic clear - does NOT fire onChange.
     func clear() {
         guard !selected.isEmpty else { return }
-        selected = []
+        setSelection([], notify: false)
+    }
+
+    /// Mirror an external change (keyboard). Does not call `onChange`.
+    func setSelection(_ labels: Set<Int>) {
+        setSelection(labels, notify: false)
+    }
+
+    private func setSelection(_ labels: Set<Int>, notify: Bool) {
+        selected = labels
         restyle(animated: true)
+        if notify { onChange?(selected) }
     }
 
     private func restyle(animated: Bool = false) {
         let apply = {
+            let showingAll = self.selected.isEmpty
+            self.allButton.contentTintColor = showingAll ? Theme.accent : Theme.tx2
             for b in self.buttons {
                 let on = self.selected.contains(b.tag)
                 b.layer?.borderWidth = on ? 1.5 : 0
                 b.layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
                 let target: CGFloat
-                if self.selected.isEmpty || on { target = 1.0 }
+                if showingAll || on { target = 1.0 }
                 else if b.tag == self.hovered { target = 0.7 }
                 else { target = 0.35 }
                 (animated ? b.animator() : b).alphaValue = target
