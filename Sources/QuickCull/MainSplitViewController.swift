@@ -18,10 +18,18 @@ final class MainSplitViewController: NSSplitViewController {
               let container = view.window?.contentView else { return }
         let palette = SearchPaletteView(frame: container.bounds)
         palette.photoSource = { [weak self] in self?.grid.folderSearchIndex ?? FolderSearchIndex(photos: []) }
+        palette.currentFolderPath = { [weak self] in self?.grid.currentFolderURL?.path }
         palette.onJumpToPhoto = { [weak self] id in self?.grid.revealSearchHit(id) }
         palette.onOpenFolder = { [weak self] url, newTab in
             self?.tabs.open(url, inNewTab: newTab)
             self?.sidebar.reveal(url)   // the tree shows where you landed
+        }
+        palette.onOpenFile = { [weak self] url in
+            guard let self else { return }
+            let folder = url.deletingLastPathComponent()
+            self.tabs.open(folder, inNewTab: true)
+            self.grid.armSearchSelection(url)
+            self.sidebar.reveal(folder)
         }
         palette.onDismiss = { [weak self] in
             self?.searchPalette = nil

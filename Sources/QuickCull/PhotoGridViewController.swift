@@ -974,6 +974,7 @@ final class PhotoGridViewController: NSViewController,
         onFolderChanged?(url)
 
         currentFolder = url
+        folderScanInFlight = true
         bannerView.isHidden = true
         watchFolder(url)
         lastSelfLoadAt = Date()
@@ -997,6 +998,7 @@ final class PhotoGridViewController: NSViewController,
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
                 guard let self, self.scanGeneration == generation else { return }
+                self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
                 if self.sortKey == .name {
                     self.allAssets = self.sortAscending ? result.assets : result.assets.reversed()
@@ -1180,16 +1182,9 @@ final class PhotoGridViewController: NSViewController,
                 ? (allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
                 : "")
 
-        if let pendingID = pendingSelectionID {
-            pendingSelectionID = nil
+        if pendingSelectionID != nil {
             pendingSelection = nil
-            if let index = displayedAssets.firstIndex(where: { $0.id == pendingID }) {
-                select(index: index)
-            } else if !displayedAssets.isEmpty {
-                select(index: 0)
-            } else {
-                onSelectionChanged?(nil)
-            }
+            takePendingSelection()
         } else if let pending = pendingSelection {
             pendingSelection = nil
             if !displayedAssets.isEmpty {
@@ -1777,6 +1772,72 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private var pendingSelectionID: String?
+    /// Folded filename stem for a drive-wide hit whose path may be the JPEG
+    /// of a RAW+JPEG pair. Nil means the id itself is the asset to select.
+    private var pendingSelectionStem: String?
+    /// True from the moment a folder scan is kicked off until its results land.
+    private var folderScanInFlight = false
+
+    /// Select this file once its folder is on screen. If a scan is already
+    /// running, the selection waits for that scan so we don't match the
+    /// previous folder's list.
+    func armSearchSelection(_ file: URL) {
+        pendingSelectionID = file.standardizedFileURL.path
+        pendingSelectionStem = FolderSearchIndex.fold(file.deletingPathExtension().lastPathComponent)
+        if !folderScanInFlight {
+            takePendingSelection()
+        }
+    }
+
+    private func displayedIndex(forID id: String, stem: String?) -> Int? {
+        let wanted = URL(fileURLWithPath: id).standardizedFileURL.path
+        if let exact = displayedAssets.firstIndex(where: {
+            $0.id == id || $0.url.standardizedFileURL.path == wanted
+        }) {
+            return exact
+        }
+        guard let stem, !stem.isEmpty else { return nil }
+        return displayedAssets.firstIndex {
+            FolderSearchIndex.fold($0.url.deletingPathExtension().lastPathComponent) == stem
+        }
+    }
+
+    private func assetID(forID id: String, stem: String?) -> String? {
+        let wanted = URL(fileURLWithPath: id).standardizedFileURL.path
+        if let exact = allAssets.first(where: {
+            $0.id == id || $0.url.standardizedFileURL.path == wanted
+        }) {
+            return exact.id
+        }
+        guard let stem, !stem.isEmpty else { return nil }
+        return allAssets.first {
+            FolderSearchIndex.fold($0.url.deletingPathExtension().lastPathComponent) == stem
+        }?.id
+    }
+
+    /// Consume a queued search/rename selection. A file hidden by the current
+    /// filter clears that filter and selects it.
+    private func takePendingSelection() {
+        guard let pendingID = pendingSelectionID else { return }
+        let stem = pendingSelectionStem
+        pendingSelectionID = nil
+        pendingSelectionStem = nil
+        if let index = displayedIndex(forID: pendingID, stem: stem) {
+            select(index: index)
+            return
+        }
+        if let resolved = assetID(forID: pendingID, stem: stem) {
+            pendingSelectionID = resolved
+            pendingSelectionStem = nil
+            clearAllFilters(nil)
+            return
+        }
+        if !displayedAssets.isEmpty {
+            select(index: 0)
+        } else {
+            onSelectionChanged?(nil)
+        }
+    }
 
     private func flash(_ text: String, duration: TimeInterval = 2.5, undoable: Bool = false) {
         pushStatus(text, undo: undoable)
@@ -2306,6 +2367,7 @@ final class PhotoGridViewController: NSViewController,
                 if skipped > 0 { message += " · \(skipped) skipped (name in use)" }
                 self.flashUndoable(message)
                 self.pendingSelectionID = firstNewID
+                self.pendingSelectionStem = nil
                 if let folder = self.currentFolder { self.loadFolder(folder) }
             }
         }
