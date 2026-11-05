@@ -261,6 +261,22 @@ public struct VolumeNameIndex: Equatable {
         }
     }
 
+    /// Rewrite every entry that lived in the moved folder. Used when this
+    /// process moved the folder, so an FSEvents rescan is not required.
+    public mutating func rekey(from: String, to: String, volumeName: String, volumeRoot: String) {
+        entries = entries.map { entry in
+            guard let path = SidebarRelocation.rekey(path: entry.path, from: from, to: to) else { return entry }
+            return VolumeNameEntry(
+                path: path,
+                isFolder: entry.isFolder,
+                depth: VolumeNameQuery.depth(of: path, volumeRoot: volumeRoot),
+                modified: entry.modified,
+                volumeName: volumeName,
+                volumeRoot: volumeRoot
+            )
+        }
+    }
+
     public mutating func upsert(_ entry: VolumeNameEntry) {
         if let index = entries.firstIndex(where: { $0.path == entry.path }) {
             entries[index] = entry

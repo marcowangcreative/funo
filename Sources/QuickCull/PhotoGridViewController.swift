@@ -962,6 +962,13 @@ final class PhotoGridViewController: NSViewController,
 
     // MARK: - Folder loading & filtering
 
+    /// The open folder, or a folder inside it, was moved. Rescan the new path.
+    func relocateOpenFolder(from: String, to: String) {
+        guard let current = currentFolder?.standardizedFileURL.path,
+              let rewritten = SidebarRelocation.rekey(path: current, from: from, to: to) else { return }
+        loadFolder(URL(fileURLWithPath: rewritten, isDirectory: true))
+    }
+
     func loadFolder(_ url: URL) {
         removeWelcome()
         // History: only genuine folder CHANGES push an entry - reloads of

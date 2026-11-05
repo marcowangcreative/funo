@@ -81,6 +81,13 @@ final class TabbedContactSheetController: NSViewController {
 
     /// Keyboard selection and ⌥-click: load into the tab you're in.
     /// Back/forward inside a tab does not come through here.
+    func relocateOpenFolders(from: String, to: String) {
+        guard !grids.isEmpty else { return }
+        for grid in grids { grid.relocateOpenFolder(from: from, to: to) }
+        refreshStrip()
+        onActiveFolderChanged?(activeGrid.currentFolderURL)
+    }
+
     func openInActiveTab(_ url: URL) {
         performOpen(url, replacingActive: true)
     }

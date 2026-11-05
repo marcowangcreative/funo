@@ -49,6 +49,16 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     // MARK: recents (zero-I/O folder layer)
 
     private static let mruKey = "FunoFolderMRU"
+    static func rewriteRecent(from: String, to: String) {
+        var seen = Set<String>()
+        var next: [String] = []
+        for path in UserDefaults.standard.stringArray(forKey: mruKey) ?? [] {
+            let rewritten = SidebarRelocation.rekey(path: path, from: from, to: to) ?? path
+            if seen.insert(rewritten).inserted { next.append(rewritten) }
+        }
+        UserDefaults.standard.set(next, forKey: mruKey)
+    }
+
     static func noteRecent(_ url: URL) {
         var mru = UserDefaults.standard.stringArray(forKey: mruKey) ?? []
         mru.removeAll { $0 == url.path }

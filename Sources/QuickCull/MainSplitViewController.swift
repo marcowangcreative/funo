@@ -212,6 +212,9 @@ final class MainSplitViewController: NSSplitViewController {
         sidebar.onFilesMoved = { [weak self] count, destination in
             self?.grid.noteFilesMoved(count: count, to: destination)
         }
+        sidebar.onFolderRelocated = { [weak self] from, to in
+            self?.tabs.relocateOpenFolders(from: from, to: to)
+        }
     }
 
     // MARK: - Tabs (File menu)

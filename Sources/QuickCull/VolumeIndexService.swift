@@ -33,6 +33,8 @@ final class VolumeIndexService {
     private var scansInFlight = 0
     private var started = false
     private var workspaceObservers: [NSObjectProtocol] = []
+    private let suppressLock = NSLock()
+    private var suppression = SelfCausedMoves()
 
     func start() {
         guard !started else { return }
@@ -49,6 +51,39 @@ final class VolumeIndexService {
             self.loadCache()
             self.publish()
             self.refreshVolumes()
+        }
+    }
+
+    /// The sidebar is about to move this folder itself. Events for either
+    /// path are ignored until `endSelfMove`, so a rescan cannot resurrect
+    /// the old row or insert a second copy of the new one.
+    func beginSelfMove(from: String, to: String) {
+        suppressLock.lock()
+        suppression.begin(SelfCausedMove(from: from, to: to))
+        suppressLock.unlock()
+    }
+
+    func endSelfMove(from: String) {
+        suppressLock.lock()
+        suppression.end(from: from)
+        suppressLock.unlock()
+    }
+
+    func hidesStalePath(_ path: String) -> Bool {
+        suppressLock.lock()
+        defer { suppressLock.unlock() }
+        return suppression.isStaleSource(path)
+    }
+
+    func rekey(from: String, to: String) {
+        let boot = bootVolumeName
+        indexQueue.async { [weak self] in
+            guard let self else { return }
+            let root = VolumeNameQuery.volumeRoot(of: to)
+            let name = VolumeNameQuery.volumeName(of: to, boot: boot)
+            self.index.rekey(from: from, to: to, volumeName: name, volumeRoot: root)
+            self.scheduleSave()
+            self.publish()
         }
     }
 
@@ -225,6 +260,7 @@ final class VolumeIndexService {
 
     private func ingest(paths: [String], flags: [FSEventStreamEventFlags]) {
         for (path, rawFlag) in zip(paths, flags) {
+            if involvesSelfMove(path) { continue }
             let flag = FSFlag(rawValue: UInt32(rawFlag))
             if flag.contains(.itemIsSymlink) { continue }
             if flag.contains(.itemRemoved) {
@@ -334,6 +370,12 @@ final class VolumeIndexService {
         if scansInFlight == 0 {
             DispatchQueue.main.async { self.isScanning = false }
         }
+    }
+
+    private func involvesSelfMove(_ path: String) -> Bool {
+        suppressLock.lock()
+        defer { suppressLock.unlock() }
+        return suppression.involves(path)
     }
 
     private func publish() {
