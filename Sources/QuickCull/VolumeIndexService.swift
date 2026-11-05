@@ -190,6 +190,11 @@ final class VolumeIndexService {
         let keySet = Set(keys)
         var entries: [VolumeNameEntry] = []
         while let item = enumerator.nextObject() as? URL {
+            if entries.count.isMultiple(of: 32) {
+                while WorkRunner.shared.scheduler.backgroundShouldYield {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            }
             let url = item.standardizedFileURL
             let name = url.lastPathComponent
             let values = try? url.resourceValues(forKeys: keySet)

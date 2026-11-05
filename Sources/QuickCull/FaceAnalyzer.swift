@@ -165,30 +165,20 @@ final class FaceAnalyzer {
     /// Bumped from v9: v9 persisted a failed decode as "zero faces", and the
     /// panel then hid until Rescan. v10 is only written for a real decode.
     private static let cacheSuffix = "|faces-v10"
-    private let queue: OperationQueue
     private var generation = 0
     private var done = 0
     private(set) var total = 0
 
     /// Pending operations by asset id - lets the UI bump the photo the user
     /// is actually looking at to the front of the queue.
-    private var pendingOps: [String: Operation] = [:] // main thread only
-
-    private init() {
-        // Serial: one lane can never crowd the decode queues. .utility (not
-        // .background) so macOS doesn't starve it indefinitely under load -
-        // "the scan never happens" was background-QoS starvation.
-        queue = OperationQueue()
-        queue.name = "quickcull.faceanalysis"
-        queue.maxConcurrentOperationCount = 1
-        queue.qualityOfService = .utility
-    }
+    private final class FaceTicket { var job = 0 }
+    private var pendingOps: [String: FaceTicket] = [:] // main thread only
 
     var isScanning: Bool { total > 0 && done < total }
 
     /// The user is looking at this photo - analyze it next.
     func prioritize(_ id: String) {
-        pendingOps[id]?.queuePriority = .veryHigh
+        if let job = pendingOps[id]?.job { WorkRunner.shared.setLane(job, .selected) }
     }
 
     func result(for id: String) -> FaceAnalysis? { results[id] }
@@ -217,7 +207,7 @@ final class FaceAnalyzer {
     /// Testing aid: forget every in-memory verdict.
     func clearResults() {
         generation += 1
-        queue.cancelAllOperations()
+        WorkRunner.shared.cancel(group: "faces")
         pendingOps.removeAll()
         results.removeAll()
         ledger = FaceResultLedger(maxFailures: 3)
@@ -239,7 +229,7 @@ final class FaceAnalyzer {
         set {
             UserDefaults.standard.set(newValue, forKey: "QuickCullShowFaces")
             if !newValue {
-                queue.cancelAllOperations()
+                WorkRunner.shared.cancel(group: "faces")
                 done = 0
                 total = 0
                 notifyProgress()
@@ -252,7 +242,7 @@ final class FaceAnalyzer {
     func analyzeFolder(_ assets: [PhotoAsset]) {
         generation += 1
         let gen = generation
-        queue.cancelAllOperations()
+        WorkRunner.shared.cancel(group: "faces")
         pendingOps.removeAll()
         guard isEnabled else {
             done = 0
@@ -306,9 +296,15 @@ final class FaceAnalyzer {
         guard gen == generation, results[asset.id] == nil, pendingOps[asset.id] == nil else { return }
         let id = asset.id
         let url = asset.url
-        let op = BlockOperation()
-        op.addExecutionBlock { [weak self, weak op] in
-            guard let self, let op, !op.isCancelled else { return }
+        let ticket = FaceTicket()
+        pendingOps[id] = ticket
+        let place = WorkRunner.shared.classify(url)
+        WorkRunner.shared.submit(
+            group: "faces", name: url.lastPathComponent, lane: .background,
+            volume: place.volume, pace: .slow, generation: gen,
+            onQueued: { ticket.job = $0 }
+        ) { [weak self] isCancelled in
+            guard let self, !isCancelled() else { return }
             let cacheKey = CacheDB.identity(for: url).map { $0 + Self.cacheSuffix }
             var analysis: FaceAnalysis?
             if let cacheKey, let data = CacheDB.shared.get(cacheKey) {
@@ -349,8 +345,6 @@ final class FaceAnalyzer {
                 self.notifyProgress()
             }
         }
-        pendingOps[id] = op
-        queue.addOperation(op)
     }
 
     // MARK: - The actual analysis (background thread)

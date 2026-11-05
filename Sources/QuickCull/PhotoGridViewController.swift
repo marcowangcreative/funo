@@ -399,6 +399,10 @@ final class PhotoGridViewController: NSViewController,
         var seconds: TimeInterval
         var subsecMillis: Int
     }
+
+    private final class CaptureReadBatch {
+        var records: [CaptureDateRecord] = []
+    }
     private var captureTimes: [String: CaptureStamp] = [:]
     private var currentFolder: URL?
 
@@ -1023,10 +1027,13 @@ final class PhotoGridViewController: NSViewController,
         openingStatusWork = openingWork
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: openingWork)
 
+        WorkRunner.shared.setFolderLoading(true)
+        WorkRunner.shared.cancel(group: "thumb")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
                 guard let self, self.folderLoad.accepts(generation) else { return }
+                WorkRunner.shared.setFolderLoading(false)
                 self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
                 self.captureTimes = [:]
@@ -1070,74 +1077,83 @@ final class PhotoGridViewController: NSViewController,
     /// culls done elsewhere show up here.
     private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
         guard !assets.isEmpty else { return }
+        WorkRunner.shared.cancel(group: "exif")
         let started = Date()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let cached = CaptureDateStore.shared.snapshot()
-            var stamps: [String: CaptureStamp] = [:]
+            var hits: [String: CaptureStamp] = [:]
             var misses: [PhotoAsset] = []
-            stamps.reserveCapacity(assets.count)
             for asset in assets {
                 let values = try? asset.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 let size = Int64(values?.fileSize ?? 0)
                 let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
                 if let record = cached.record(path: asset.url.path, size: size, mtime: mtime) {
-                    stamps[asset.id] = CaptureStamp(hasDate: record.hasDate, seconds: record.seconds,
-                                                    subsecMillis: record.subsecMillis)
+                    hits[asset.id] = CaptureStamp(hasDate: record.hasDate, seconds: record.seconds,
+                                                  subsecMillis: record.subsecMillis)
                 } else {
                     misses.append(asset)
                 }
             }
-            let pool = OperationQueue()
-            pool.maxConcurrentOperationCount = 6
-            pool.qualityOfService = .userInitiated
-            let lock = NSLock()
-            var fresh: [CaptureDateRecord] = []
-            var done = stamps.count
-            let total = assets.count
-            let group = DispatchGroup()
-            for asset in misses {
-                group.enter()
-                pool.addOperation {
-                    let read = FolderScanner.readCapture(asset.url)
-                    let identity = CaptureDateCache.identity(path: asset.url.path, size: read.size, mtime: read.mtime)
-                    let record = CaptureDateRecord(identity: identity, hasDate: read.hasDate,
-                                                   seconds: read.seconds, subsecMillis: read.subsecMillis)
-                    let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds, subsecMillis: read.subsecMillis)
-                    lock.lock()
-                    stamps[asset.id] = stamp
-                    fresh.append(record)
-                    done += 1
-                    let report = done
-                    lock.unlock()
-                    if report == total || report % 250 == 0 {
-                        DispatchQueue.main.async {
-                            guard let self, self.folderLoad.accepts(generation) else { return }
-                            self.captureReadDone = report
-                            self.captureReadTotal = total
-                            self.updateStatus()
-                        }
-                    }
-                    group.leave()
-                }
-            }
-            group.wait()
-            pool.waitUntilAllOperationsAreFinished()
-            CaptureDateStore.shared.merge(fresh)
-            let elapsed = Date().timeIntervalSince(started)
-            let finished = stamps
-            NSLog("funo: capture times %.0f ms for %d files", elapsed * 1000, total)
             DispatchQueue.main.async {
                 guard let self, self.folderLoad.accepts(generation) else { return }
-                self.captureTimes = finished
-                self.captureReady = true
-                self.captureReadInFlight = false
-                self.captureReadDone = total
-                if self.sortKey == .capture {
-                    self.resort(keepSelection: true)
+                self.captureTimes = hits
+                self.captureReadDone = hits.count
+                self.captureReadTotal = assets.count
+                if misses.isEmpty {
+                    self.finishCaptureRead(generation: generation, started: started)
+                    return
                 }
-                self.updateStatus()
+                let batch = CaptureReadBatch()
+                for asset in misses {
+                    let place = WorkRunner.shared.classify(asset.url)
+                    WorkRunner.shared.submit(
+                        group: "exif", name: asset.filename, lane: .prefetch,
+                        volume: place.volume, pace: place.pace, generation: generation
+                    ) { isCancelled in
+                        if isCancelled() {
+                            DispatchQueue.main.async {
+                                self.noteCapturePiece(generation: generation, id: asset.id, stamp: nil,
+                                                      record: nil, batch: batch, started: started, total: assets.count)
+                            }
+                            return
+                        }
+                        let read = FolderScanner.readCapture(asset.url)
+                        let identity = CaptureDateCache.identity(path: asset.url.path, size: read.size, mtime: read.mtime)
+                        let record = CaptureDateRecord(identity: identity, hasDate: read.hasDate,
+                                                       seconds: read.seconds, subsecMillis: read.subsecMillis)
+                        let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds, subsecMillis: read.subsecMillis)
+                        DispatchQueue.main.async {
+                            self.noteCapturePiece(generation: generation, id: asset.id, stamp: stamp,
+                                                  record: record, batch: batch, started: started, total: assets.count)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private func noteCapturePiece(generation: Int, id: String, stamp: CaptureStamp?, record: CaptureDateRecord?,
+                                  batch: CaptureReadBatch, started: Date, total: Int) {
+        guard folderLoad.accepts(generation) else { return }
+        if let stamp { captureTimes[id] = stamp }
+        if let record { batch.records.append(record) }
+        captureReadDone += 1
+        if captureReadDone % 250 == 0 { updateStatus() }
+        if captureReadDone >= total {
+            CaptureDateStore.shared.merge(batch.records)
+            finishCaptureRead(generation: generation, started: started)
+        }
+    }
+
+    private func finishCaptureRead(generation: Int, started: Date) {
+        guard folderLoad.accepts(generation) else { return }
+        captureReady = true
+        captureReadInFlight = false
+        NSLog("funo: capture times %.0f ms for %d files", Date().timeIntervalSince(started) * 1000, captureReadTotal)
+        if sortKey == .capture {
+            resort(keepSelection: true)
+        }
+        updateStatus()
     }
 
     /// Foreign sidecar ratings (Lightroom / Photo Mechanic culls) stream in

@@ -216,6 +216,31 @@ final class RatingsStore {
     /// old value can land after the new one.
     private let xmpQueue = DispatchQueue(label: "quickcull.xmpflush", qos: .utility)
 
+    /// Four writers, not one thread per file. `concurrentPerform` on a few
+    /// thousand sidecars opened a thread per file and stuck the rest of the
+    /// background work.
+    private func writeSidecars(_ batch: [(String, Int?, Int?, Int)]) {
+        let pool = OperationQueue()
+        pool.name = "quickcull.xmp.parallel"
+        pool.maxConcurrentOperationCount = 4
+        pool.qualityOfService = .utility
+        for (id, rating, label, rotationDegrees) in batch {
+            pool.addOperation {
+                let url = URL(fileURLWithPath: id)
+                guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
+                      FileManager.default.fileExists(atPath: url.path) else { return }
+                var orientation: Int?
+                if rotationDegrees != 0 {
+                    orientation = XMPSidecar.orientationCode(
+                        containerOrientation: ImageTransform.containerOrientation(of: url),
+                        plusDegreesCW: rotationDegrees)
+                }
+                _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
+            }
+        }
+        pool.waitUntilAllOperationsAreFinished()
+    }
+
     private func markXMPDirty(_ id: String) {
         xmpDirty.insert(id)
         guard !xmpFlushScheduled else { return }
@@ -239,21 +264,7 @@ final class RatingsStore {
                 // parallel - distinct file per id, no shared mutable state
                 // (same verification as flushXMPNow). REVERT to the serial
                 // for-loop first if sidecar writes ever race.
-                DispatchQueue.concurrentPerform(iterations: batch.count) { i in
-                    let (id, rating, label, rotationDegrees) = batch[i]
-                    let url = URL(fileURLWithPath: id)
-                    // Sidecars for RAW files only - Lightroom ignores JPEG
-                    // sidecars, and we never rewrite originals.
-                    guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
-                          FileManager.default.fileExists(atPath: url.path) else { return }
-                    var orientation: Int?
-                    if rotationDegrees != 0 {
-                        orientation = XMPSidecar.orientationCode(
-                            containerOrientation: ImageTransform.containerOrientation(of: url),
-                            plusDegreesCW: rotationDegrees)
-                    }
-                    _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
-                }
+                self.writeSidecars(batch)
                 // ===== END BOOKMARK =====
                 DispatchQueue.main.async {
                     self.xmpInFlight.subtract(batch.map { $0.0 })
@@ -287,19 +298,7 @@ final class RatingsStore {
         // SYNCHRONOUS (concurrentPerform blocks until every write lands, which
         // both quit and the Lightroom hand-off rely on).
         // IF SIDECAR WRITES EVER MISBEHAVE UNDER LOAD, REVERT TO THE SERIAL LOOP.
-        DispatchQueue.concurrentPerform(iterations: batch.count) { i in
-            let (id, rating, label, rotationDegrees) = batch[i]
-            let url = URL(fileURLWithPath: id)
-            guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
-                  FileManager.default.fileExists(atPath: url.path) else { return }
-            var orientation: Int?
-            if rotationDegrees != 0 {
-                orientation = XMPSidecar.orientationCode(
-                    containerOrientation: ImageTransform.containerOrientation(of: url),
-                    plusDegreesCW: rotationDegrees)
-            }
-            _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
-        }
+        writeSidecars(batch)
         // ===== END BOOKMARK =====
         NSLog("[quit] wrote %d final pending sidecars in %.0f ms", batch.count, Date().timeIntervalSince(tWrite) * 1000)
     }
@@ -326,19 +325,7 @@ final class RatingsStore {
         DispatchQueue.global(qos: .userInitiated).async {
             self.xmpQueue.sync {}   // drain any in-flight background flush first
             if !batch.isEmpty {
-                DispatchQueue.concurrentPerform(iterations: batch.count) { i in
-                    let (id, rating, label, rotationDegrees) = batch[i]
-                    let url = URL(fileURLWithPath: id)
-                    guard PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased()),
-                          FileManager.default.fileExists(atPath: url.path) else { return }
-                    var orientation: Int?
-                    if rotationDegrees != 0 {
-                        orientation = XMPSidecar.orientationCode(
-                            containerOrientation: ImageTransform.containerOrientation(of: url),
-                            plusDegreesCW: rotationDegrees)
-                    }
-                    _ = XMPSidecar.write(rating: rating, label: label, orientation: orientation, for: url)
-                }
+                self.writeSidecars(batch)
             }
             if let snap, let data = try? JSONEncoder().encode(snap) {
                 try? data.write(to: dest, options: .atomic)
