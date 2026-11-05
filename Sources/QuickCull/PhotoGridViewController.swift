@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Item view that reports double-clicks without disturbing the collection
 /// view's normal click-to-select machinery.
@@ -43,18 +44,69 @@ final class CullCollectionView: NSCollectionView {
 /// of NSImageView - pure GPU compositing, cheaper on fast scroll. .resizeAspect
 /// fits the WHOLE frame (no crop), matching the old scaleProportionallyDown.
 private final class GridThumbView: NSView {
+    private var image: NSImage?
+    /// The NSImage currently sitting in the layer. Re-assigning the same
+    /// buffer (every label/selection refresh) flashed the card.
+    private var displayedImage: NSImage?
+    /// False until the cell has been given a real frame. A contents assign
+    /// made while bounds are empty never appears once the frame arrives.
+    private var wasLaidOut = false
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        layerContentsRedrawPolicy = .never
         layer?.contentsGravity = .resizeAspect
+        layer?.contentsScale = 2
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let scale = window?.backingScaleFactor ?? 2
+        guard layer?.contentsScale != scale else { return }
+        layer?.contentsScale = scale
+        displayedImage = nil
+        applyContents()
+    }
+
     func setImage(_ image: NSImage?) {
-        guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            layer?.contents = nil
+        self.image = image
+        applyContents()
+    }
+
+    /// True when the cell has nothing to draw — the repair pass uses this
+    /// to re-request a thumb the collection view dropped on the floor.
+    var contentsMissing: Bool { layer?.contents == nil }
+
+    override func layout() {
+        super.layout()
+        let ready = bounds.width > 1 && bounds.height > 1
+        if ready, !wasLaidOut {
+            wasLaidOut = true
+            displayedImage = nil
+            applyContents()
+        } else if !ready {
+            wasLaidOut = false
+        }
+    }
+
+    private func applyContents() {
+        guard let image else {
+            displayedImage = nil
+            QuickCullImage.setContents(nil, of: layer)
             return
         }
-        layer?.contents = cg
+        if displayedImage === image, layer?.contents != nil { return }
+        guard let cg = image.quickCullCGImage() else {
+            // Extraction failed: drop whatever was showing rather than leave
+            // the previous photo in the cell.
+            displayedImage = nil
+            QuickCullImage.setContents(nil, of: layer)
+            return
+        }
+        QuickCullImage.setContents(cg, of: layer)
+        displayedImage = image
     }
 }
 
@@ -70,7 +122,34 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     private let container = NSView()
 
     private(set) var representedURL: URL?
+    /// URL of an in-flight thumbnail request, so a layout repair doesn't
+    /// stack another waiter on the same decode.
+    private var pendingThumbURL: URL?
+    /// Consecutive nil deliveries for the current file. Caps the repair loop
+    /// when a file genuinely can't be decoded.
+    private var thumbFailures = 0
     var onDoubleClick: (() -> Void)?
+
+    var thumbnailNeedsRequest: Bool {
+        representedURL != nil && thumbView.contentsMissing && pendingThumbURL == nil && thumbFailures < 3
+    }
+
+    func isWaitingForThumbnail(_ url: URL) -> Bool { pendingThumbURL == url }
+
+    func noteThumbnailRequest(_ url: URL) { pendingThumbURL = url }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        if editingBase != nil { endNameEdit() }
+        representedURL = nil
+        pendingThumbURL = nil
+        thumbFailures = 0
+        onDoubleClick = nil
+        onRenameCommitted = nil
+        thumbView.setImage(nil)
+        container.alphaValue = 1
+        container.layer?.borderWidth = 0
+    }
 
     override func loadView() {
         let v = DoubleClickView()
@@ -165,9 +244,22 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
 
     func configure(asset: PhotoAsset) {
         if editingBase != nil { endNameEdit() } // cell reused mid-edit
+        let urlChanged = representedURL != asset.url
+        if urlChanged {
+            pendingThumbURL = nil
+            thumbFailures = 0
+        }
         representedURL = asset.url
         nameLabel.stringValue = asset.filename
-        thumbView.setImage(ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize))
+        // A cache miss on a reused cell used to clear the layer and wait.
+        // When the URL hasn't changed (selection/label refresh, a reload
+        // that recycled the same photo), keep the pixels we already have
+        // instead of flashing blank.
+        if let cached = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
+            thumbView.setImage(cached)
+        } else if urlChanged {
+            thumbView.setImage(nil)
+        }
         if asset.hasJPEGPair {
             badgeLabel.stringValue = "R+J"
         } else if asset.isRAW {
@@ -178,9 +270,20 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         refreshCullState(assetID: asset.id)
     }
 
-    func setThumbnail(_ image: NSImage?, for url: URL) {
+    func setThumbnail(_ image: NSImage?, for url: URL, rotation: Int) {
         guard representedURL == url else { return } // cell was reused; drop stale pixels
-        thumbView.setImage(image)
+        // A rotation changes the cache key but not the path. An in-flight
+        // decode of the previous orientation must not paint over the new one.
+        guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
+        if pendingThumbURL == url { pendingThumbURL = nil }
+        if let image {
+            thumbFailures = 0
+            thumbView.setImage(image)
+        } else {
+            // A nil from a superseded decode must not wipe a thumb that's
+            // already on screen. Leave it missing so the repair pass retries.
+            thumbFailures += 1
+        }
     }
 
     func refreshCullState(assetID: String) {
@@ -225,10 +328,17 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     /// the solid chip once the card narrows past ~100pt and the row stops
     /// reading. One rule, driven by the size slider the grid already has.
     private func applyCullScale() {
-        let compact = view.bounds.width < 100
+        // Width 0 is "not laid out yet", not "compact". Treating it as
+        // compact hid the star row and flashed the chip on every reuse.
+        let width = view.bounds.width
+        let compact = width > 1 && width < 100
         let hasChip = !chipLabel.stringValue.isEmpty
-        chipLabel.isHidden = !(compact && hasChip)
-        starsLabel.isHidden = compact && hasChip
+        let chipHidden = !(compact && hasChip)
+        let starsHidden = compact && hasChip
+        // Toggling isHidden unconditionally invalidates layout. During a
+        // scroll that's a layout loop and a visible flicker.
+        if chipLabel.isHidden != chipHidden { chipLabel.isHidden = chipHidden }
+        if starsLabel.isHidden != starsHidden { starsLabel.isHidden = starsHidden }
     }
 
     override func viewDidLayout() {
@@ -426,7 +536,21 @@ final class PhotoGridViewController: NSViewController,
         folderMonitor = nil
         externalReloadTimer?.invalidate()
         externalReloadTimer = nil
+        if let faceObserver {
+            FaceAnalyzer.shared.removeObserver(faceObserver)
+            self.faceObserver = nil
+        }
     }
+
+    deinit {
+        if let faceObserver {
+            FaceAnalyzer.shared.removeObserver(faceObserver)
+        }
+    }
+
+    /// Face-analyzer subscription. One per grid, removed on close, so a
+    /// background or closed tab can't steal results from the one on screen.
+    private var faceObserver: UUID?
     /// A face-analysis result landed (asset id) - lets the preview update live.
     var onFaceResult: ((String) -> Void)?
 
@@ -466,20 +590,24 @@ final class PhotoGridViewController: NSViewController,
             self?.buildContextMenu(for: ip)
         }
 
-        // Face analysis trickles in - restyle the badge on whichever card is
-        // visible, refresh the Eyes ✓ filter (throttled), update progress.
-        FaceAnalyzer.shared.onResult = { [weak self] id in
-            self?.onFaceResult?(id)
-        }
-        FaceAnalyzer.shared.onProgress = { [weak self] done, total in
-            guard let self else { return }
-            self.aiDone = done
-            self.aiTotal = total
-            // Cached folders stream thousands of results in a burst; a full
-            // updateStatus (2x O(n) rated/rejected recount + footer relayout)
-            // per result stormed the main thread. Coalesce to ~7 Hz.
-            self.scheduleStatusUpdate()
-        }
+        // Face analysis trickles in. Every grid listens; only the active tab
+        // forwards to the preview, so a later-created (or since-closed) tab
+        // can't replace the callback and leave the faces panel stuck empty.
+        faceObserver = FaceAnalyzer.shared.addObserver(
+            onResult: { [weak self] id in
+                guard let self, self.isActiveTab else { return }
+                self.onFaceResult?(id)
+            },
+            onProgress: { [weak self] done, total in
+                guard let self else { return }
+                self.aiDone = done
+                self.aiTotal = total
+                // Cached folders stream thousands of results in a burst; a full
+                // updateStatus (2x O(n) rated/rejected recount + footer relayout)
+                // per result stormed the main thread. Coalesce to ~7 Hz.
+                self.scheduleStatusUpdate()
+            }
+        )
 
         // ── Toolbar ──────────────────────────────────────────────
         let toolbar = NSView()
@@ -788,6 +916,35 @@ final class PhotoGridViewController: NSViewController,
         let compact = view.bounds.width < 900
         for v in compactHiddenViews where v.isHidden != compact {
             v.isHidden = compact
+        }
+        scheduleVisibleRepair()
+    }
+
+    /// NSCollectionView sometimes recycles a visible item without asking the
+    /// data source again — after a reload (file op, folder refresh) or a
+    /// fast scroll. Those cells keep the previous photo or stay blank until
+    /// something else forces a rebind. One pass per turn, only over what's
+    /// actually on screen.
+    private var visibleRepairScheduled = false
+
+    private func scheduleVisibleRepair() {
+        guard isActiveTab, !visibleRepairScheduled, !displayedAssets.isEmpty else { return }
+        visibleRepairScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.visibleRepairScheduled = false
+            guard self.isActiveTab else { return }
+            for ip in self.collectionView.indexPathsForVisibleItems() {
+                guard ip.item < self.displayedAssets.count,
+                      let item = self.collectionView.item(at: ip) as? PhotoItem else { continue }
+                let asset = self.displayedAssets[ip.item]
+                if item.representedURL != asset.url {
+                    item.configure(asset: asset)
+                    self.requestThumbnail(for: item, url: asset.url)
+                } else if item.thumbnailNeedsRequest {
+                    self.requestThumbnail(for: item, url: asset.url)
+                }
+            }
         }
     }
 
@@ -1169,17 +1326,32 @@ final class PhotoGridViewController: NSViewController,
             self.performRenames([(asset, base)])
         }
 
+        requestThumbnail(for: photoItem, url: asset.url)
         if ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) == nil {
-            let url = asset.url
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self, weak photoItem] image in
-                photoItem?.setThumbnail(image, for: url)
-                if image != nil { self?.reportFirstThumbIfNeeded() }
-            }
             scheduleFocusPass()
         } else {
             reportFirstThumbIfNeeded()
         }
         return item
+    }
+
+    /// Cache hit applies immediately. A miss registers one waiter; repeats
+    /// for the same cell+url are ignored so the repair pass can't pile on.
+    /// `force` bypasses that guard — rotation needs a new decode even when
+    /// a request for this path is already in flight.
+    private func requestThumbnail(for item: PhotoItem, url: URL, force: Bool = false) {
+        let rotation = RatingsStore.shared.rotation(for: url.path)
+        if let cached = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
+            item.setThumbnail(cached, for: url, rotation: rotation)
+            reportFirstThumbIfNeeded()
+            return
+        }
+        if !force, item.isWaitingForThumbnail(url) { return }
+        item.noteThumbnailRequest(url)
+        ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self, weak item] image in
+            item?.setThumbnail(image, for: url, rotation: rotation)
+            if image != nil { self?.reportFirstThumbIfNeeded() }
+        }
     }
 
     /// Coalesced "what's on screen now" report to the loader - keeps the
@@ -1197,7 +1369,6 @@ final class PhotoGridViewController: NSViewController,
             let items = self.collectionView.indexPathsForVisibleItems().map(\.item)
                 .filter { $0 < self.displayedAssets.count }
             let visibleURLs = items.map { self.displayedAssets[$0].url }
-            ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
 
             // Direction-aware lookahead: warm ~3 screens of thumbs ahead of
             // the scroll (and one behind) so a steady scroll lands on cells
@@ -1207,6 +1378,11 @@ final class PhotoGridViewController: NSViewController,
             // run at .normal priority; visible cells (.high) always preempt,
             // and cache hits return before creating any op, so a warm folder
             // pays nothing.
+            //
+            // focusVisible runs AFTER the warm so those lookahead ops are
+            // demoted to .low in the same pass. Doing it first left the new
+            // prefetches at .normal, above any visible cell the snapshot had
+            // missed, and the screen went blank behind them.
             guard let lo = items.min(), let hi = items.max() else { return }
             let goingForward = self.lastVisibleTop.map { lo >= $0 } ?? true
             self.lastVisibleTop = lo
@@ -1227,6 +1403,7 @@ final class PhotoGridViewController: NSViewController,
                 warm(lo - ahead, lo - 1)
                 warm(hi + 1, hi + behind)
             }
+            ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
         }
     }
 
@@ -1326,6 +1503,31 @@ final class PhotoGridViewController: NSViewController,
         collectionView.deselectAll(nil)
         onSelectionChanged?(nil)
         flash("Selection cleared")
+    }
+
+    /// Select by color label (Photo Mechanic's color class). A multi-selection
+    /// is narrowed to that label; otherwise every match in the current
+    /// filtered folder is selected. `label` 0 is unlabeled.
+    func selectByColorLabel(_ label: Int) {
+        let displayed = displayedAssets.map {
+            ColorLabelSelection.Photo(id: $0.id, label: RatingsStore.shared.colorLabel(for: $0.id))
+        }
+        let selectedIDs = Set(selectedAssets.map(\.id))
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: selectedIDs,
+            label: label
+        )
+        let name = label == 0 ? "unlabeled" : Theme.labelNames[min(max(label, 0), 5)].lowercased()
+        guard !ids.isEmpty else {
+            let scope = ColorLabelSelection.scopeName(selectedCount: selectedIDs.count)
+            flash("No \(name) photos in this \(scope)")
+            NSSound.beep()
+            return
+        }
+        select(ids: ids, focusID: ids[0])
+        let noun = ids.count == 1 ? "photo" : "photos"
+        flash("\(ids.count) \(name) \(noun) selected")
     }
 
     // MARK: - Clipboard (⌘C copy, ⌘X cut, ⌘V paste - files, like Finder
@@ -1875,6 +2077,32 @@ final class PhotoGridViewController: NSViewController,
         colorRoot.submenu = colorMenu
         menu.addItem(colorRoot)
 
+        let selectColorMenu = NSMenu()
+        for label in 1...5 {
+            let item = NSMenuItem(title: Theme.labelNames[label], action: #selector(menuSelectColor(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.tag = label
+            item.image = Self.dotImage(Theme.labelColors[label])
+            selectColorMenu.addItem(item)
+        }
+        selectColorMenu.addItem(.separator())
+        let selectNone = NSMenuItem(title: "Unlabeled", action: #selector(menuSelectColor(_:)), keyEquivalent: "")
+        selectNone.target = self
+        selectNone.tag = 0
+        selectColorMenu.addItem(selectNone)
+        let selectColorRoot = NSMenuItem(title: "Select by Color Label", action: nil, keyEquivalent: "")
+        selectColorRoot.submenu = selectColorMenu
+        menu.addItem(selectColorRoot)
+        let clickedLabel = RatingsStore.shared.colorLabel(for: displayedAssets[ip.item].id)
+        if clickedLabel > 0 {
+            let only = NSMenuItem(title: "Select Only \(Theme.labelNames[clickedLabel])",
+                                  action: #selector(menuSelectColor(_:)), keyEquivalent: "")
+            only.target = self
+            only.tag = clickedLabel
+            menu.addItem(only)
+        }
+
         let reject = NSMenuItem(title: "Reject", action: #selector(menuToggleReject(_:)), keyEquivalent: "x")
         reject.keyEquivalentModifierMask = []
         reject.target = self
@@ -1978,6 +2206,10 @@ final class PhotoGridViewController: NSViewController,
     @objc private func menuSetColor(_ sender: NSMenuItem) {
         let label = sender.tag
         applyToSelection(advance: false) { RatingsStore.shared.setColorLabel(label, for: $0) }
+    }
+
+    @objc private func menuSelectColor(_ sender: NSMenuItem) {
+        selectByColorLabel(sender.tag)
     }
 
     @objc private func menuToggleReject(_ sender: NSMenuItem) {
@@ -2115,9 +2347,7 @@ final class PhotoGridViewController: NSViewController,
             guard ip.item < displayedAssets.count,
                   let item = collectionView.item(at: ip) as? PhotoItem else { continue }
             let url = displayedAssets[ip.item].url
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak item] image in
-                item?.setThumbnail(image, for: url)
-            }
+            requestThumbnail(for: item, url: url, force: true)
         }
     }
 
@@ -2149,13 +2379,9 @@ final class PhotoGridViewController: NSViewController,
             let asset = displayedAssets[ip.item]
             item.refreshCullState(assetID: asset.id)
             // A rotation in the preview invalidates this thumb's cache key.
-            if let cached = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
-                item.setThumbnail(cached, for: asset.url)
-            } else {
-                ThumbnailLoader.shared.request(asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak item] image in
-                    item?.setThumbnail(image, for: asset.url)
-                }
-            }
+            // requestThumbnail no-ops when the pixels are already showing, so
+            // a label change doesn't reassign the layer and flash the card.
+            requestThumbnail(for: item, url: asset.url)
         }
         scheduleStatusUpdate() // coalesced O(n) recount, see applyToSelection
     }

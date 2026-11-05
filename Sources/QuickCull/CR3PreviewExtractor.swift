@@ -64,7 +64,7 @@ enum CR3PreviewExtractor {
                 cg = ImageTransform.rotate(cg, degreesCW: degrees)
             }
         }
-        return NSImage(cgImage: cg, size: .zero)
+        return QuickCullImage.fromCGImage(cg)
     }
 
     // MARK: - ISO-BMFF plumbing

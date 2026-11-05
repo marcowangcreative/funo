@@ -247,6 +247,13 @@ final class MainSplitViewController: NSSplitViewController {
     // Called from the Edit menu (AppDelegate).
     func selectAllPhotos() { grid.selectAllVisible() }
     func deselectAllPhotos() { grid.deselectAll() }
+
+    /// Edit ▸ Select by Color Label, and ⌘⇧1–5 / ⌘⇧0. Works on the grid
+    /// even while the preview is up — the preview holds its own copy of the
+    /// working set, and the contact sheet is what this command selects.
+    func selectByColorLabel(_ label: Int) {
+        grid.selectByColorLabel(label)
+    }
     func trashSelection() { grid.trashSelection() }
 
     func copyPhotos() {

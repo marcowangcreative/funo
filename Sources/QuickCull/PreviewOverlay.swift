@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Keeps the photo centered when it's smaller than the viewport -
 /// without this, NSScrollView pins the image to the bottom-left and
@@ -41,7 +42,7 @@ final class StageImageView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func setImage(_ cgImage: CGImage?) {
-        layer?.contents = cgImage
+        QuickCullImage.setContents(cgImage, of: layer)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -140,6 +141,7 @@ final class FilmstripItem: NSCollectionViewItem {
     }
 
     func configure(asset: PhotoAsset, isCurrent: Bool) {
+        let urlChanged = representedURL != asset.url
         representedURL = asset.url
         let id = asset.id
         let rejected = RatingsStore.shared.isRejected(id)
@@ -163,13 +165,18 @@ final class FilmstripItem: NSCollectionViewItem {
         badgePlate.isHidden = badge.stringValue.isEmpty
 
         let url = asset.url
+        let rotation = RatingsStore.shared.rotation(for: url.path)
         if let cached = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
             thumb.image = cached
         } else {
-            thumb.image = nil
+            // Same cell, same file (the strip restyles on every arrow): don't
+            // blank a thumb that's already painted. A URL change, or a
+            // rotation (cache key changed, so this is a miss), still fetches.
+            if urlChanged { thumb.image = nil }
             ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self] image in
                 guard let self, self.representedURL == url else { return }
-                self.thumb.image = image
+                guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
+                if let image { self.thumb.image = image }
             }
         }
     }
@@ -274,6 +281,12 @@ final class PreviewOverlayView: NSView {
     private var faceBadges: [RangefinderBadgeView] = []
     /// Per-photo retry budget for transient per-face score failures.
     private var faceScoreRetries = 0
+    /// Crop retries for the photo currently on stage. Reset on navigation.
+    private var faceCropRetries = 0
+    /// Whose crops `currentFacePairs` belongs to. Keeps the previous photo's
+    /// faces from staying on screen after an arrow, and keeps a refresh from
+    /// tearing the panel down when it's already showing this photo.
+    private var currentFaceAssetID: String?
     private var showInfoPanel: Bool = {
         UserDefaults.standard.object(forKey: "QuickCullShowInfo") == nil
             ? true
@@ -750,11 +763,15 @@ final class PreviewOverlayView: NSView {
         atFit = true
 
         // Show whatever is already decoded (grid thumb), then sharpen.
-        if let preview = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.previewPixelSize) {
-            display(preview)
-        } else {
+        // display() fails when the cached NSImage can't produce a CGImage
+        // (zero-size images built off the main thread). Falling through to
+        // a fresh request is what stops the stage staying on the PREVIOUS
+        // photo while the filmstrip moves on.
+        let previewShown = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.previewPixelSize)
+            .map { display($0) } ?? false
+        if !previewShown {
             if let thumb = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
-                display(thumb)
+                _ = display(thumb)
             }
             // Retry on nil: a decode can be CANCELLED under rapid arrowing
             // (or fail transiently on a busy drive), and giving up stranded
@@ -763,8 +780,8 @@ final class PreviewOverlayView: NSView {
             func requestPreview(_ attempt: Int) {
                 ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.previewPixelSize) { [weak self] image in
                     guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
-                    if let image {
-                        self.display(image)
+                    if let image, self.display(image) {
+                        // shown
                     } else if attempt < 3 {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                             guard let self, self.showGeneration == gen, self.atFit, !self.fullResLoaded else { return }
@@ -790,6 +807,12 @@ final class PreviewOverlayView: NSView {
         }
         FaceAnalyzer.shared.prioritize(asset.id) // scan what's on screen first
         scheduleFacesRefresh()
+        // Already-settled photos are drawn by the debounced refresh. The poll
+        // only covers a verdict that lands after that refresh gave up.
+        if case .pending = FaceAnalyzer.shared.phase(for: asset.id),
+           !FileOps.isMemoryCard(asset.url) {
+            pollFacesIfNeeded(attempt: 0, generation: gen, assetID: asset.id)
+        }
         refreshInfoPanel()
         refreshFilmstrip()
         faceScoreRetries = 0
@@ -811,11 +834,13 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    private func display(_ image: NSImage) {
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+    @discardableResult
+    private func display(_ image: NSImage) -> Bool {
+        guard let cg = image.quickCullCGImage() else { return false }
         stageView.setImage(cg)
         stageView.frame = NSRect(x: 0, y: 0, width: cg.width, height: cg.height)
-        fitToWindow()
+        if atFit { fitToWindow() }
+        return true
     }
 
     // MARK: - Zoom
@@ -824,7 +849,12 @@ final class PreviewOverlayView: NSView {
 
     private func fitToWindow() {
         atFit = true
+        // magnify(toFit:) animates by default. The thumb→preview handoff
+        // called it twice per frame and the stage zoomed visibly.
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
         stageScroll.magnify(toFit: stageView.frame)
+        NSAnimationContext.endGrouping()
         updateZoomLabel()
     }
 
@@ -837,7 +867,7 @@ final class PreviewOverlayView: NSView {
         ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.fullPixelSize) { [weak self] image in
             guard let self, self.showGeneration == gen else { return }
             defer { then() }
-            guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            guard let image, let cg = image.quickCullCGImage() else { return }
             let center = self.visibleCenterFraction()
             let oldWidth = self.stageView.frame.width
             let magnification = self.stageScroll.magnification
@@ -1034,18 +1064,46 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    /// Debounce: while the user is flying through frames with the arrow keys,
-    /// the panel holds its last layout (slightly dimmed) instead of tearing
-    /// down and rebuilding per keystroke - that rebuild was the UI flashing.
+    /// Debounce the crop fetch while the user is flying through frames.
+    /// The previous photo's faces are cleared immediately — holding that
+    /// layout (the old dimmed panel) showed the wrong people on the new frame.
     private var facesRefreshTimer: Timer?
 
     private func scheduleFacesRefresh() {
-        if !facesPanel.isHidden { facesPanel.alphaValue = 0.35 }
+        let assetID = index < assets.count ? assets[index].id : nil
+        if currentFaceAssetID != assetID {
+            currentFacePairs = []
+            currentFaces = []
+            currentFaceAssetID = assetID
+            faceCropRetries = 0
+            layoutFacesGrid()
+        }
+        facesPanel.alphaValue = 1
         facesRefreshTimer?.invalidate()
         facesRefreshTimer = Timer.scheduledTimer(withTimeInterval: 0.28, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.facesPanel.alphaValue = 1
-            self.rebuildFacesRow()
+            self?.rebuildFacesRow()
+        }
+    }
+
+    /// The result callback can be missed (a tab closed out from under the
+    /// old single-observer slot, or the decode landed in the gap before the
+    /// debounced refresh). Keep asking until the verdict settles or the
+    /// user has moved on. Generation-guarded, so it can't update a stale frame.
+    private func pollFacesIfNeeded(attempt: Int, generation: Int, assetID: String) {
+        guard attempt < 20 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.showGeneration == generation, self.index < self.assets.count,
+                  self.assets[self.index].id == assetID else { return }
+            switch FaceAnalyzer.shared.phase(for: assetID) {
+            case .pending:
+                self.pollFacesIfNeeded(attempt: attempt + 1, generation: generation, assetID: assetID)
+            case .faces, .noFaces, .unavailable:
+                if self.facesRefreshTimer?.isValid != true {
+                    self.rebuildFacesRow()
+                }
+                self.updateFaceBadges()
+                self.updateEyesReadout()
+            }
         }
     }
 
@@ -1244,13 +1302,44 @@ final class PreviewOverlayView: NSView {
     }
 
     private func rebuildFacesRow() {
-        currentFaces = []
-        currentFacePairs = []
-        layoutFacesGrid()
-        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else { return }
+        guard showFacesPanel, FaceAnalyzer.shared.isEnabled, index < assets.count else {
+            currentFaces = []
+            currentFacePairs = []
+            currentFaceAssetID = nil
+            layoutFacesGrid()
+            return
+        }
+        let asset = assets[index]
+        if currentFaceAssetID != asset.id {
+            currentFaces = []
+            currentFacePairs = []
+            currentFaceAssetID = asset.id
+            faceCropRetries = 0
+            layoutFacesGrid()
+        }
         let gen = showGeneration
-        FaceCropper.shared.crops(for: assets[index], maxFaces: 40) { [weak self] pairs in
-            guard let self, self.showGeneration == gen, !pairs.isEmpty else { return }
+        FaceCropper.shared.crops(for: asset, maxFaces: 40) { [weak self] pairs in
+            guard let self, self.showGeneration == gen, self.index < self.assets.count,
+                  self.assets[self.index].id == asset.id else { return }
+            if pairs.isEmpty {
+                // Crops can fail transiently (the analysis image was busy)
+                // even after a verdict with faces landed. Retry; a true
+                // "no faces" settles through layoutFacesGrid.
+                if case .faces = FaceAnalyzer.shared.phase(for: asset.id), self.faceCropRetries < 3 {
+                    self.faceCropRetries += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        guard let self, self.showGeneration == gen else { return }
+                        self.rebuildFacesRow()
+                    }
+                    self.layoutFacesGrid()
+                    return
+                }
+                self.currentFacePairs = []
+                self.currentFaces = []
+                self.layoutFacesGrid()
+                return
+            }
+            self.faceCropRetries = 0
             self.currentFacePairs = pairs
             self.currentFaces = pairs.map { $0.1 }
             self.layoutFacesGrid()
@@ -1273,12 +1362,22 @@ final class PreviewOverlayView: NSView {
             return
         }
 
-        // No crops yet: distinguish "still scanning" from "won't scan here"
-        // (memory card) from "scanned, no faces" - never a mystery.
+        // No crops yet: distinguish "still scanning" from "couldn't read"
+        // (retry budget spent — not cached, so a reload tries again) from
+        // "faces known, crops in flight" from "scanned, no faces".
+        // A known-but-not-yet-cropped face used to take the "no faces" branch
+        // and hide the panel until the user left and came back.
         if pairs.isEmpty {
-            if index < assets.count, FaceAnalyzer.shared.result(for: assets[index].id) == nil {
+            let phase = index < assets.count
+                ? FaceAnalyzer.shared.phase(for: assets[index].id)
+                : FacePanelPhase.pending
+            switch phase {
+            case .noFaces:
+                facesPanelWidth.constant = 0
+                facesPanel.isHidden = true
+            case .pending:
                 facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
-                if FileOps.isMemoryCard(assets[index].url) {
+                if index < assets.count, FileOps.isMemoryCard(assets[index].url) {
                     facesFooterLabel.stringValue = "scans after ingest\nto a local drive"
                 } else {
                     facesFooterLabel.stringValue = "scanning…"
@@ -1286,9 +1385,18 @@ final class PreviewOverlayView: NSView {
                 facesFooterLabel.textColor = Theme.tx2
                 facesPanelWidth.constant = Self.railWidth
                 facesPanel.isHidden = false
-            } else {
-                facesPanelWidth.constant = 0
-                facesPanel.isHidden = true
+            case .unavailable:
+                facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+                facesFooterLabel.stringValue = "couldn't read this photo\nRescan Faces to retry"
+                facesFooterLabel.textColor = Theme.tx2
+                facesPanelWidth.constant = Self.railWidth
+                facesPanel.isHidden = false
+            case .faces:
+                facesHeaderLabel.attributedStringValue = Theme.sectionTitle("Faces")
+                facesFooterLabel.stringValue = "loading faces…"
+                facesFooterLabel.textColor = Theme.tx2
+                facesPanelWidth.constant = Self.railWidth
+                facesPanel.isHidden = false
             }
             updateStageRail()
             return

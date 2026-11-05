@@ -1,0 +1,170 @@
+import XCTest
+@testable import QuickCullCore
+
+final class ColorLabelSelectionTests: XCTestCase {
+
+    private func photos(_ pairs: [(String, Int)]) -> [ColorLabelSelection.Photo] {
+        pairs.map { ColorLabelSelection.Photo(id: $0.0, label: $0.1) }
+    }
+
+    func testMultiSelectionKeepsOnlyTheChosenLabel() {
+        let displayed = photos([
+            ("a", 1), ("b", 2), ("c", 1), ("d", 0), ("e", 1)
+        ])
+        // Working set is b, c, d, e — "a" is the same color but not selected,
+        // so it must stay unselected.
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: ["b", "c", "d", "e"],
+            label: 1
+        )
+        XCTAssertEqual(ids, ["c", "e"])
+        XCTAssertEqual(ColorLabelSelection.scopeName(selectedCount: 4), "selection")
+    }
+
+    func testSingleSelectionSelectsTheWholeFolder() {
+        let displayed = photos([
+            ("a", 3), ("b", 1), ("c", 3), ("d", 0)
+        ])
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: ["b"],
+            label: 3
+        )
+        XCTAssertEqual(ids, ["a", "c"])
+        XCTAssertEqual(ColorLabelSelection.scopeName(selectedCount: 1), "folder")
+    }
+
+    func testEmptySelectionSelectsEveryMatchInOrder() {
+        let displayed = photos([
+            ("a", 0), ("b", 4), ("c", 0), ("d", 4)
+        ])
+        let unlabeled = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: [],
+            label: 0
+        )
+        XCTAssertEqual(unlabeled, ["a", "c"])
+        let blue = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: [],
+            label: 4
+        )
+        XCTAssertEqual(blue, ["b", "d"])
+    }
+
+    func testNoMatchReturnsEmpty() {
+        let displayed = photos([("a", 1), ("b", 2)])
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: ["a", "b"],
+            label: 5
+        )
+        XCTAssertEqual(ids, [])
+    }
+
+    func testNarrowingPreservesDisplayOrder() {
+        let displayed = photos([
+            ("z", 2), ("a", 2), ("m", 5), ("b", 2)
+        ])
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: ["b", "z", "a", "m"],
+            label: 2
+        )
+        XCTAssertEqual(ids, ["z", "a", "b"])
+    }
+}
+
+final class FaceResultLedgerTests: XCTestCase {
+
+    func testSettledZeroIsCachedAndDistinctFromFailure() {
+        var ledger = FaceResultLedger(maxFailures: 3)
+        let decision = ledger.record(id: "landscape", outcome: .settled(faceCount: 0))
+        XCTAssertEqual(decision, .commit(faceCount: 0))
+        XCTAssertEqual(ledger.phase(id: "landscape", storedFaceCount: 0), .noFaces)
+        XCTAssertFalse(ledger.isAbandoned("landscape"))
+    }
+
+    func testSettledFacesCommit() {
+        var ledger = FaceResultLedger()
+        XCTAssertEqual(
+            ledger.record(id: "group", outcome: .settled(faceCount: 4)),
+            .commit(faceCount: 4)
+        )
+        XCTAssertEqual(ledger.committed["group"], 4)
+        XCTAssertEqual(ledger.phase(id: "group", storedFaceCount: 4), .faces(4))
+    }
+
+    func testNegativeCountClampsToZero() {
+        var ledger = FaceResultLedger()
+        XCTAssertEqual(
+            ledger.record(id: "x", outcome: .settled(faceCount: -2)),
+            .commit(faceCount: 0)
+        )
+    }
+
+    func testUnavailableRetriesThenAbandonsWithoutCommitting() {
+        var ledger = FaceResultLedger(maxFailures: 3)
+        XCTAssertEqual(ledger.record(id: "busy", outcome: .unavailable), .retry)
+        XCTAssertEqual(ledger.phase(id: "busy", storedFaceCount: nil), .pending)
+        XCTAssertEqual(ledger.record(id: "busy", outcome: .unavailable), .retry)
+        XCTAssertEqual(ledger.record(id: "busy", outcome: .unavailable), .retry)
+        XCTAssertEqual(ledger.record(id: "busy", outcome: .unavailable), .abandon)
+        XCTAssertNil(ledger.committed["busy"])
+        XCTAssertTrue(ledger.isAbandoned("busy"))
+        XCTAssertEqual(ledger.phase(id: "busy", storedFaceCount: nil), .unavailable)
+    }
+
+    func testSuccessAfterFailuresClearsTheRetryState() {
+        var ledger = FaceResultLedger(maxFailures: 2)
+        _ = ledger.record(id: "p", outcome: .unavailable)
+        _ = ledger.record(id: "p", outcome: .unavailable)
+        XCTAssertEqual(ledger.record(id: "p", outcome: .unavailable), .abandon)
+        // A fresh pass (folder reload) restores the budget, then a good
+        // decode commits and the panel can leave "unavailable".
+        ledger.resetAttempts("p")
+        XCTAssertEqual(ledger.phase(id: "p", storedFaceCount: nil), .pending)
+        XCTAssertEqual(
+            ledger.record(id: "p", outcome: .settled(faceCount: 2)),
+            .commit(faceCount: 2)
+        )
+        XCTAssertFalse(ledger.isAbandoned("p"))
+        XCTAssertEqual(ledger.phase(id: "p", storedFaceCount: 2), .faces(2))
+    }
+
+    func testForgetDropsACommittedVerdict() {
+        var ledger = FaceResultLedger()
+        _ = ledger.record(id: "p", outcome: .settled(faceCount: 1))
+        ledger.forget("p")
+        XCTAssertNil(ledger.committed["p"])
+        XCTAssertEqual(ledger.phase(id: "p", storedFaceCount: nil), .pending)
+    }
+
+    func testOnePhotoFailingDoesNotAffectAnother() {
+        var ledger = FaceResultLedger(maxFailures: 1)
+        _ = ledger.record(id: "bad", outcome: .unavailable)
+        XCTAssertEqual(ledger.record(id: "bad", outcome: .unavailable), .abandon)
+        XCTAssertEqual(
+            ledger.record(id: "good", outcome: .settled(faceCount: 1)),
+            .commit(faceCount: 1)
+        )
+        XCTAssertEqual(ledger.phase(id: "bad", storedFaceCount: nil), .unavailable)
+        XCTAssertEqual(ledger.phase(id: "good", storedFaceCount: 1), .faces(1))
+    }
+}
+
+final class ThumbnailDeliveryTests: XCTestCase {
+
+    func testAuthoritativeOpPublishes() {
+        XCTAssertTrue(ThumbnailDelivery.shouldPublish(pendingOpIsSelf: true))
+    }
+
+    func testSupersededOpDoesNotPublish() {
+        // The bug: a cancelled prefetch finished after a visible cell had
+        // already registered a replacement op, stole that cell's waiters,
+        // and delivered nil or a stale image. The replacement then had
+        // nobody to call, so the cell stayed blank.
+        XCTAssertFalse(ThumbnailDelivery.shouldPublish(pendingOpIsSelf: false))
+    }
+}

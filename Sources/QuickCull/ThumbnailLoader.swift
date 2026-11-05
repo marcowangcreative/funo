@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import QuickCullCore
 
 /// The heart of the prototype: turn a file URL into pixels on screen as fast
 /// as physically possible, by preferring the camera's own embedded preview
@@ -149,8 +150,23 @@ final class ThumbnailLoader {
     func focusVisible(_ urls: [URL], maxPixel: CGFloat) {
         let tier = "\(Int(maxPixel))"
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
+        // Mid-reload (and the first moment after a file op) the collection
+        // view reports no visible items. Demoting every in-flight thumb to
+        // .low in that window let the lookahead prefetch run ahead of the
+        // cells actually on screen — a patch of blank thumbnails.
+        guard !visibleKeys.isEmpty else { return }
+        let floor: Operation.QueuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
         for (key, op) in pending where op.name == tier {
-            op.queuePriority = visibleKeys.contains(key) ? .high : .low
+            // A waiter is a cell that is on screen (or about to be), even
+            // when it hasn't landed in indexPathsForVisibleItems yet.
+            let waited = !(waiters[key]?.isEmpty ?? true)
+            if visibleKeys.contains(key) || waited {
+                if op.queuePriority.rawValue < floor.rawValue {
+                    op.queuePriority = floor
+                }
+            } else if op.queuePriority != .low {
+                op.queuePriority = .low
+            }
         }
     }
 
@@ -193,7 +209,7 @@ final class ThumbnailLoader {
                     // request() re-creates the op); firing that NEW caller's
                     // waiters with nil from the dead op's corpse left grid
                     // cells permanently blank during fast scrolls.
-                    guard self.pending[key] === op else { return }
+                    guard ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === op) else { return }
                     self.pending[key] = nil
                     let stranded = self.waiters.removeValue(forKey: key) ?? []
                     stranded.forEach { $0(nil) }
@@ -239,7 +255,15 @@ final class ThumbnailLoader {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.pending[key] === op { self.pending[key] = nil }
+                // Same rule as the cancel path. A decode that already passed
+                // its isCancelled check can still finish AFTER cancel() nils
+                // this slot and a visible cell starts a replacement op.
+                // Publishing here stole the new waiters (nil or a stale
+                // image) and the replacement completed into silence — blank
+                // or stuck cells while scrolling and after reloads.
+                let authoritative = ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === op)
+                guard authoritative else { return }
+                self.pending[key] = nil
                 if let image {
                     let cost = Int(image.size.width * image.size.height * 4)
                     self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
@@ -262,14 +286,14 @@ final class ThumbnailLoader {
               let cg = CGImageSourceCreateImageAtIndex(src, 0, opts) else {
             return NSImage(data: data)
         }
-        return NSImage(cgImage: cg, size: .zero)
+        return QuickCullImage.fromCGImage(cg)
     }
 
     private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> NSImage? {
         guard let image = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }
         guard userRotation != 0 else { return image }
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-        return NSImage(cgImage: ImageTransform.rotate(cg, degreesCW: userRotation), size: .zero)
+        guard let cg = image.quickCullCGImage() else { return image }
+        return QuickCullImage.fromCGImage(ImageTransform.rotate(cg, degreesCW: userRotation))
     }
 
     /// Decode with EXIF/container orientation applied (no user rotation yet).
@@ -310,7 +334,7 @@ final class ThumbnailLoader {
             let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
             let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
             if biggestSide >= bar {
-                return NSImage(cgImage: cg, size: .zero)
+                return QuickCullImage.fromCGImage(cg)
             }
         }
 
@@ -321,7 +345,7 @@ final class ThumbnailLoader {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, forcedOptions as CFDictionary) {
-            return NSImage(cgImage: cg, size: .zero)
+            return QuickCullImage.fromCGImage(cg)
         }
         return nil
     }

@@ -23,7 +23,8 @@ final class ShortcutsOverlayView: NSView {
             : [("1–5", "set star rating"), ("⌃1–5", "set color label")]
         return [
             Group(title: "RATE & LABEL", rows: rate + [
-                ("0", "clear rating"), ("X", "reject"), ("U", "unlabel"), ("`", "swap stars / colors")]),
+                ("0", "clear rating"), ("X", "reject"), ("U", "unlabel"), ("`", "swap stars / colors"),
+                ("⌘⇧1–5", "select that color label"), ("⌘⇧0", "select unlabeled")]),
             Group(title: "LOOK", rows: [
                 ("Space", "expand / collapse"), ("S", "survey compare"),
                 ("Z", "100% zoom"), ("[  ]", "rotate"), ("+  −", "thumbnail size")]),
