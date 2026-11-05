@@ -229,7 +229,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTableViewD
         cancelButton.keyEquivalent = "\u{1b}"
 
         let spacer = NSView()
-        spacer.setContentHuggingPriority(NSLayoutPriority(1), for: .horizontal)
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         let sourceOptions = NSStackView(views: [skipCheck, incrementalCheck, spacer, refresh, addFolder])
         sourceOptions.orientation = .horizontal
         sourceOptions.spacing = 16
@@ -320,7 +320,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTableViewD
         barText.alignment = .leading
         barText.spacing = 2
         let barSpacer = NSView()
-        barSpacer.setContentHuggingPriority(NSLayoutPriority(1), for: .horizontal)
+        barSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
         barText.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let barRow = NSStackView(views: [barText, barSpacer, buttons])

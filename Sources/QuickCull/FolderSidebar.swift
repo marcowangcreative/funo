@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// One node in the lazy directory tree. Children are only read from disk
 /// when the user expands the folder - never recursively.
