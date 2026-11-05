@@ -1,6 +1,49 @@
 import AppKit
 import QuickCullCore
 
+/// Path → Finder tags. A folder can sit in Favorites and in Places at once;
+/// both rows read this instead of statting twice. `revision` bumps when the
+/// sidebar writes a tag, so a listing that started earlier cannot paint the
+/// old colors back over the edit.
+private final class FinderTagCache {
+    static let shared = FinderTagCache()
+
+    private struct Entry {
+        var tags: FinderFolderTags
+        var revision: Int
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    func tags(for path: String) -> FinderFolderTags? { entries[path]?.tags }
+
+    func revision(for path: String) -> Int { entries[path]?.revision ?? 0 }
+
+    func revisions() -> [String: Int] {
+        entries.mapValues(\.revision)
+    }
+
+    func store(_ tags: FinderFolderTags, for path: String, bump: Bool) {
+        let revision = (entries[path]?.revision ?? 0) + (bump ? 1 : 0)
+        entries[path] = Entry(tags: tags, revision: revision)
+    }
+
+    /// Keep a menu edit that landed while this listing was on disk.
+    func resolve(disk: FinderFolderTags, path: String, baseline: [String: Int]) -> FinderFolderTags {
+        let base = baseline[path] ?? 0
+        if revision(for: path) != base {
+            return tags(for: path) ?? disk
+        }
+        store(disk, for: path, bump: false)
+        return disk
+    }
+
+    func move(from oldPath: String, to newPath: String) {
+        guard oldPath != newPath, let entry = entries.removeValue(forKey: oldPath) else { return }
+        entries[newPath] = entry
+    }
+}
+
 /// One node in the lazy directory tree. Children are only read from disk
 /// when the user expands the folder - never recursively.
 final class FolderNode {
@@ -15,14 +58,18 @@ final class FolderNode {
     /// stat the volume - statfs on a sleeping drive blocks the main thread
     /// for the entire spin-up, which read as "lag when clicking a drive".
     let isRemovableMedia: Bool
+    /// Finder color dots and custom tag names. Filled in the same directory
+    /// listing that discovers the child, then cached by path.
+    var tags: FinderFolderTags = .empty
     private var loadedChildren: [FolderNode]?
 
     init(url: URL, displayName: String? = nil, isSectionHeader: Bool = false,
-         isRemovableMedia: Bool = false) {
+         isRemovableMedia: Bool = false, tags: FinderFolderTags = .empty) {
         self.url = url
         self.displayName = displayName ?? FileManager.default.displayName(atPath: url.path)
         self.isSectionHeader = isSectionHeader
         self.isRemovableMedia = isRemovableMedia
+        self.tags = tags
     }
 
     var identityKey: String {
@@ -34,8 +81,10 @@ final class FolderNode {
     /// Point this row and its already-loaded descendants at a renamed folder
     /// without replacing the objects the outline view has expanded.
     func retarget(to newURL: URL, name: String) {
+        let oldPath = standardizedPath
         url = newURL
         displayName = name
+        FinderTagCache.shared.move(from: oldPath, to: standardizedPath)
         guard let kids = loadedChildren else { return }
         for child in kids {
             let childURL = newURL.appendingPathComponent(child.url.lastPathComponent, isDirectory: true)
@@ -45,29 +94,69 @@ final class FolderNode {
 
     var children: [FolderNode] {
         if let loadedChildren { return loadedChildren }
+        let baseline = FinderTagCache.shared.revisions()
         let dirs = Self.readChildren(of: url)
+        for dir in dirs {
+            dir.tags = FinderTagCache.shared.resolve(disk: dir.tags, path: dir.standardizedPath, baseline: baseline)
+        }
         loadedChildren = dirs
         return dirs
     }
 
     /// The blocking enumeration, factored so the background prefetch and the
     /// synchronous fallback share one implementation.
+    static let tagResourceKeys: Set<URLResourceKey> = [.tagNamesKey, .labelNumberKey]
+
+    static func readTags(of url: URL) -> FinderFolderTags {
+        let values = try? url.resourceValues(forKeys: tagResourceKeys)
+        return FinderFolderTags.resolve(
+            tagNames: values?.tagNames ?? [],
+            labelNumber: values?.labelNumber ?? 0
+        )
+    }
+
+    /// One directory listing. Tag names and the legacy label number ride
+    /// along on the same resource fetch as `isDirectory`.
     static func readChildren(of url: URL) -> [FolderNode] {
         let fm = FileManager.default
+        let keys = Array(tagResourceKeys.union([.isDirectoryKey]))
         let contents = (try? fm.contentsOfDirectory(
             at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles]
         )) ?? []
         var dirs: [FolderNode] = []
         for child in contents {
-            let values = try? child.resourceValues(forKeys: [.isDirectoryKey])
-            if values?.isDirectory == true {
-                dirs.append(FolderNode(url: child))
-            }
+            let values = try? child.resourceValues(forKeys: tagResourceKeys.union([.isDirectoryKey]))
+            guard values?.isDirectory == true else { continue }
+            let tags = FinderFolderTags.resolve(
+                tagNames: values?.tagNames ?? [],
+                labelNumber: values?.labelNumber ?? 0
+            )
+            dirs.append(FolderNode(url: child, tags: tags))
         }
         dirs.sort { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         return dirs
+    }
+
+    static func readTagsOffMain(_ urls: [URL], done: @escaping ([(String, FinderFolderTags)]) -> Void) {
+        let baseline = urls.map { url -> (URL, Int) in
+            let path = url.standardizedFileURL.path
+            return (url, FinderTagCache.shared.revision(for: path))
+        }
+        prefetchQueue.async {
+            let snaps = baseline.map { url, revision -> (String, Int, FinderFolderTags) in
+                (url.standardizedFileURL.path, revision, readTags(of: url))
+            }
+            DispatchQueue.main.async {
+                let accepted = snaps.compactMap { path, revision, tags -> (String, FinderFolderTags)? in
+                    guard FinderTagCache.shared.revision(for: path) == revision else { return nil }
+                    FinderTagCache.shared.store(tags, for: path, bump: false)
+                    return (path, tags)
+                }
+                done(accepted)
+            }
+        }
     }
 
     /// Warm this node's children off the main thread. On an idle external
@@ -83,11 +172,16 @@ final class FolderNode {
     func prefetchChildren() {
         guard loadedChildren == nil else { return }
         let url = self.url
+        let baseline = FinderTagCache.shared.revisions()
         FolderNode.prefetchQueue.async { [weak self] in
             guard self != nil else { return }
             let dirs = FolderNode.readChildren(of: url)
             DispatchQueue.main.async {
                 guard let self, self.loadedChildren == nil else { return }
+                for dir in dirs {
+                    dir.tags = FinderTagCache.shared.resolve(
+                        disk: dir.tags, path: dir.standardizedPath, baseline: baseline)
+                }
                 self.loadedChildren = dirs
             }
         }
@@ -188,6 +282,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
             outlineView.expandItem(root)
         }
         treeReady = true
+        refreshRootTags()
     }
 
     // MARK: - Favorites (persisted; any folder can be pinned as a workspace)
@@ -237,21 +332,33 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let expandedPaths = captureExpandedPaths()
         let selectedPath = selectedFolderPath()
         let scroll = scrollView.contentView.bounds.origin
+        let tagBaseline = FinderTagCache.shared.revisions()
+        let tagPaths = Set(expandedPaths).union(topLevelFolderPaths())
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var fresh: [String: [FolderNode]] = [:]
+            var ownTags: [String: FinderFolderTags] = [:]
             for path in expandedPaths {
                 fresh[path] = FolderNode.readChildren(of: URL(fileURLWithPath: path))
+            }
+            for path in tagPaths {
+                ownTags[path] = FolderNode.readTags(of: URL(fileURLWithPath: path))
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 // Roots first (a card mounting), then each open branch.
                 // Nothing here calls reloadData.
                 self.syncRootStructure()
+                var retag: [FolderNode] = []
+                for (path, tags) in ownTags {
+                    retag.append(contentsOf: self.applyTags(tags, toPath: path, baseline: tagBaseline))
+                }
                 let keep = SidebarTreeDiff.preservedExpansion(expandedPaths, present: Set(fresh.keys).union(expandedPaths))
                 for path in keep {
                     guard let node = self.findNode(path: path) else { continue }
                     if let kids = fresh[path] {
-                        self.applyDiff(parent: node, desired: self.reused(kids, replacing: node.childrenIfLoaded ?? []),
+                        let merged = self.reused(kids, replacing: node.childrenIfLoaded ?? [], baseline: tagBaseline)
+                        retag.append(contentsOf: merged.retag)
+                        self.applyDiff(parent: node, desired: merged.nodes,
                                        current: node.childrenIfLoaded ?? []) {
                             node.preloadChildren($0)
                         }
@@ -260,16 +367,96 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                         self.outlineView.expandItem(node)
                     }
                 }
+                self.reloadTagRows(retag)
                 self.restoreTreePosition(scroll: scroll, selectedPath: selectedPath)
             }
         }
     }
 
     /// Match freshly read children to the objects already in the outline,
-    /// so an expanded row is not replaced by a lookalike.
-    private func reused(_ fresh: [FolderNode], replacing existing: [FolderNode]) -> [FolderNode] {
+    /// so an expanded row is not replaced by a lookalike. Tags copy onto the
+    /// surviving object; the row is repainted only when they differ.
+    private func reused(_ fresh: [FolderNode], replacing existing: [FolderNode],
+                        baseline: [String: Int]) -> (nodes: [FolderNode], retag: [FolderNode]) {
         let byPath = Dictionary(uniqueKeysWithValues: existing.map { ($0.standardizedPath, $0) })
-        return fresh.map { byPath[$0.standardizedPath] ?? $0 }
+        var retag: [FolderNode] = []
+        let nodes = fresh.map { freshNode -> FolderNode in
+            let path = freshNode.standardizedPath
+            let tags = resolvedTags(freshNode.tags, path: path, baseline: baseline)
+            freshNode.tags = tags
+            guard let old = byPath[path] else { return freshNode }
+            if old.tags != tags {
+                old.tags = tags
+                retag.append(old)
+            }
+            return old
+        }
+        return (nodes, retag)
+    }
+
+    /// Disk lost the race with a menu edit when the revision moved. Keep the
+    /// tags the edit already stored.
+    private func resolvedTags(_ disk: FinderFolderTags, path: String, baseline: [String: Int]) -> FinderFolderTags {
+        FinderTagCache.shared.resolve(disk: disk, path: path, baseline: baseline)
+    }
+
+    /// Update every loaded row for this path. Returns the ones whose dots
+    /// actually changed, so the caller can repaint without a tree rebuild.
+    private func applyTags(_ tags: FinderFolderTags, toPath path: String, baseline: [String: Int]) -> [FolderNode] {
+        let resolved = resolvedTags(tags, path: path, baseline: baseline)
+        var changed: [FolderNode] = []
+        forEachLoadedNode { node in
+            guard node.standardizedPath == path, node.tags != resolved else { return }
+            node.tags = resolved
+            changed.append(node)
+        }
+        return changed
+    }
+
+    private func reloadTagRows(_ nodes: [FolderNode]) {
+        var seen: [ObjectIdentifier: FolderNode] = [:]
+        for node in nodes { seen[ObjectIdentifier(node)] = node }
+        for node in seen.values {
+            outlineView.reloadItem(node, reloadChildren: false)
+        }
+    }
+
+    private func topLevelFolderPaths() -> [String] {
+        var paths: [String] = []
+        for group in roots {
+            for node in placesGroupChildren[ObjectIdentifier(group)] ?? [] where !node.isSectionHeader {
+                paths.append(node.standardizedPath)
+            }
+        }
+        return paths
+    }
+
+    private func forEachLoadedNode(_ body: (FolderNode) -> Void) {
+        func walk(_ node: FolderNode) {
+            body(node)
+            let kids = node.isSectionHeader
+                ? (placesGroupChildren[ObjectIdentifier(node)] ?? [])
+                : (node.childrenIfLoaded ?? [])
+            for kid in kids { walk(kid) }
+        }
+        for root in roots { walk(root) }
+    }
+
+    private func refreshRootTags() {
+        let urls = topLevelFolderPaths().map { URL(fileURLWithPath: $0) }
+        guard !urls.isEmpty else { return }
+        FolderNode.readTagsOffMain(urls) { [weak self] snaps in
+            guard let self else { return }
+            var changed: [FolderNode] = []
+            for (path, tags) in snaps {
+                self.forEachLoadedNode { node in
+                    guard node.standardizedPath == path, node.tags != tags else { return }
+                    node.tags = tags
+                    changed.append(node)
+                }
+            }
+            self.reloadTagRows(changed)
+        }
     }
 
     /// Walk the loaded tree to the node for `path` (nil if a branch on the
@@ -324,7 +511,8 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         let desired = favoritePaths.filter { fm.fileExists(atPath: $0) }.map { path -> FolderNode in
             let standard = URL(fileURLWithPath: path).standardizedFileURL.path
             return current.first { $0.standardizedPath == standard }
-                ?? FolderNode(url: URL(fileURLWithPath: path))
+                ?? FolderNode(url: URL(fileURLWithPath: path),
+                              tags: FinderTagCache.shared.tags(for: standard) ?? .empty)
         }
         applyDiff(parent: favoritesHeader, desired: desired, current: current) {
             self.placesGroupChildren[ObjectIdentifier(self.favoritesHeader)] = $0
@@ -341,11 +529,13 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
             guard fm.fileExists(atPath: url.path) else { continue }
             let standard = url.standardizedFileURL.path
             desired.append(current.first { $0.standardizedPath == standard }
-                           ?? FolderNode(url: url, displayName: name))
+                           ?? FolderNode(url: url, displayName: name,
+                                         tags: FinderTagCache.shared.tags(for: standard) ?? .empty))
         }
         let homePath = home.standardizedFileURL.path
         desired.append(current.first { $0.standardizedPath == homePath }
-                       ?? FolderNode(url: home, displayName: "Home"))
+                       ?? FolderNode(url: home, displayName: "Home",
+                                     tags: FinderTagCache.shared.tags(for: homePath) ?? .empty))
         applyDiff(parent: placesHeader, desired: desired, current: current) {
             self.placesGroupChildren[ObjectIdentifier(self.placesHeader)] = $0
         }
@@ -366,7 +556,8 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
                 } else {
                     let node = FolderNode(url: vol,
                                           displayName: values?.volumeName ?? vol.lastPathComponent,
-                                          isRemovableMedia: values?.volumeIsRemovable ?? false)
+                                          isRemovableMedia: values?.volumeIsRemovable ?? false,
+                                          tags: FinderTagCache.shared.tags(for: standard) ?? .empty)
                     // Drive rows sit under the header. Warm them so the first
                     // expand doesn't read the directory on the main thread
                     // while the disk wakes.
@@ -519,73 +710,59 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? FolderNode else { return nil }
 
-        let identifier = NSUserInterfaceItemIdentifier(node.isSectionHeader ? "HeaderCell" : "FolderCell")
-        let cell: NSTableCellView
-        if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
-            cell = reused
-        } else {
-            cell = NSTableCellView()
-            cell.identifier = identifier
-
-            let text = NSTextField(labelWithString: "")
-            text.translatesAutoresizingMaskIntoConstraints = false
-            text.lineBreakMode = .byTruncatingTail
-            cell.addSubview(text)
-            cell.textField = text
-
-            if node.isSectionHeader {
+        if node.isSectionHeader {
+            let identifier = NSUserInterfaceItemIdentifier("HeaderCell")
+            let cell: NSTableCellView
+            if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+                cell = reused
+            } else {
+                cell = NSTableCellView()
+                cell.identifier = identifier
+                let text = NSTextField(labelWithString: "")
+                text.translatesAutoresizingMaskIntoConstraints = false
+                text.lineBreakMode = .byTruncatingTail
+                cell.addSubview(text)
+                cell.textField = text
                 NSLayoutConstraint.activate([
                     text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
                     text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
                     text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
                 ])
-            } else {
-                let icon = NSImageView()
-                icon.translatesAutoresizingMaskIntoConstraints = false
-                cell.addSubview(icon)
-                cell.imageView = icon
-                NSLayoutConstraint.activate([
-                    icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                    icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                    icon.widthAnchor.constraint(equalToConstant: 16),
-                    icon.heightAnchor.constraint(equalToConstant: 16),
-                    text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-                    text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
-                    text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-                ])
             }
-        }
-
-        cell.textField?.stringValue = node.displayName
-        if node.isSectionHeader {
+            cell.textField?.stringValue = node.displayName
             cell.textField?.font = Theme.secondaryStrong
             cell.textField?.textColor = .secondaryLabelColor
-        } else {
-            cell.textField?.font = Theme.body
-            cell.textField?.textColor = .labelColor
-            // Monochrome icons: quiet grey symbols instead of the colorful
-            // Finder icons - the photos should be the only color on screen.
-            let path = node.url.path
-            let symbolName: String
-            if path == "/" {
-                symbolName = "internaldrive"                    // Macintosh HD
-            } else if path.hasPrefix("/Volumes/"), node.url.pathComponents.count == 3 {
-                // Only true removable MEDIA (SD/CF cards, flash sticks) get
-                // the card glyph. `volumeIsRemovable` is the narrow key -
-                // external HDDs/SSDs are merely ejectable, not removable, so
-                // they correctly get the drive glyph. (isOnRemovableVolume is
-                // deliberately broader for gentle-handling and would misfire.)
-                symbolName = node.isRemovableMedia ? "sdcard" : "externaldrive"
-            } else {
-                symbolName = "folder"
-            }
-            // Fallback to the Finder icon rather than EVER showing no icon.
-            cell.imageView?.image = NSImage(systemSymbolName: symbolName,
-                                            accessibilityDescription: node.displayName)
-                ?? NSWorkspace.shared.icon(forFile: path)
-            cell.imageView?.contentTintColor = .secondaryLabelColor
+            return cell
         }
+
+        let identifier = NSUserInterfaceItemIdentifier("FolderCell")
+        let cell: FolderLabelCell
+        if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? FolderLabelCell {
+            cell = reused
+        } else {
+            cell = FolderLabelCell()
+            cell.identifier = identifier
+        }
+        cell.apply(name: node.displayName, tags: node.tags, icon: folderIcon(for: node))
         return cell
+    }
+
+    private func folderIcon(for node: FolderNode) -> NSImage? {
+        let path = node.url.path
+        let symbolName: String
+        if path == "/" {
+            symbolName = "internaldrive"
+        } else if path.hasPrefix("/Volumes/"), node.url.pathComponents.count == 3 {
+            // Only true removable MEDIA (SD/CF cards, flash sticks) get
+            // the card glyph. `volumeIsRemovable` is the narrow key -
+            // external HDDs/SSDs are merely ejectable, not removable, so
+            // they correctly get the drive glyph.
+            symbolName = node.isRemovableMedia ? "sdcard" : "externaldrive"
+        } else {
+            symbolName = "folder"
+        }
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: node.displayName)
+            ?? NSWorkspace.shared.icon(forFile: path)
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
@@ -819,14 +996,16 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
     private func refreshBranch(_ node: FolderNode) {
         guard !node.isSectionHeader else { return }
+        let baseline = FinderTagCache.shared.revisions()
         let fresh = FolderNode.readChildren(of: node.url)
         let current = node.childrenIfLoaded ?? []
-        let desired = reused(fresh, replacing: current)
+        let merged = reused(fresh, replacing: current, baseline: baseline)
         let wasExpanded = outlineView.isItemExpanded(node)
-        applyDiff(parent: node, desired: desired, current: current) { node.preloadChildren($0) }
+        applyDiff(parent: node, desired: merged.nodes, current: current) { node.preloadChildren($0) }
         if wasExpanded, !outlineView.isItemExpanded(node) {
             outlineView.expandItem(node)
         }
+        reloadTagRows(merged.retag)
         // Disclosure triangle: an emptied folder is no longer expandable.
         outlineView.reloadItem(node, reloadChildren: false)
     }
@@ -959,6 +1138,66 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         onOpenFolderInPlace?(node.url)
     }
 
+    @objc private func toggleFinderColor(_ sender: NSMenuItem) {
+        guard let node = clickedNode, let color = FinderLabelColor(labelNumber: sender.tag) else { return }
+        writeFinderTags(node.tags.toggling(color), on: node)
+    }
+
+    @objc private func removeCustomFinderTag(_ sender: NSMenuItem) {
+        guard let node = clickedNode, let name = sender.representedObject as? String else { return }
+        writeFinderTags(node.tags.removingCustom(name), on: node)
+    }
+
+    @objc private func clearFinderTags(_ sender: Any?) {
+        guard let node = clickedNode else { return }
+        writeFinderTags(.empty, on: node)
+    }
+
+    /// Writes the tag names and the legacy label number back to Finder, then
+    /// repaints every row for that path. The tree is not rebuilt.
+    private func writeFinderTags(_ tags: FinderFolderTags, on node: FolderNode) {
+        let path = node.standardizedPath
+        var url = node.url
+        var values = URLResourceValues()
+        values.tagNames = tags.finderTagNames
+        values.labelNumber = tags.finderLabelNumber
+        do {
+            try url.setResourceValues(values)
+        } catch {
+            var namesOnly = URLResourceValues()
+            namesOnly.tagNames = tags.finderTagNames
+            do {
+                try url.setResourceValues(namesOnly)
+            } catch {
+                NSSound.beep()
+                return
+            }
+        }
+        FinderTagCache.shared.store(tags, for: path, bump: true)
+        var changed: [FolderNode] = []
+        forEachLoadedNode { row in
+            guard row.standardizedPath == path, row.tags != tags else { return }
+            row.tags = tags
+            changed.append(row)
+        }
+        if !changed.contains(where: { $0 === node }) {
+            node.tags = tags
+            changed.append(node)
+        }
+        reloadTagRows(changed)
+    }
+
+    private func tagSwatch(_ color: FinderLabelColor) -> NSImage {
+        let image = NSImage(size: NSSize(width: 12, height: 12))
+        image.lockFocus()
+        let (r, g, b) = color.rgba
+        NSColor(srgbRed: r, green: g, blue: b, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 10, height: 10)).fill()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
     @objc private func toggleFavorite(_ sender: Any?) {
         guard let node = clickedNode else { return }
         var favs = favoritePaths
@@ -1068,6 +1307,36 @@ extension FolderSidebarViewController: NSMenuDelegate {
         edit.target = self
         menu.addItem(edit)
 
+        menu.addItem(.separator())
+        let tagsMenu = NSMenu()
+        for color in FinderLabelColor.menuOrder {
+            let item = NSMenuItem(title: color.finderName, action: #selector(toggleFinderColor(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = color.rawValue
+            item.state = node.tags.colors.contains(color) ? .on : .off
+            item.image = tagSwatch(color)
+            tagsMenu.addItem(item)
+        }
+        if !node.tags.custom.isEmpty {
+            tagsMenu.addItem(.separator())
+            for name in node.tags.custom {
+                let item = NSMenuItem(title: name, action: #selector(removeCustomFinderTag(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = name
+                item.state = .on
+                tagsMenu.addItem(item)
+            }
+        }
+        if !node.tags.isEmpty {
+            tagsMenu.addItem(.separator())
+            let clear = NSMenuItem(title: "Clear Tags", action: #selector(clearFinderTags(_:)), keyEquivalent: "")
+            clear.target = self
+            tagsMenu.addItem(clear)
+        }
+        let tagsRoot = NSMenuItem(title: "Tags", action: nil, keyEquivalent: "")
+        tagsRoot.submenu = tagsMenu
+        menu.addItem(tagsRoot)
+
         if LightroomBridge.isAvailable {
             menu.addItem(.separator())
             let lightroom = NSMenuItem(title: "Send Folder to Lightroom",
@@ -1098,6 +1367,99 @@ enum CollisionPrompt {
         case .alertThirdButtonReturn: return .overwrite
         default: return nil
         }
+    }
+}
+
+/// Folder row: name, then Finder's colored dots, then custom tag names.
+/// The name truncates before the dots do. Circles are the Finder mark;
+/// photo color chips elsewhere stay square.
+private final class FolderLabelCell: NSTableCellView {
+    private let dots = NSStackView()
+    private let customField = NSTextField(labelWithString: "")
+    private var shownColors: [FinderLabelColor] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyDown
+        addSubview(icon)
+        imageView = icon
+
+        let text = NSTextField(labelWithString: "")
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.lineBreakMode = .byTruncatingTail
+        text.font = Theme.body
+        text.textColor = .labelColor
+        text.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(480), for: .horizontal)
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        addSubview(text)
+        textField = text
+
+        dots.orientation = .horizontal
+        dots.alignment = .centerY
+        dots.spacing = 3
+        dots.translatesAutoresizingMaskIntoConstraints = false
+        dots.setContentHuggingPriority(.required, for: .horizontal)
+        dots.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        customField.translatesAutoresizingMaskIntoConstraints = false
+        customField.font = Theme.caption
+        customField.textColor = Theme.tx2
+        customField.lineBreakMode = .byTruncatingTail
+        customField.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
+        customField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        customField.widthAnchor.constraint(lessThanOrEqualToConstant: 120).isActive = true
+
+        let trail = NSStackView(views: [dots, customField])
+        trail.orientation = .horizontal
+        trail.alignment = .centerY
+        trail.spacing = 4
+        trail.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(trail)
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trail.leadingAnchor.constraint(equalTo: text.trailingAnchor, constant: 6),
+            trail.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func apply(name: String, tags: FinderFolderTags, icon: NSImage?) {
+        textField?.stringValue = name
+        imageView?.image = icon
+        imageView?.contentTintColor = .secondaryLabelColor
+        customField.stringValue = tags.custom.joined(separator: "  ")
+        customField.isHidden = tags.custom.isEmpty
+        if shownColors != tags.colors {
+            shownColors = tags.colors
+            for view in dots.arrangedSubviews {
+                dots.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+            for color in tags.colors {
+                let dot = NSView()
+                dot.translatesAutoresizingMaskIntoConstraints = false
+                dot.wantsLayer = true
+                let (r, g, b) = color.rgba
+                dot.layer?.backgroundColor = NSColor(srgbRed: r, green: g, blue: b, alpha: 1).cgColor
+                dot.layer?.cornerRadius = 3.5
+                dot.widthAnchor.constraint(equalToConstant: 7).isActive = true
+                dot.heightAnchor.constraint(equalToConstant: 7).isActive = true
+                dots.addArrangedSubview(dot)
+            }
+        }
+        dots.isHidden = tags.colors.isEmpty
+        toolTip = tags.isEmpty ? nil : tags.summary
+        setAccessibilityLabel(tags.isEmpty ? name : "\(name), \(tags.summary)")
     }
 }
 
