@@ -388,7 +388,18 @@ final class PhotoGridViewController: NSViewController,
     private var colorFilter: Set<Int> = []   // 0 = "no label" (grey dot)
     private var sortKey: SortKey = .name
     private var sortAscending = true
-    private var captureDates: [String: Date] = [:]
+    /// True once this folder's capture times have been read. Until then a
+    /// time sort is not shown, so the grid cannot reshuffle as dates arrive.
+    private var captureReady = false
+    private var captureReadInFlight = false
+    private var captureReadDone = 0
+    private var captureReadTotal = 0
+    private struct CaptureStamp {
+        var hasDate: Bool
+        var seconds: TimeInterval
+        var subsecMillis: Int
+    }
+    private var captureTimes: [String: CaptureStamp] = [:]
     private var currentFolder: URL?
 
     private let scrollView = GraphiteScrollView()
@@ -601,10 +612,11 @@ final class PhotoGridViewController: NSViewController,
         sortBar.onChange = { [weak self] index in
             guard let self, let key = SortKey(rawValue: index) else { return }
             self.sortKey = key
-            self.resort(keepSelection: true)
-            if key == .capture, self.captureDates.isEmpty, !self.allAssets.isEmpty {
-                self.scanCaptureDates(self.allAssets, generation: self.folderLoad.generation)
+            if key == .capture, !self.captureReady {
+                self.updateStatus()
+                return
             }
+            self.resort(keepSelection: true)
         }
         toolbar.addSubview(sortBar)
 
@@ -1017,24 +1029,29 @@ final class PhotoGridViewController: NSViewController,
                 guard let self, self.folderLoad.accepts(generation) else { return }
                 self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
-                if self.sortKey == .name {
-                    self.allAssets = self.sortAscending ? result.assets : result.assets.reversed()
-                } else {
-                    self.allAssets = self.sorted(result.assets)
-                }
+                self.captureTimes = [:]
+                self.captureReady = result.assets.isEmpty
+                self.captureReadInFlight = !result.assets.isEmpty
+                self.captureReadDone = 0
+                self.captureReadTotal = result.assets.count
+                self.allAssets = result.assets
                 self.rebuildSearchIndex()
                 self.scanMS = result.elapsed * 1000
                 self.pairedHidden = result.pairedJPEGCount
-                self.captureDates = [:]
-                self.applyFilter(keepSelection: false)
-                self.scanSidecars(self.allAssets, generation: generation)
-                // Capture dates need an EXIF header read PER FILE - thousands
-                // of drive reads that fight the thumbnails. The default name
-                // sort never uses them, so only pay it when sorting by
-                // capture (and lazily on the first switch to it).
                 if self.sortKey == .capture {
-                    self.scanCaptureDates(result.assets, generation: generation)
+                    // Name order is not a time order. Hold the grid until the
+                    // dates are in, then sort once.
+                    self.displayedAssets = []
+                    self.collectionView.reloadData()
+                    self.emptyLabel.stringValue = result.assets.isEmpty ? "No photos in this folder" : "Reading capture times…"
+                    self.updateStatus()
+                } else {
+                    self.allAssets = self.sorted(result.assets)
+                    self.rebuildSearchIndex()
+                    self.applyFilter(keepSelection: false)
                 }
+                self.scanSidecars(self.allAssets, generation: generation)
+                self.scanCaptureDates(result.assets, generation: generation)
                 // Face analysis reads a big decode PER photo. On a 5k folder
                 // on an external drive it saturates I/O and starves the very
                 // thumbnails the user is looking at. Let the thumbnails win
@@ -1052,21 +1069,73 @@ final class PhotoGridViewController: NSViewController,
     /// Sidecar ratings/labels from Lightroom/Photo Mechanic are adopted so
     /// culls done elsewhere show up here.
     private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
-        // Dates only - sidecar adoption streams separately (scanSidecars).
-        // A capture date needs an image-header read, 10–50× the cost of a
-        // sidecar; bundling them made Lightroom/PM ratings wait ~2 s behind
-        // the EXIF pass on a 2,000-RAW folder.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            var dates: [String: Date] = [:]
+        guard !assets.isEmpty else { return }
+        let started = Date()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let cached = CaptureDateStore.shared.snapshot()
+            var stamps: [String: CaptureStamp] = [:]
+            var misses: [PhotoAsset] = []
+            stamps.reserveCapacity(assets.count)
             for asset in assets {
-                if let date = FolderScanner.captureDate(of: asset.url) {
-                    dates[asset.id] = date
+                let values = try? asset.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let size = Int64(values?.fileSize ?? 0)
+                let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+                if let record = cached.record(path: asset.url.path, size: size, mtime: mtime) {
+                    stamps[asset.id] = CaptureStamp(hasDate: record.hasDate, seconds: record.seconds,
+                                                    subsecMillis: record.subsecMillis)
+                } else {
+                    misses.append(asset)
                 }
             }
+            let pool = OperationQueue()
+            pool.maxConcurrentOperationCount = 6
+            pool.qualityOfService = .userInitiated
+            let lock = NSLock()
+            var fresh: [CaptureDateRecord] = []
+            var done = stamps.count
+            let total = assets.count
+            let group = DispatchGroup()
+            for asset in misses {
+                group.enter()
+                pool.addOperation {
+                    let read = FolderScanner.readCapture(asset.url)
+                    let identity = CaptureDateCache.identity(path: asset.url.path, size: read.size, mtime: read.mtime)
+                    let record = CaptureDateRecord(identity: identity, hasDate: read.hasDate,
+                                                   seconds: read.seconds, subsecMillis: read.subsecMillis)
+                    let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds, subsecMillis: read.subsecMillis)
+                    lock.lock()
+                    stamps[asset.id] = stamp
+                    fresh.append(record)
+                    done += 1
+                    let report = done
+                    lock.unlock()
+                    if report == total || report % 250 == 0 {
+                        DispatchQueue.main.async {
+                            guard let self, self.folderLoad.accepts(generation) else { return }
+                            self.captureReadDone = report
+                            self.captureReadTotal = total
+                            self.updateStatus()
+                        }
+                    }
+                    group.leave()
+                }
+            }
+            group.wait()
+            pool.waitUntilAllOperationsAreFinished()
+            CaptureDateStore.shared.merge(fresh)
+            let elapsed = Date().timeIntervalSince(started)
+            let finished = stamps
+            NSLog("funo: capture times %.0f ms for %d files", elapsed * 1000, total)
             DispatchQueue.main.async {
                 guard let self, self.folderLoad.accepts(generation) else { return }
-                self.captureDates = dates
-                if self.sortKey == .capture { self.resort(keepSelection: true) }
+                self.captureTimes = finished
+                self.captureReady = true
+                self.captureReadInFlight = false
+                self.captureReadDone = total
+                if self.sortKey == .capture {
+                    self.resort(keepSelection: true)
+                }
+                self.updateStatus()
             }
         }
     }
@@ -1127,22 +1196,35 @@ final class PhotoGridViewController: NSViewController,
     // MARK: - Sorting
 
     private func sorted(_ assets: [PhotoAsset]) -> [PhotoAsset] {
-        var result: [PhotoAsset]
         switch sortKey {
         case .name:
-            result = assets.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }
+            return assets.sorted { nameOrdered($0, before: $1) }
         case .capture:
-            result = assets.sorted {
-                let a = captureDates[$0.id] ?? $0.modificationDate
-                let b = captureDates[$1.id] ?? $1.modificationDate
-                if a != b { return a < b }
-                return $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
-            }
+            return assets.sorted { captureOrdered($0, before: $1) }
         }
-        return sortAscending ? result : result.reversed()
+    }
+
+    /// Direction is only this flag. The array is never reversed in place.
+    private func nameOrdered(_ a: PhotoAsset, before b: PhotoAsset) -> Bool {
+        let order = a.filename.localizedStandardCompare(b.filename)
+        if order == .orderedSame { return false }
+        return sortAscending ? order == .orderedAscending : order == .orderedDescending
+    }
+
+    private func captureOrdered(_ a: PhotoAsset, before b: PhotoAsset) -> Bool {
+        let left = captureTimes[a.id]
+        let right = captureTimes[b.id]
+        return CaptureSort.isOrderedBefore(
+            CaptureSortKey(filename: a.filename, hasDate: left?.hasDate ?? false,
+                           seconds: left?.seconds ?? 0, subsecMillis: left?.subsecMillis ?? 0),
+            CaptureSortKey(filename: b.filename, hasDate: right?.hasDate ?? false,
+                           seconds: right?.seconds ?? 0, subsecMillis: right?.subsecMillis ?? 0),
+            ascending: sortAscending
+        )
     }
 
     private func resort(keepSelection: Bool) {
+        guard sortKey != .capture || captureReady else { return }
         allAssets = sorted(allAssets)
         rebuildSearchIndex()
         applyFilter(keepSelection: keepSelection)
@@ -1151,6 +1233,12 @@ final class PhotoGridViewController: NSViewController,
     @objc private func toggleSortDirection(_ sender: Any?) {
         sortAscending.toggle()
         sortDirectionButton.title = sortAscending ? "↑" : "↓"
+        // Dates still coming in: remember the direction and apply it once,
+        // instead of flipping a half-sorted list.
+        guard sortKey != .capture || captureReady else {
+            updateStatus()
+            return
+        }
         resort(keepSelection: true)
     }
 
@@ -1230,6 +1318,9 @@ final class PhotoGridViewController: NSViewController,
         }
         var parts: [String] = []
         parts.append("\(allAssets.count) photos")
+        if captureReadInFlight {
+            parts.append("reading times \(captureReadDone)/\(captureReadTotal)")
+        }
         if isFiltering { parts.append("showing \(displayedAssets.count)") }
         if pairedHidden > 0 { parts.append("+\(pairedHidden) paired JPEGs hidden") }
         #if DEBUG
