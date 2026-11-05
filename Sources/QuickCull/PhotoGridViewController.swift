@@ -37,9 +37,9 @@ final class CullCollectionView: NSCollectionView {
     }
 }
 
-/// One cell in the contact sheet, styled after the mockup: rounded graphite
-/// card, thumbnail, meta row (filename + format badge), amber stars overlay,
-/// dimmed + red ✕ when rejected.
+/// One cell in the contact sheet. The thumbnail is only the photograph.
+/// Color, stars, filename, and format sit in a caption under it — nothing
+/// is drawn on the image, and the label is a square, not a wash or an edge.
 /// Grid thumbnail: a plain layer-backed view (contents = cgImage) instead
 /// of NSImageView - pure GPU compositing, cheaper on fast scroll. .resizeAspect
 /// fits the WHOLE frame (no crop), matching the old scaleProportionallyDown.
@@ -115,11 +115,14 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     static let identifier = NSUserInterfaceItemIdentifier("PhotoItem")
 
     private let thumbView = GridThumbView(frame: .zero)
+    private let caption = NSView()
+    private let colorDot = NSView()
+    private let markLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
-    private let starsLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
-    private let chipLabel = NSTextField(labelWithString: "")
-    private let container = NSView()
+    private let formatLabel = NSTextField(labelWithString: "")
+    private var dotWidth: NSLayoutConstraint!
+    private var dotGap: NSLayoutConstraint!
+    private var markGap: NSLayoutConstraint!
 
     private(set) var representedURL: URL?
     /// URL of an in-flight thumbnail request, so a layout repair doesn't
@@ -147,8 +150,9 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         onDoubleClick = nil
         onRenameCommitted = nil
         thumbView.setImage(nil)
-        container.alphaValue = 1
-        container.layer?.borderWidth = 0
+        thumbView.alphaValue = 1
+        thumbView.layer?.borderWidth = 0
+        nameLabel.textColor = Theme.tx1
     }
 
     override func loadView() {
@@ -161,85 +165,75 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 9
-        container.layer?.masksToBounds = true
-        container.layer?.backgroundColor = Theme.bg2.cgColor
-        container.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(container)
-
+        // Selection is a 1px stroke on the thumbnail layer. No card, no mask,
+        // no shadow — the contents path stays a single layer assign.
+        thumbView.layer?.borderColor = Theme.tx0.cgColor
         thumbView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(thumbView)
+        view.addSubview(thumbView)
+
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(caption)
+
+        colorDot.wantsLayer = true
+        colorDot.translatesAutoresizingMaskIntoConstraints = false
+        caption.addSubview(colorDot)
+
+        markLabel.font = Theme.monoCaption
+        markLabel.textColor = Theme.accent
+        markLabel.translatesAutoresizingMaskIntoConstraints = false
+        markLabel.setContentHuggingPriority(.required, for: .horizontal)
+        markLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        caption.addSubview(markLabel)
 
         nameLabel.font = Theme.monoCaption
         nameLabel.textColor = Theme.tx1
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.usesSingleLineMode = true
-        nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.delegate = self
         nameLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:))))
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(nameLabel)
+        caption.addSubview(nameLabel)
 
-        badgeLabel.font = Theme.monoEyebrow
-        badgeLabel.textColor = Theme.tx2
-        badgeLabel.wantsLayer = true
-        badgeLabel.layer?.borderColor = Theme.line.cgColor
-        badgeLabel.layer?.borderWidth = 1
-        badgeLabel.layer?.cornerRadius = 4
-        badgeLabel.alignment = .center
-        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(badgeLabel)
+        formatLabel.font = Theme.monoCaption
+        formatLabel.textColor = Theme.tx2
+        formatLabel.alignment = .right
+        formatLabel.translatesAutoresizingMaskIntoConstraints = false
+        formatLabel.setContentHuggingPriority(.required, for: .horizontal)
+        formatLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        caption.addSubview(formatLabel)
 
-        // Stars live in the card's top padding - on graphite, never fighting
-        // a bright image for contrast.
-        starsLabel.font = Theme.secondary
-        starsLabel.textColor = Theme.accent
-        starsLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(starsLabel)
-
-        // Scale-aware cull chip: once thumbs shrink past the point where a
-        // star row can survive, the cull state compresses into a solid chip
-        // with constant pixel weight (see applyCullScale).
-        chipLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
-        chipLabel.alignment = .center
-        chipLabel.wantsLayer = true
-        chipLabel.layer?.cornerRadius = 3
-        chipLabel.isHidden = true
-        chipLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(chipLabel)
-
+        dotWidth = colorDot.widthAnchor.constraint(equalToConstant: 0)
+        dotGap = markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: 0)
+        markGap = nameLabel.leadingAnchor.constraint(equalTo: markLabel.trailingAnchor, constant: 0)
         NSLayoutConstraint.activate([
-            container.topAnchor.constraint(equalTo: view.topAnchor),
-            container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            container.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbView.topAnchor.constraint(equalTo: view.topAnchor),
+            thumbView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            thumbView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbView.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -3),
 
-            starsLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
-            starsLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            starsLabel.heightAnchor.constraint(equalToConstant: 15),
+            caption.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            caption.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            caption.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            caption.heightAnchor.constraint(equalToConstant: 16),
 
-            chipLabel.centerYAnchor.constraint(equalTo: starsLabel.centerYAnchor),
-            chipLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            chipLabel.heightAnchor.constraint(equalToConstant: 14),
-            chipLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 18),
+            colorDot.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
+            colorDot.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            colorDot.heightAnchor.constraint(equalToConstant: 8),
+            dotWidth,
 
-            thumbView.topAnchor.constraint(equalTo: container.topAnchor, constant: 25),
-            thumbView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            thumbView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
-            thumbView.bottomAnchor.constraint(equalTo: nameLabel.topAnchor, constant: -3),
+            markLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            dotGap,
 
-            nameLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            nameLabel.trailingAnchor.constraint(equalTo: badgeLabel.leadingAnchor, constant: -6),
-            nameLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
-            nameLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 13),
+            nameLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            markGap,
+            nameLabel.trailingAnchor.constraint(equalTo: formatLabel.leadingAnchor, constant: -6),
 
-            badgeLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            badgeLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            badgeLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 26),
-
+            formatLabel.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
+            formatLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
         ])
+        thumbView.layer?.borderWidth = isSelected ? 1 : 0
+        nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
     }
 
     func configure(asset: PhotoAsset) {
@@ -250,7 +244,10 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
             thumbFailures = 0
         }
         representedURL = asset.url
-        nameLabel.stringValue = asset.filename
+        let format = CellCaption.formatTag(isRAW: asset.isRAW, hasJPEGPair: asset.hasJPEGPair,
+                                           pathExtension: asset.url.pathExtension)
+        formatLabel.stringValue = format
+        if editingBase == nil { nameLabel.stringValue = asset.filename }
         // A cache miss on a reused cell used to clear the layer and wait.
         // When the URL hasn't changed (selection/label refresh, a reload
         // that recycled the same photo), keep the pixels we already have
@@ -259,13 +256,6 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
             thumbView.setImage(cached)
         } else if urlChanged {
             thumbView.setImage(nil)
-        }
-        if asset.hasJPEGPair {
-            badgeLabel.stringValue = "R+J"
-        } else if asset.isRAW {
-            badgeLabel.stringValue = "RAW"
-        } else {
-            badgeLabel.stringValue = asset.url.pathExtension.uppercased()
         }
         refreshCullState(assetID: asset.id)
     }
@@ -287,69 +277,34 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     }
 
     func refreshCullState(assetID: String) {
-        let rating = RatingsStore.shared.rating(for: assetID)
-        let isRejected = RatingsStore.shared.isRejected(assetID)
-        container.alphaValue = isRejected ? 0.26 : 1.0
-        if isRejected {
-            starsLabel.stringValue = "✕"
-            starsLabel.textColor = Theme.red
-        } else {
-            starsLabel.stringValue = rating > 0 ? String(repeating: "★", count: rating) : ""
-            starsLabel.textColor = Theme.accent
+        let caption = CellCaption.make(
+            filename: nameLabel.stringValue,
+            format: formatLabel.stringValue,
+            rating: RatingsStore.shared.rating(for: assetID),
+            rejected: RatingsStore.shared.isRejected(assetID),
+            colorLabel: RatingsStore.shared.colorLabel(for: assetID)
+        )
+        // Reject dims the photograph only. The caption stays full strength
+        // so the ✕ and the filename stay readable.
+        thumbView.alphaValue = caption.rejected ? 0.4 : 1
+        if caption.showsColorDot {
+            colorDot.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
         }
-        // Color label tints the whole card - reads at a glance from across
-        // the room, the way Photo Mechanic color classes do.
-        let color = RatingsStore.shared.colorLabel(for: assetID)
-        if color > 0 {
-            let tint = Theme.bg2.blended(withFraction: 0.42, of: Theme.labelColors[color]) ?? Theme.bg2
-            container.layer?.backgroundColor = tint.cgColor
-        } else {
-            container.layer?.backgroundColor = Theme.bg2.cgColor
-        }
-        // Chip content mirrors the star row (the card tint already carries
-        // the color label at every size, so the chip earns its place only
-        // for rejects and star counts - the two states the row loses).
-        if isRejected {
-            chipLabel.stringValue = "✕"
-            chipLabel.layer?.backgroundColor = Theme.red.cgColor
-            chipLabel.textColor = .white
-        } else if rating > 0 {
-            chipLabel.stringValue = "★\(rating)"
-            let bg = color > 0 ? Theme.labelColors[color] : Theme.accent
-            chipLabel.layer?.backgroundColor = bg.cgColor
-            chipLabel.textColor = color > 0 ? .white : Theme.bg1
-        } else {
-            chipLabel.stringValue = ""
-        }
-        applyCullScale()
-    }
-
-    /// The star-row-vs-chip switch: the elegant row at generous card sizes,
-    /// the solid chip once the card narrows past ~100pt and the row stops
-    /// reading. One rule, driven by the size slider the grid already has.
-    private func applyCullScale() {
-        // Width 0 is "not laid out yet", not "compact". Treating it as
-        // compact hid the star row and flashed the chip on every reuse.
-        let width = view.bounds.width
-        let compact = width > 1 && width < 100
-        let hasChip = !chipLabel.stringValue.isEmpty
-        let chipHidden = !(compact && hasChip)
-        let starsHidden = compact && hasChip
-        // Toggling isHidden unconditionally invalidates layout. During a
-        // scroll that's a layout loop and a visible flicker.
-        if chipLabel.isHidden != chipHidden { chipLabel.isHidden = chipHidden }
-        if starsLabel.isHidden != starsHidden { starsLabel.isHidden = starsHidden }
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        applyCullScale()
+        let showDot = caption.showsColorDot
+        if dotWidth.constant != (showDot ? 8 : 0) { dotWidth.constant = showDot ? 8 : 0 }
+        if dotGap.constant != (showDot ? 4 : 0) { dotGap.constant = showDot ? 4 : 0 }
+        markLabel.stringValue = caption.mark
+        markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
+        let markGapValue: CGFloat = caption.mark.isEmpty ? 0 : 4
+        if markGap.constant != markGapValue { markGap.constant = markGapValue }
     }
 
     override var isSelected: Bool {
         didSet {
-            container.layer?.borderWidth = isSelected ? 2.5 : 0
-            container.layer?.borderColor = Theme.accent.cgColor
+            thumbView.layer?.borderWidth = isSelected ? 1 : 0
+            if editingBase == nil {
+                nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
+            }
         }
     }
 
@@ -382,6 +337,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         nameLabel.isSelectable = false
         nameLabel.drawsBackground = false
         if let url = representedURL { nameLabel.stringValue = url.lastPathComponent }
+        nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
         editingBase = nil
     }
 
@@ -616,10 +572,6 @@ final class PhotoGridViewController: NSViewController,
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(toolbar)
 
-        let showLabel = Theme.sectionHeader("Show")
-        showLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(showLabel)
-
         filterBar.translatesAutoresizingMaskIntoConstraints = false
         filterBar.onChange = { [weak self] threshold, comparison, rejects in
             self?.starThreshold = threshold
@@ -635,10 +587,6 @@ final class PhotoGridViewController: NSViewController,
             self?.applyFilter(keepSelection: true)
         }
         toolbar.addSubview(colorFilterBar)
-
-        let sortLabel = Theme.sectionHeader("Sort")
-        sortLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(sortLabel)
 
         sortBar.translatesAutoresizingMaskIntoConstraints = false
         sortBar.onChange = { [weak self] index in
@@ -661,15 +609,11 @@ final class PhotoGridViewController: NSViewController,
         sortDirectionButton.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(sortDirectionButton)
 
-        let sizeLabel = Theme.sectionHeader("Size")
-        sizeLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(sizeLabel)
-
         sizeSlider.minValue = 120
         sizeSlider.maxValue = 320
         sizeSlider.doubleValue = 176
         sizeSlider.controlSize = .small
-        sizeSlider.trackFillColor = Theme.accent
+        sizeSlider.trackFillColor = Theme.tx2
         sizeSlider.target = self
         sizeSlider.action = #selector(thumbSizeChanged(_:))
         sizeSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -714,7 +658,7 @@ final class PhotoGridViewController: NSViewController,
 
         // The status line renders in the WINDOW footer (StatusFooterView) -
         // this grid feeds it via onStatusChanged when it's the active tab.
-        compactHiddenViews = [sizeLabel, sizeSlider]
+        compactHiddenViews = [sizeSlider]
 
         emptyLabel.font = Theme.headline
         emptyLabel.textColor = Theme.tx2
@@ -738,30 +682,24 @@ final class PhotoGridViewController: NSViewController,
             toolbar.topAnchor.constraint(equalTo: view.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.heightAnchor.constraint(equalToConstant: 42),
+            toolbar.heightAnchor.constraint(equalToConstant: 32),
 
-            showLabel.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 14),
-            showLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            filterBar.leadingAnchor.constraint(equalTo: showLabel.trailingAnchor, constant: 10),
+            filterBar.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 12),
             filterBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            colorFilterBar.leadingAnchor.constraint(equalTo: filterBar.trailingAnchor, constant: 12),
+            colorFilterBar.leadingAnchor.constraint(equalTo: filterBar.trailingAnchor, constant: 14),
             colorFilterBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sep1.leadingAnchor.constraint(equalTo: colorFilterBar.trailingAnchor, constant: 16),
+            sep1.leadingAnchor.constraint(equalTo: colorFilterBar.trailingAnchor, constant: 14),
             sep1.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sortLabel.leadingAnchor.constraint(equalTo: sep1.trailingAnchor, constant: 16),
-            sortLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            sortBar.leadingAnchor.constraint(equalTo: sortLabel.trailingAnchor, constant: 10),
+            sortBar.leadingAnchor.constraint(equalTo: sep1.trailingAnchor, constant: 14),
             sortBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             sortDirectionButton.leadingAnchor.constraint(equalTo: sortBar.trailingAnchor, constant: 6),
             sortDirectionButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sizeSlider.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -14),
-            sizeSlider.widthAnchor.constraint(equalToConstant: 120),
+            sizeSlider.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -12),
+            sizeSlider.widthAnchor.constraint(equalToConstant: 96),
             sizeSlider.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            sizeLabel.trailingAnchor.constraint(equalTo: sizeSlider.leadingAnchor, constant: -8),
-            sizeLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
             toolbarLine.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor),
             toolbarLine.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),

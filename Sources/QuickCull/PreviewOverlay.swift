@@ -70,15 +70,16 @@ final class StageImageView: NSView {
     }
 }
 
-/// One frame in the filmstrip: thumbnail, amber ring when current, color
-/// label as a strip along the bottom, stars/reject badge, dimmed when culled.
+/// One frame in the filmstrip. The thumbnail is only the photograph.
+/// An 8px color square and the stars sit in a caption under it.
 final class FilmstripItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("FilmstripItem")
 
     private let thumb = NSImageView()
-    private let colorStrip = NSView()
-    private let badgePlate = NSView()
-    private let badge = NSTextField(labelWithString: "")
+    private let colorDot = NSView()
+    private let markLabel = NSTextField(labelWithString: "")
+    private var dotWidth: NSLayoutConstraint!
+    private var dotGap: NSLayoutConstraint!
     private(set) var representedURL: URL?
 
     override func loadView() {
@@ -88,55 +89,37 @@ final class FilmstripItem: NSCollectionViewItem {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.layer?.cornerRadius = 4
-        view.layer?.masksToBounds = true
-        view.layer?.backgroundColor = Theme.bg2.cgColor
-
         thumb.imageScaling = .scaleProportionallyUpOrDown
+        thumb.wantsLayer = true
+        thumb.layer?.borderColor = Theme.tx0.cgColor
         thumb.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumb)
 
-        colorStrip.wantsLayer = true
-        colorStrip.layer?.cornerRadius = 2 // reads as a tag on the photo, not frame chrome
-        colorStrip.isHidden = true
-        colorStrip.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(colorStrip)
+        colorDot.wantsLayer = true
+        colorDot.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(colorDot)
 
-        // Rating/reject chip: stars on a dark scrim so they stay legible over
-        // any thumbnail (bare gold text vanished on bright/warm frames). The
-        // plate hugs the label and hides itself when there's nothing to show.
-        badgePlate.wantsLayer = true
-        badgePlate.layer?.cornerRadius = 3
-        badgePlate.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
-        badgePlate.isHidden = true
-        badgePlate.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(badgePlate)
+        markLabel.font = Theme.monoCaption
+        markLabel.textColor = Theme.accent
+        markLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(markLabel)
 
-        badge.font = Theme.secondaryStrong
-        badge.translatesAutoresizingMaskIntoConstraints = false
-        badgePlate.addSubview(badge)
-
+        dotWidth = colorDot.widthAnchor.constraint(equalToConstant: 0)
+        dotGap = markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: 0)
         NSLayoutConstraint.activate([
-            // Gallery mat: content sits 4px inside the cell, so the amber
-            // current-frame ring (drawn on the cell edge) and the color-label
-            // strip (on the photo's own edge) never touch - the dark gap
-            // between them is what kills the amber-on-red clash.
-            thumb.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
-            thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
-            thumb.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
-            thumb.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
+            thumb.topAnchor.constraint(equalTo: view.topAnchor),
+            thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            thumb.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumb.bottomAnchor.constraint(equalTo: colorDot.topAnchor, constant: -3),
 
-            colorStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
-            colorStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
-            colorStrip.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
-            colorStrip.heightAnchor.constraint(equalToConstant: 4),
+            colorDot.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            colorDot.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -1),
+            colorDot.heightAnchor.constraint(equalToConstant: 8),
+            dotWidth,
 
-            badgePlate.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            badgePlate.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
-            badge.leadingAnchor.constraint(equalTo: badgePlate.leadingAnchor, constant: 5),
-            badge.trailingAnchor.constraint(equalTo: badgePlate.trailingAnchor, constant: -5),
-            badge.topAnchor.constraint(equalTo: badgePlate.topAnchor, constant: 1),
-            badge.bottomAnchor.constraint(equalTo: badgePlate.bottomAnchor, constant: -1)
+            markLabel.centerYAnchor.constraint(equalTo: colorDot.centerYAnchor),
+            markLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor),
+            dotGap,
         ])
     }
 
@@ -147,22 +130,20 @@ final class FilmstripItem: NSCollectionViewItem {
         let rejected = RatingsStore.shared.isRejected(id)
         let rating = RatingsStore.shared.rating(for: id)
         let color = RatingsStore.shared.colorLabel(for: id)
+        let caption = CellCaption.make(filename: "", format: "", rating: rating,
+                                       rejected: rejected, colorLabel: color)
 
-        view.alphaValue = rejected ? 0.22 : (isCurrent ? 1.0 : 0.55)
-        view.layer?.borderWidth = isCurrent ? 2 : 0
-        view.layer?.borderColor = Theme.accent.cgColor
+        thumb.alphaValue = rejected ? 0.4 : 1
+        thumb.layer?.borderWidth = isCurrent ? 1 : 0
 
-        colorStrip.isHidden = color == 0
-        if color > 0 { colorStrip.layer?.backgroundColor = Theme.labelColors[color].cgColor }
-
-        if rejected {
-            badge.stringValue = "✕"
-            badge.textColor = Theme.red
-        } else {
-            badge.stringValue = rating > 0 ? String(repeating: "★", count: rating) : ""
-            badge.textColor = Theme.accent
+        if caption.showsColorDot {
+            colorDot.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
         }
-        badgePlate.isHidden = badge.stringValue.isEmpty
+        let showDot = caption.showsColorDot
+        if dotWidth.constant != (showDot ? 8 : 0) { dotWidth.constant = showDot ? 8 : 0 }
+        if dotGap.constant != (showDot ? 3 : 0) { dotGap.constant = showDot ? 3 : 0 }
+        markLabel.stringValue = caption.mark
+        markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
 
         let url = asset.url
         let rotation = RatingsStore.shared.rotation(for: url.path)
@@ -374,64 +355,38 @@ final class PreviewOverlayView: NSView {
         zoomLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(zoomLabel)
 
-        // The cull readout: a dark plate riding the stage's bottom-left, a
-        // proper color swatch (not a hairline) + stars / reject. Hidden when
-        // the frame carries no cull state at all.
+        // Caption bar under the stage: filename lives on the left (infoLabel),
+        // color square and stars on the right. Nothing sits on the photograph.
+        // Focus, eyes, and frame stay in the info rail.
         cullPlate.wantsLayer = true
-        cullPlate.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        cullPlate.layer?.cornerRadius = 7
-        cullPlate.layer?.borderWidth = 1
-        cullPlate.layer?.borderColor = Theme.line.cgColor
-        cullPlate.isHidden = true
+        cullPlate.layer?.backgroundColor = Theme.bg1.cgColor
         cullPlate.translatesAutoresizingMaskIntoConstraints = false
         addSubview(cullPlate)
+        let captionLine = NSView()
+        captionLine.wantsLayer = true
+        captionLine.layer?.backgroundColor = Theme.line.cgColor
+        captionLine.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(captionLine)
         cullSwatch.wantsLayer = true
-        cullSwatch.layer?.cornerRadius = 2.5
         cullSwatch.translatesAutoresizingMaskIntoConstraints = false
-        cullText.font = Theme.monoData
-        func readoutPair(_ key: NSTextField, _ value: NSTextField) -> NSStackView {
-            key.font = Theme.monoEyebrow
-            key.textColor = Theme.tx2
-            value.font = Theme.monoData
-            value.textColor = Theme.tx1
-            let v = NSStackView(views: [key, value])
-            v.orientation = .vertical
-            v.alignment = .leading
-            v.spacing = 1
-            return v
-        }
-        func hairline() -> NSView {
-            let v = NSView()
-            v.wantsLayer = true
-            v.layer?.backgroundColor = Theme.line.cgColor
-            v.translatesAutoresizingMaskIntoConstraints = false
-            v.widthAnchor.constraint(equalToConstant: 1).isActive = true
-            v.heightAnchor.constraint(equalToConstant: 22).isActive = true
-            return v
-        }
+        cullText.font = Theme.monoCaption
+        cullText.textColor = Theme.accent
         let cullGroup = NSStackView(views: [cullSwatch, cullText])
         cullGroup.orientation = .horizontal
-        cullGroup.spacing = 8
+        cullGroup.spacing = 6
         cullGroup.alignment = .centerY
-        let readout = NSStackView(views: [
-            cullGroup, hairline(),
-            readoutPair(focusKeyLabel, focusValueLabel), hairline(),
-            readoutPair(eyesKeyLabel, eyesValueLabel), hairline(),
-            readoutPair(frameKeyLabel, frameValueLabel)])
-        readout.orientation = .horizontal
-        readout.spacing = 12
-        readout.alignment = .centerY
-        readout.translatesAutoresizingMaskIntoConstraints = false
-        cullPlate.addSubview(readout)
+        cullGroup.translatesAutoresizingMaskIntoConstraints = false
+        cullPlate.addSubview(cullGroup)
         NSLayoutConstraint.activate([
-            cullSwatch.widthAnchor.constraint(equalToConstant: 5),
-            cullSwatch.heightAnchor.constraint(equalToConstant: 22),
-            readout.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 12),
-            readout.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -12),
-            readout.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
-            cullPlate.heightAnchor.constraint(equalToConstant: 44),
-        ])
-        NSLayoutConstraint.activate([
+            cullSwatch.widthAnchor.constraint(equalToConstant: 8),
+            cullSwatch.heightAnchor.constraint(equalToConstant: 8),
+            captionLine.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor),
+            captionLine.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor),
+            captionLine.topAnchor.constraint(equalTo: cullPlate.topAnchor),
+            captionLine.heightAnchor.constraint(equalToConstant: 1),
+            cullGroup.trailingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: -12),
+            cullGroup.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            cullPlate.heightAnchor.constraint(equalToConstant: 28),
         ])
 
         facesFooterLabel.font = Theme.monoCaption
@@ -487,8 +442,8 @@ final class PreviewOverlayView: NSView {
 
         // Info card: histogram + shooting data, top of the right rail.
         infoPanel.wantsLayer = true
-        infoPanel.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        infoPanel.layer?.cornerRadius = 10
+        infoPanel.layer?.backgroundColor = Theme.bg1.cgColor
+        infoPanel.layer?.cornerRadius = 0
         infoPanel.layer?.borderColor = Theme.line.cgColor
         infoPanel.layer?.borderWidth = 1
         infoPanel.layer?.masksToBounds = true // collapses cleanly to height 0
@@ -520,8 +475,6 @@ final class PreviewOverlayView: NSView {
         NSLayoutConstraint.activate([
             infoPanel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
             infoPanel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            cullPlate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            cullPlate.bottomAnchor.constraint(equalTo: filmstripScroll.bottomAnchor),
             infoHeader.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 9),
             infoHeader.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoHistogram.topAnchor.constraint(equalTo: infoHeader.bottomAnchor, constant: 10),
@@ -583,8 +536,8 @@ final class PreviewOverlayView: NSView {
         // Face side panel: right edge, where landscape photos have room to
         // spare. A contained card, not floating heads on black.
         facesPanel.wantsLayer = true
-        facesPanel.layer?.backgroundColor = Theme.bg1.withAlphaComponent(0.92).cgColor
-        facesPanel.layer?.cornerRadius = 10
+        facesPanel.layer?.backgroundColor = Theme.bg1.cgColor
+        facesPanel.layer?.cornerRadius = 0
         facesPanel.layer?.borderColor = Theme.line.cgColor
         facesPanel.layer?.borderWidth = 1
         facesPanel.translatesAutoresizingMaskIntoConstraints = false
@@ -643,6 +596,7 @@ final class PreviewOverlayView: NSView {
         footerBand.addSubview(footerLine)
 
         stageTrailing = stageScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10)
+        cullPlate.addSubview(infoLabel)
         NSLayoutConstraint.activate([
             // Layout, bottom → top: footer band (flush bottom) · filmstrip ·
             // resize handle (in the gap, never over a thumbnail) · stage.
@@ -655,16 +609,22 @@ final class PreviewOverlayView: NSView {
             footerLine.topAnchor.constraint(equalTo: footerBand.topAnchor),
             footerLine.heightAnchor.constraint(equalToConstant: 1),
 
-            // filename + exposure (left) · zoom % · hints (right), IN the band.
-            infoLabel.leadingAnchor.constraint(equalTo: footerBand.leadingAnchor, constant: 14),
-            infoLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
-            infoLabel.trailingAnchor.constraint(lessThanOrEqualTo: zoomLabel.leadingAnchor, constant: -14),
             zoomLabel.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -16),
             zoomLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
             hintLabel.trailingAnchor.constraint(equalTo: footerBand.trailingAnchor, constant: -14),
             hintLabel.centerYAnchor.constraint(equalTo: footerBand.centerYAnchor),
 
-            filmstripScroll.leadingAnchor.constraint(equalTo: cullPlate.trailingAnchor, constant: 8),
+            // Caption bar sits under the stage: filename left, color and
+            // stars right. The filmstrip runs full width beneath it.
+            // infoLabel was added before the bar; lift it above the bar fill.
+            cullPlate.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cullPlate.trailingAnchor.constraint(equalTo: trailingAnchor),
+            cullPlate.bottomAnchor.constraint(equalTo: filmstripHandle.topAnchor, constant: -4),
+            infoLabel.leadingAnchor.constraint(equalTo: cullPlate.leadingAnchor, constant: 12),
+            infoLabel.centerYAnchor.constraint(equalTo: cullPlate.centerYAnchor),
+            infoLabel.trailingAnchor.constraint(lessThanOrEqualTo: cullGroup.leadingAnchor, constant: -12),
+
+            filmstripScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             filmstripScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             filmstripScroll.bottomAnchor.constraint(equalTo: footerBand.topAnchor, constant: -6),
 
@@ -678,7 +638,7 @@ final class PreviewOverlayView: NSView {
             stageScroll.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             stageScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             stageTrailing,
-            stageScroll.bottomAnchor.constraint(equalTo: filmstripHandle.topAnchor, constant: -4),
+            stageScroll.bottomAnchor.constraint(equalTo: cullPlate.topAnchor),
 
             stageBackdrop.topAnchor.constraint(equalTo: stageScroll.topAnchor),
             stageBackdrop.leadingAnchor.constraint(equalTo: stageScroll.leadingAnchor),
@@ -1579,45 +1539,32 @@ final class PreviewOverlayView: NSView {
         }
     }
 
-    /// Reflect the CURRENT frame's cull state on the stage. `flash` pulses the
-    /// plate so a rate-and-advance keypress is felt even as the frame changes.
+    /// Color square and stars on the right of the caption bar. The bar itself
+    /// stays up — the filename lives there. Focus and eyes stay in the rail.
     private func refreshCullPlate(flash: Bool = false) {
-        guard index < assets.count else { cullPlate.isHidden = true; return }
+        guard index < assets.count else { return }
         let store = RatingsStore.shared
         let id = assets[index].id
-        let color = store.colorLabel(for: id)
-        let stars = store.rating(for: id)
-        let rejected = store.isRejected(id)
-        cullPlate.isHidden = false
-        guard color > 0 || stars > 0 || rejected else {
-            // Band persists (focus/eyes/frame still live here) - the cull
-            // segment just reads as unset.
-            cullSwatch.isHidden = true
-            cullText.stringValue = "—"
-            cullText.textColor = Theme.tx2
-            return
+        let caption = CellCaption.make(
+            filename: "", format: "",
+            rating: store.rating(for: id),
+            rejected: store.isRejected(id),
+            colorLabel: store.colorLabel(for: id)
+        )
+        cullSwatch.isHidden = !caption.showsColorDot
+        if caption.showsColorDot {
+            cullSwatch.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
         }
-        cullSwatch.isHidden = color == 0
-        cullSwatch.layer?.backgroundColor = color > 0 ? Theme.labelColors[color].cgColor : nil
-        var parts: [String] = []
-        if color > 0 { parts.append(Theme.labelNames[color]) }
-        if rejected {
-            parts.append("✕")
-            cullText.textColor = Theme.red
-        } else {
-            if stars > 0 { parts.append(String(repeating: "★", count: stars)) }
-            cullText.textColor = color > 0 ? Theme.labelColors[color] : Theme.accent
-        }
-        cullText.stringValue = parts.joined(separator: "  ")
-        if flash {
-            // Opacity pulse, not scale: layer-backed NSViews anchor at (0,0),
-            // so a scale pulse would grow from the corner and look lopsided.
-            cullPlate.layer?.removeAllAnimations()
+        cullText.stringValue = caption.mark
+        cullText.textColor = caption.rejected ? Theme.red : Theme.accent
+        if flash, !caption.mark.isEmpty {
+            cullText.layer?.removeAllAnimations()
             let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.35; pulse.toValue = 1.0
+            pulse.fromValue = 0.35
+            pulse.toValue = 1.0
             pulse.duration = 0.22
             pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            cullPlate.layer?.add(pulse, forKey: "pulse")
+            cullText.layer?.add(pulse, forKey: "pulse")
         }
     }
 

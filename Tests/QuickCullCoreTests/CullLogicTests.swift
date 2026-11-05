@@ -154,6 +154,48 @@ final class FaceResultLedgerTests: XCTestCase {
     }
 }
 
+final class CellCaptionTests: XCTestCase {
+
+    func testUnratedUnlabeledIsFilenameOnly() {
+        let caption = CellCaption.make(filename: "A7_2048.JPG", format: "JPG",
+                                       rating: 0, rejected: false, colorLabel: 0)
+        XCTAssertFalse(caption.showsColorDot)
+        XCTAssertEqual(caption.mark, "")
+        XCTAssertEqual(caption.filename, "A7_2048.JPG")
+        XCTAssertEqual(caption.format, "JPG")
+        XCTAssertFalse(caption.rejected)
+    }
+
+    func testStarsAndColorStayInTheCaption() {
+        let caption = CellCaption.make(filename: "A7_2041.CR3", format: "RAW",
+                                       rating: 2, rejected: false, colorLabel: 1)
+        XCTAssertTrue(caption.showsColorDot)
+        XCTAssertEqual(caption.colorLabel, 1)
+        XCTAssertEqual(caption.mark, "★★")
+        XCTAssertEqual(caption.format, "RAW")
+    }
+
+    func testRejectReplacesStars() {
+        let caption = CellCaption.make(filename: "A7_2061.CR3", format: "RAW",
+                                       rating: 4, rejected: true, colorLabel: 3)
+        XCTAssertTrue(caption.rejected)
+        XCTAssertEqual(caption.mark, "✕")
+        XCTAssertTrue(caption.showsColorDot)
+    }
+
+    func testFormatTag() {
+        XCTAssertEqual(CellCaption.formatTag(isRAW: true, hasJPEGPair: true, pathExtension: "cr3"), "R+J")
+        XCTAssertEqual(CellCaption.formatTag(isRAW: true, hasJPEGPair: false, pathExtension: "cr3"), "RAW")
+        XCTAssertEqual(CellCaption.formatTag(isRAW: false, hasJPEGPair: false, pathExtension: "jpg"), "JPG")
+    }
+
+    func testColorLabelClamps() {
+        let caption = CellCaption.make(filename: "a", format: "", rating: 9, rejected: false, colorLabel: 9)
+        XCTAssertEqual(caption.colorLabel, 5)
+        XCTAssertEqual(caption.mark, "★★★★★")
+    }
+}
+
 final class ThumbnailDeliveryTests: XCTestCase {
 
     func testAuthoritativeOpPublishes() {

@@ -189,7 +189,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         // ---------- left rail: the card's first frames ----------
         let rail = NSView()
         rail.wantsLayer = true
-        rail.layer?.backgroundColor = NSColor(calibratedWhite: 0.065, alpha: 1).cgColor
+        rail.layer?.backgroundColor = Theme.bg2.cgColor
         rail.translatesAutoresizingMaskIntoConstraints = false
 
         let railEyebrow = eyebrow("On this card")
@@ -264,7 +264,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         // destination well: breadcrumb row + SPACE row
         let destWell = NSView()
         destWell.wantsLayer = true
-        destWell.layer?.backgroundColor = NSColor(calibratedWhite: 0.065, alpha: 1).cgColor
+        destWell.layer?.backgroundColor = Theme.bg2.cgColor
         destWell.layer?.cornerRadius = 8
         destWell.layer?.borderWidth = 1
         destWell.layer?.borderColor = Theme.line.cgColor
@@ -291,7 +291,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
 
         let destRule = NSView()
         destRule.wantsLayer = true
-        destRule.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1).cgColor
+        destRule.layer?.backgroundColor = Theme.line.cgColor
         destRule.translatesAutoresizingMaskIntoConstraints = false
         destRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
@@ -333,7 +333,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         backupRow.spacing = 7
         backupRule = NSView()
         backupRule.wantsLayer = true
-        backupRule.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1).cgColor
+        backupRule.layer?.backgroundColor = Theme.line.cgColor
         backupRule.translatesAutoresizingMaskIntoConstraints = false
         backupRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
@@ -437,7 +437,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         drawer.spacing = 0
         drawer.edgeInsets = NSEdgeInsets(top: 14, left: 22, bottom: 16, right: 22)
         drawer.wantsLayer = true
-        drawer.layer?.backgroundColor = NSColor(srgbRed: 25/255, green: 27/255, blue: 30/255, alpha: 1).cgColor
+        drawer.layer?.backgroundColor = Theme.bg1.cgColor
         drawer.isHidden = true
 
         let defaults = UserDefaults.standard
@@ -554,7 +554,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             popup.font = Theme.secondary
             let container = NSView()
             container.wantsLayer = true
-            container.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.02).cgColor
+            container.layer?.backgroundColor = Theme.bg2.cgColor
             container.layer?.cornerRadius = 6
             container.layer?.borderWidth = 1
             container.layer?.borderColor = Theme.line.cgColor
@@ -572,7 +572,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         func drawerHairline() -> NSView {
             let line = NSView()
             line.wantsLayer = true
-            line.layer?.backgroundColor = NSColor(srgbRed: 32/255, green: 34/255, blue: 38/255, alpha: 1).cgColor
+            line.layer?.backgroundColor = Theme.line.cgColor
             line.translatesAutoresizingMaskIntoConstraints = false
             line.heightAnchor.constraint(equalToConstant: 1).isActive = true
             return line
@@ -605,7 +605,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         ])
         let headRule = NSView()
         headRule.wantsLayer = true
-        headRule.layer?.backgroundColor = NSColor(srgbRed: 38/255, green: 40/255, blue: 44/255, alpha: 1).cgColor
+        headRule.layer?.backgroundColor = Theme.line.cgColor
         headRule.translatesAutoresizingMaskIntoConstraints = false
         headRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
         headRule.setContentHuggingPriority(.init(1), for: .horizontal)
@@ -638,7 +638,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
         // ---------- footer band ----------
         let footer = NSView()
         footer.wantsLayer = true
-        footer.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.015).cgColor
+        footer.layer?.backgroundColor = Theme.bg1.cgColor
         footer.translatesAutoresizingMaskIntoConstraints = false
         let footerRule = NSView()
         footerRule.wantsLayer = true
@@ -716,7 +716,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     private func well(containing field: NSTextField, height: CGFloat) -> NSView {
         let wellView = NSView()
         wellView.wantsLayer = true
-        wellView.layer?.backgroundColor = NSColor(calibratedWhite: 0.065, alpha: 1).cgColor
+        wellView.layer?.backgroundColor = Theme.bg2.cgColor
         wellView.layer?.cornerRadius = 8
         wellView.layer?.borderWidth = 1
         wellView.layer?.borderColor = Theme.line.cgColor
@@ -813,7 +813,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
     /// making right now.
     private func refreshCrumbs() {
         let dim: [NSAttributedString.Key: Any] = [.font: Theme.monoData, .foregroundColor: Theme.tx2]
-        let sep: [NSAttributedString.Key: Any] = [.font: Theme.monoData, .foregroundColor: NSColor(calibratedWhite: 0.29, alpha: 1)]
+        let sep: [NSAttributedString.Key: Any] = [.font: Theme.monoData, .foregroundColor: Theme.tx2]
         let brass: [NSAttributedString.Key: Any] = [.font: Theme.monoDataStrong, .foregroundColor: Theme.accent]
 
         let jobName = jobField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1001,7 +1001,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             chip.attributedTitle = NSAttributedString(string: shooter.name, attributes: [
                 .font: Theme.secondary,
                 .foregroundColor: selected
-                    ? NSColor(calibratedRed: 0.09, green: 0.075, blue: 0.06, alpha: 1)
+                    ? Theme.accentText
                     : Theme.tx1
             ])
             chip.identifier = NSUserInterfaceItemIdentifier(shooter.prefix)
@@ -1642,7 +1642,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTextFieldD
             self.startButton.isEnabled = true
             self.startButton.attributedTitle = NSAttributedString(string: "Ingest Again", attributes: [
                 .font: Theme.bodyStrong,
-                .foregroundColor: NSColor(calibratedRed: 0.09, green: 0.075, blue: 0.06, alpha: 1)
+                .foregroundColor: Theme.accentText
             ])
             self.cancelButton.isHidden = true
             self.notNowButton.isHidden = false
@@ -1807,7 +1807,7 @@ private final class ThumbCell: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1).cgColor
+        layer?.backgroundColor = Theme.line.cgColor
         layer?.cornerRadius = 4
         layer?.masksToBounds = true
         layer?.contentsGravity = .resizeAspectFill
@@ -1835,8 +1835,7 @@ private final class BrassSwitch: NSControl {
         let on = state == .on
         let track = NSRect(x: 0, y: (bounds.height - 18) / 2, width: 30, height: 18)
         let pill = NSBezierPath(roundedRect: track, xRadius: 9, yRadius: 9)
-        (on ? Theme.accent
-            : NSColor(srgbRed: 42/255, green: 45/255, blue: 49/255, alpha: 1)).setFill()
+        (on ? Theme.accent : Theme.bg3).setFill()
         pill.fill()
         if !on {
             Theme.line.setStroke()
@@ -1845,8 +1844,7 @@ private final class BrassSwitch: NSControl {
         }
         let knobX = on ? track.maxX - 15.5 : track.minX + 2.5
         let knob = NSBezierPath(ovalIn: NSRect(x: knobX, y: track.midY - 6.5, width: 13, height: 13))
-        (on ? NSColor(srgbRed: 23/255, green: 19/255, blue: 16/255, alpha: 1)
-            : NSColor(srgbRed: 220/255, green: 217/255, blue: 211/255, alpha: 1)).setFill()
+        (on ? Theme.accentText : Theme.tx0).setFill()
         knob.fill()
     }
 
