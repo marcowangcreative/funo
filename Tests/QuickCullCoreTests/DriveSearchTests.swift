@@ -28,8 +28,8 @@ final class DriveSearchTests: XCTestCase {
         ])
         XCTAssertEqual(rows.map(\.name), [
             "Ceremony.CR3",
-            "Ceremony Selects",
             "Ceremony",
+            "Ceremony Selects",
             "Ceremony.CR3"
         ])
     }

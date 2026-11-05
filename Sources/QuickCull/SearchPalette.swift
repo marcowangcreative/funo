@@ -1,11 +1,10 @@
 import AppKit
 import QuickCullCore
 
-/// ⌘F. Since 0.9.6 this palette has searched the open folder plus folders
-/// anywhere (recent places immediately, then Spotlight). Files on other
-/// volumes were never in that query; they are now. Current-folder hits stay
-/// first, including files a view filter has hidden. Spotlight runs off the
-/// main thread and only paints when a batch arrives.
+/// ⌘F. The open folder is answered from memory. Everywhere else comes from
+/// f/uno's own volume index, which is already cached, so hits paint on the
+/// next turn instead of waiting for Spotlight. Spotlight is merged in when
+/// it returns something. A stale Spotlight index is not a miss.
 final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
     // MARK: results
@@ -34,6 +33,8 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     private var activeQuery = ""
     private var searchGeneration = 0
     private var remoteItems: [DriveSearchMerge.Item] = []
+    private var diskItems: [VolumeNameEntry] = []
+    private var indexObserver: NSObjectProtocol?
     private var spotlightQuery: NSMetadataQuery?
     private var spotlightDebounce: Timer?
     private var spotlightTokens: [NSObjectProtocol] = []
@@ -130,8 +131,18 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             emptyLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18),
             emptyLabel.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
+        indexObserver = NotificationCenter.default.addObserver(
+            forName: VolumeIndexService.didUpdate, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.activeQuery.isEmpty else { return }
+            self.scheduleVolumeSearch(self.activeQuery)
+        }
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit {
+        if let indexObserver { NotificationCenter.default.removeObserver(indexObserver) }
+    }
 
     // MARK: lifecycle
 
@@ -186,6 +197,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         if changed {
             highlighted = 0
             remoteItems = []
+            diskItems = []
         }
         if query.isEmpty {
             results.removeAll()
@@ -198,10 +210,12 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             return
         }
         publish(query: query, spotlightPending: query.count >= 3)
+        scheduleVolumeSearch(query)
         scheduleSpotlight(query)
     }
 
-    /// Current-folder index is already in memory. Spotlight hits, if any, are merged in.
+    /// Current-folder hits paint immediately. The volume index is queried off
+    /// the main thread and merged as soon as it returns; Spotlight fills in later.
     private func publish(query: String, spotlightPending: Bool) {
         let index = photoSource?() ?? FolderSearchIndex(photos: [])
         let hits = index.hits(query: query, limit: 8)
@@ -212,7 +226,9 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             recents: Self.recents().map(\.path),
             spotlight: remoteItems,
             query: query,
-            home: NSHomeDirectory()
+            home: NSHomeDirectory(),
+            indexed: diskItems,
+            bootVolumeName: VolumeIndexService.shared.bootVolumeName
         )
         results = rows.map { row in
             switch row.kind {
@@ -225,11 +241,22 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             }
         }
         if results.isEmpty {
-            emptyLabel.stringValue = spotlightPending ? "searching…" : "no matches"
+            let indexing = query.count >= 2 && VolumeIndexService.shared.isScanning && diskItems.isEmpty
+            emptyLabel.stringValue = (spotlightPending || indexing) ? "searching…" : "no matches"
         } else {
             emptyLabel.stringValue = ""
         }
         rebuildRows()
+    }
+
+    private func scheduleVolumeSearch(_ query: String) {
+        let generation = searchGeneration
+        VolumeIndexService.shared.search(query: query, limit: 80) { [weak self] entries in
+            guard let self, generation == self.searchGeneration else { return }
+            self.diskItems = entries
+            let waiting = self.spotlightQuery != nil && self.remoteItems.isEmpty
+            self.publish(query: self.activeQuery, spotlightPending: waiting)
+        }
     }
 
     private func scheduleSpotlight(_ query: String) {

@@ -1,11 +1,13 @@
 import Foundation
 
-/// How ⌘F combines the open folder with drive-wide Spotlight hits.
+/// How ⌘F combines the open folder, f/uno's own volume index, and Spotlight.
 ///
 /// Current-folder files stay first (they are already ranked by
-/// `FolderSearchIndex`, including files a view filter has hidden). Then
-/// folders the user has opened, then other folders, then image files that
-/// live somewhere else. Picking one of those opens its folder.
+/// `FolderSearchIndex`, including files a view filter has hidden). Drive
+/// hits come from the on-disk filename index. Spotlight is merged in when
+/// it has something, and never required: a stale index returns nothing and
+/// the volume index still answers. Folders rank above files, shallower and
+/// newer above deep, exact-word matches first. Each drive row names the volume.
 public enum DriveSearchMerge {
 
     public struct Item: Equatable {
@@ -42,7 +44,7 @@ public enum DriveSearchMerge {
     /// Spotlight returns a lot of support files. Keep volumes and user folders.
     public static func includePath(_ path: String) -> Bool {
         if path.contains("/Library/") { return false }
-        if path.hasPrefix("/System/") { return false }
+        if path == "/System" || (path.hasPrefix("/System/") && !path.hasPrefix("/System/Volumes/")) { return false }
         if path.contains("/.Trash/") || path.contains("/.Trashes/") { return false }
         if path.contains("/Backups.backupdb/") { return false }
         if path.contains(".app/") { return false }
@@ -64,6 +66,8 @@ public enum DriveSearchMerge {
                             spotlight: [Item],
                             query: String,
                             home: String,
+                            indexed: [VolumeNameEntry] = [],
+                            bootVolumeName: String = "Macintosh HD",
                             fileLimit: Int = 8,
                             folderLimit: Int = 8,
                             elsewhereLimit: Int = 8) -> [Row] {
@@ -82,44 +86,57 @@ public enum DriveSearchMerge {
             out.append(Row(kind: .currentFile(id: hit.id), name: hit.name, path: hit.id, detail: ""))
         }
 
-        let foldedQuery = FolderSearchIndex.fold(query)
-        guard !foldedQuery.isEmpty else { return out }
-        let queryStem = FolderSearchIndex.stem(foldedQuery)
-        var folders = 0
+        guard !VolumeNameQuery.tokens(in: query).isEmpty else { return out }
 
-        func addFolder(path: String, name: String) {
-            guard folders < folderLimit else { return }
-            let key = norm(path)
-            guard includePath(key), seen.insert(key).inserted else { return }
-            guard FolderSearchIndex.fold(name).contains(foldedQuery) else { return }
-            out.append(Row(kind: .folder, name: name, path: path,
-                           detail: parentDetail(path, home: home)))
-            folders += 1
-        }
-
-        for path in recents {
-            addFolder(path: path, name: (path as NSString).lastPathComponent)
-        }
-        for item in spotlight where item.isFolder {
-            addFolder(path: item.path, name: item.name)
-        }
-        var elsewhere = 0
-        for item in spotlight where !item.isFolder {
-            guard elsewhere < elsewhereLimit else { continue }
-            let key = norm(item.path)
-            guard includePath(key), seen.insert(key).inserted else { continue }
-            if owned.contains(key) { continue }
-            if !folderNorm.isEmpty, norm((item.path as NSString).deletingLastPathComponent) == folderNorm {
-                continue
+        var pool: [VolumeNameEntry] = []
+        var pooled = Set<String>()
+        func consider(_ entry: VolumeNameEntry) {
+            let key = norm(entry.path)
+            guard includePath(key), pooled.insert(key).inserted else { return }
+            if !entry.isFolder {
+                if owned.contains(key) { return }
+                if !folderNorm.isEmpty, norm((entry.path as NSString).deletingLastPathComponent) == folderNorm {
+                    return
+                }
             }
-            let foldedName = FolderSearchIndex.fold(item.name)
-            let stem = FolderSearchIndex.stem(foldedName)
-            let nameHit = foldedName.contains(foldedQuery)
-                || (!queryStem.isEmpty && stem == queryStem)
-            guard nameHit else { continue }
-            out.append(Row(kind: .driveFile, name: item.name, path: item.path,
-                           detail: parentDetail(item.path, home: home)))
-            elsewhere += 1
+            pool.append(entry)
+        }
+        for entry in indexed { consider(entry) }
+        for path in recents {
+            let root = VolumeNameQuery.volumeRoot(of: path)
+            consider(VolumeNameEntry(
+                path: path, isFolder: true,
+                depth: VolumeNameQuery.depth(of: path, volumeRoot: root),
+                modified: Date.distantFuture.timeIntervalSince1970,
+                volumeName: VolumeNameQuery.volumeName(of: path, boot: bootVolumeName),
+                volumeRoot: root))
+        }
+        for item in spotlight {
+            let root = VolumeNameQuery.volumeRoot(of: item.path)
+            consider(VolumeNameEntry(
+                path: item.path, name: item.name, isFolder: item.isFolder,
+                depth: VolumeNameQuery.depth(of: item.path, volumeRoot: root),
+                modified: 0,
+                volumeName: VolumeNameQuery.volumeName(of: item.path, boot: bootVolumeName),
+                volumeRoot: root))
+        }
+
+        let ranked = VolumeNameQuery.rank(pool, query: query, limit: max(pool.count, 1))
+        var folders = 0
+        var elsewhere = 0
+        for entry in ranked {
+            let key = norm(entry.path)
+            guard seen.insert(key).inserted else { continue }
+            let detail = VolumeNameQuery.detail(volumeName: entry.volumeName, path: entry.path, home: home)
+            if entry.isFolder {
+                guard folders < folderLimit else { continue }
+                out.append(Row(kind: .folder, name: entry.name, path: entry.path, detail: detail))
+                folders += 1
+            } else {
+                guard elsewhere < elsewhereLimit else { continue }
+                out.append(Row(kind: .driveFile, name: entry.name, path: entry.path, detail: detail))
+                elsewhere += 1
+            }
         }
         return out
     }

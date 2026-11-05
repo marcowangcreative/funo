@@ -68,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         #endif
         FolderTemplates.ensureDefaults()
         LicenseManager.shared.revalidateInBackground()
+        VolumeIndexService.shared.start()
 
         // Card inserted → offer ingest. ASK is the ceiling - auto-ingest
         // never happens. Pref: defaults write com.funophoto.funo
