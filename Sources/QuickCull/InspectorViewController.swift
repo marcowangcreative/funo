@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import QuickCullCore
 
 /// Per-channel histogram + clipping stats.
 struct HistogramData {
@@ -460,6 +461,17 @@ final class InspectorViewController: NSViewController {
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
 
+        // First, so the expanded info card's height budget cannot trim it.
+        // Camera clock, not the Mac's zone. TIFF DateTime is the fallback
+        // when a file has no DateTimeOriginal (some JPEGs, scans).
+        let rawWhen = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+            ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
+        if let rawWhen {
+            rows.append(("Date", CaptureTime.display(exif: rawWhen) ?? rawWhen))
+        } else if let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date {
+            rows.append(("Date", CaptureTime.display(fileDate: modified)))
+        }
+
         if let model = tiff?[kCGImagePropertyTIFFModel] as? String {
             rows.append(("Camera", model))
         }
@@ -510,9 +522,6 @@ final class InspectorViewController: NSViewController {
         }
         if let flash = exif?[kCGImagePropertyExifFlash] as? Int {
             rows.append(("Flash", flash & 0x1 != 0 ? "Fired" : "Off"))
-        }
-        if let date = exif?[kCGImagePropertyExifDateTimeOriginal] as? String {
-            rows.append(("Captured", date))
         }
         return rows
     }
