@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import CoreServices
 import QuickCullCore
 
@@ -25,7 +25,7 @@ final class VolumeIndexService {
     private var volumeNames: [String: String] = [:]
     /// Volumes walked this session. The disk cache fills `volumeNames` too,
     /// and that must not skip the refresh.
-    private var scanned: Set<String> = [:]
+    private var scanned: Set<String> = []
     private var stream: FSEventStreamRef?
     private var saveWork: DispatchWorkItem?
     private var rescanWork: DispatchWorkItem?
@@ -222,7 +222,8 @@ final class VolumeIndexService {
     }
 
     private func ingest(paths: [String], flags: [FSEventStreamEventFlags]) {
-        for (path, flag) in zip(paths, flags) {
+        for (path, rawFlag) in zip(paths, flags) {
+            let flag = FSFlag(rawValue: UInt32(rawFlag))
             if flag.contains(.itemIsSymlink) { continue }
             if flag.contains(.itemRemoved) {
                 index.remove(path: path, includingDescendants: flag.contains(.itemIsDir))
@@ -338,4 +339,15 @@ final class VolumeIndexService {
             NotificationCenter.default.post(name: VolumeIndexService.didUpdate, object: nil)
         }
     }
+}
+
+/// FSEvents flags arrive as a bare UInt32 on macOS; wrap them so call sites read as a set.
+private struct FSFlag: OptionSet {
+    let rawValue: UInt32
+    static let mustScanSubDirs = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagMustScanSubDirs))
+    static let itemCreated = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagItemCreated))
+    static let itemRemoved = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagItemRemoved))
+    static let itemRenamed = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagItemRenamed))
+    static let itemIsDir = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagItemIsDir))
+    static let itemIsSymlink = FSFlag(rawValue: UInt32(kFSEventStreamEventFlagItemIsSymlink))
 }
