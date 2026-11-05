@@ -38,8 +38,9 @@ final class CullCollectionView: NSCollectionView {
 }
 
 /// One cell in the contact sheet. The thumbnail is only the photograph.
-/// Color, stars, filename, and format sit in a caption under it — nothing
-/// is drawn on the image, and the label is a square, not a wash or an edge.
+/// Color chip, stars, filename, and format sit in one caption row. The chip
+/// and the five-star column keep their width when empty, so the filename
+/// does not move. A labeled row tints that caption only.
 /// Grid thumbnail: a plain layer-backed view (contents = cgImage) instead
 /// of NSImageView - pure GPU compositing, cheaper on fast scroll. .resizeAspect
 /// fits the WHOLE frame (no crop), matching the old scaleProportionallyDown.
@@ -120,9 +121,6 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     private let markLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
     private let formatLabel = NSTextField(labelWithString: "")
-    private var dotWidth: NSLayoutConstraint!
-    private var dotGap: NSLayoutConstraint!
-    private var markGap: NSLayoutConstraint!
 
     private(set) var representedURL: URL?
     /// URL of an in-flight thumbnail request, so a layout repair doesn't
@@ -152,6 +150,8 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         thumbView.setImage(nil)
         thumbView.alphaValue = 1
         thumbView.layer?.borderWidth = 0
+        caption.layer?.backgroundColor = NSColor.clear.cgColor
+        colorDot.layer?.backgroundColor = NSColor.clear.cgColor
         nameLabel.textColor = Theme.tx1
     }
 
@@ -172,18 +172,22 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         thumbView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumbView)
 
+        caption.wantsLayer = true
+        caption.layer?.cornerRadius = Theme.panelRadius
         caption.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(caption)
 
         colorDot.wantsLayer = true
+        colorDot.layer?.cornerRadius = Theme.imageRadius
         colorDot.translatesAutoresizingMaskIntoConstraints = false
         caption.addSubview(colorDot)
 
         markLabel.font = Theme.monoCaption
         markLabel.textColor = Theme.accent
+        markLabel.alignment = .left
+        markLabel.lineBreakMode = .byClipping
+        markLabel.usesSingleLineMode = true
         markLabel.translatesAutoresizingMaskIntoConstraints = false
-        markLabel.setContentHuggingPriority(.required, for: .horizontal)
-        markLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         caption.addSubview(markLabel)
 
         nameLabel.font = Theme.monoCaption
@@ -204,9 +208,8 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         formatLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         caption.addSubview(formatLabel)
 
-        dotWidth = colorDot.widthAnchor.constraint(equalToConstant: 0)
-        dotGap = markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: 0)
-        markGap = nameLabel.leadingAnchor.constraint(equalTo: markLabel.trailingAnchor, constant: 0)
+        let markWidth = markLabel.widthAnchor.constraint(equalToConstant: Theme.captionMarkWidth)
+        markWidth.priority = .required
         NSLayoutConstraint.activate([
             thumbView.topAnchor.constraint(equalTo: view.topAnchor),
             thumbView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -220,14 +223,15 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
 
             colorDot.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
             colorDot.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
-            colorDot.heightAnchor.constraint(equalToConstant: 8),
-            dotWidth,
+            colorDot.widthAnchor.constraint(equalToConstant: Theme.captionChip),
+            colorDot.heightAnchor.constraint(equalToConstant: Theme.captionChip),
 
             markLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
-            dotGap,
+            markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: Theme.captionChipGap),
+            markWidth,
 
             nameLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
-            markGap,
+            nameLabel.leadingAnchor.constraint(equalTo: markLabel.trailingAnchor, constant: Theme.captionChipGap),
             nameLabel.trailingAnchor.constraint(equalTo: formatLabel.leadingAnchor, constant: -6),
 
             formatLabel.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
@@ -289,15 +293,15 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         // so the ✕ and the filename stay readable.
         thumbView.alphaValue = caption.rejected ? 0.4 : 1
         if caption.showsColorDot {
-            colorDot.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
+            let color = Theme.labelColors[caption.colorLabel]
+            colorDot.layer?.backgroundColor = color.cgColor
+            self.caption.layer?.backgroundColor = color.withAlphaComponent(Theme.captionTint).cgColor
+        } else {
+            colorDot.layer?.backgroundColor = NSColor.clear.cgColor
+            self.caption.layer?.backgroundColor = NSColor.clear.cgColor
         }
-        let showDot = caption.showsColorDot
-        if dotWidth.constant != (showDot ? 8 : 0) { dotWidth.constant = showDot ? 8 : 0 }
-        if dotGap.constant != (showDot ? 4 : 0) { dotGap.constant = showDot ? 4 : 0 }
         markLabel.stringValue = caption.mark
         markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
-        let markGapValue: CGFloat = caption.mark.isEmpty ? 0 : 4
-        if markGap.constant != markGapValue { markGap.constant = markGapValue }
     }
 
     override var isSelected: Bool {
@@ -385,7 +389,7 @@ final class PhotoGridViewController: NSViewController,
     private var captureDates: [String: Date] = [:]
     private var currentFolder: URL?
 
-    private let scrollView = NSScrollView()
+    private let scrollView = GraphiteScrollView()
     private let collectionView = CullCollectionView()
     private let layout = NSCollectionViewFlowLayout()
     private var selectionAnchor: Int?

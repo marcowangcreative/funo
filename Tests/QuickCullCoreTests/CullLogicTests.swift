@@ -194,6 +194,19 @@ final class CellCaptionTests: XCTestCase {
         XCTAssertEqual(caption.colorLabel, 5)
         XCTAssertEqual(caption.mark, "★★★★★")
     }
+
+    func testFilenameLeadDoesNotDependOnRatingOrColor() {
+        let samples = [
+            CellCaption.make(filename: "a", format: "JPG", rating: 0, rejected: false, colorLabel: 0),
+            CellCaption.make(filename: "a", format: "JPG", rating: 1, rejected: false, colorLabel: 0),
+            CellCaption.make(filename: "a", format: "JPG", rating: 5, rejected: false, colorLabel: 3),
+            CellCaption.make(filename: "a", format: "JPG", rating: 4, rejected: true, colorLabel: 0)
+        ]
+        let leads = Set(samples.map { $0.filenameLeadUnits() })
+        XCTAssertEqual(leads, [CellCaption.filenameLeadUnits()])
+        XCTAssertEqual(CellCaption.reservedStarColumns, 5)
+        XCTAssertTrue(samples.allSatisfy { $0.mark.count <= CellCaption.reservedStarColumns })
+    }
 }
 
 final class ThumbnailDeliveryTests: XCTestCase {

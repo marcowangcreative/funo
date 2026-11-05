@@ -71,15 +71,15 @@ final class StageImageView: NSView {
 }
 
 /// One frame in the filmstrip. The thumbnail is only the photograph.
-/// An 8px color square and the stars sit in a caption under it.
+/// The color chip and the star column keep their width when empty.
+/// A labeled frame tints that caption row only.
 final class FilmstripItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("FilmstripItem")
 
     private let thumb = NSImageView()
+    private let caption = NSView()
     private let colorDot = NSView()
     private let markLabel = NSTextField(labelWithString: "")
-    private var dotWidth: NSLayoutConstraint!
-    private var dotGap: NSLayoutConstraint!
     private(set) var representedURL: URL?
 
     override func loadView() {
@@ -96,31 +96,45 @@ final class FilmstripItem: NSCollectionViewItem {
         thumb.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumb)
 
+        caption.wantsLayer = true
+        caption.layer?.cornerRadius = Theme.panelRadius
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(caption)
+
         colorDot.wantsLayer = true
+        colorDot.layer?.cornerRadius = Theme.imageRadius
         colorDot.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(colorDot)
+        caption.addSubview(colorDot)
 
         markLabel.font = Theme.monoCaption
         markLabel.textColor = Theme.accent
+        markLabel.alignment = .left
+        markLabel.lineBreakMode = .byClipping
+        markLabel.usesSingleLineMode = true
         markLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(markLabel)
+        caption.addSubview(markLabel)
 
-        dotWidth = colorDot.widthAnchor.constraint(equalToConstant: 0)
-        dotGap = markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: 0)
+        let markWidth = markLabel.widthAnchor.constraint(equalToConstant: Theme.captionMarkWidth)
+        markWidth.priority = .required
         NSLayoutConstraint.activate([
             thumb.topAnchor.constraint(equalTo: view.topAnchor),
             thumb.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             thumb.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            thumb.bottomAnchor.constraint(equalTo: colorDot.topAnchor, constant: -3),
+            thumb.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -3),
 
-            colorDot.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            colorDot.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -1),
-            colorDot.heightAnchor.constraint(equalToConstant: 8),
-            dotWidth,
+            caption.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            caption.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            caption.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            caption.heightAnchor.constraint(equalToConstant: 16),
 
-            markLabel.centerYAnchor.constraint(equalTo: colorDot.centerYAnchor),
-            markLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor),
-            dotGap,
+            colorDot.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
+            colorDot.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            colorDot.widthAnchor.constraint(equalToConstant: Theme.captionChip),
+            colorDot.heightAnchor.constraint(equalToConstant: Theme.captionChip),
+
+            markLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: Theme.captionChipGap),
+            markWidth,
         ])
     }
 
@@ -138,11 +152,13 @@ final class FilmstripItem: NSCollectionViewItem {
         thumb.layer?.borderWidth = isCurrent ? 1 : 0
 
         if caption.showsColorDot {
-            colorDot.layer?.backgroundColor = Theme.labelColors[caption.colorLabel].cgColor
+            let color = Theme.labelColors[caption.colorLabel]
+            colorDot.layer?.backgroundColor = color.cgColor
+            self.caption.layer?.backgroundColor = color.withAlphaComponent(Theme.captionTint).cgColor
+        } else {
+            colorDot.layer?.backgroundColor = NSColor.clear.cgColor
+            self.caption.layer?.backgroundColor = NSColor.clear.cgColor
         }
-        let showDot = caption.showsColorDot
-        if dotWidth.constant != (showDot ? 8 : 0) { dotWidth.constant = showDot ? 8 : 0 }
-        if dotGap.constant != (showDot ? 3 : 0) { dotGap.constant = showDot ? 3 : 0 }
         markLabel.stringValue = caption.mark
         markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
 
@@ -266,7 +282,7 @@ private final class FaceCropView: NSView {
 /// folder - scrollable, current frame auto-centered, scroller as progress.
 final class PreviewOverlayView: NSView {
 
-    private let stageScroll = NSScrollView()
+    private let stageScroll = GraphiteScrollView()
     private let stageView = StageImageView()
     private var stageBackdrop: NSView?
     private let infoLabel = NSTextField(labelWithString: "")
@@ -274,7 +290,7 @@ final class PreviewOverlayView: NSView {
     private let hintLabel = NSStackView()
     private let filmstripLayout = NSCollectionViewFlowLayout()
     private let filmstripView = NSCollectionView()
-    private let filmstripScroll = NSScrollView()
+    private let filmstripScroll = GraphiteScrollView()
     private let filmstripHandle = FilmstripResizeHandle()
     private var filmstripHeightConstraint: NSLayoutConstraint!
     private var filmDragStartHeight: CGFloat = 60
@@ -343,7 +359,7 @@ final class PreviewOverlayView: NSView {
     // Face side panel - vertical, scrollable, Tab to toggle.
     private let facesPanel = NSView()
     private let facesHeaderLabel = NSTextField(labelWithString: "")
-    private let facesScroll = NSScrollView()
+    private let facesScroll = GraphiteScrollView()
     private let facesStack = NSStackView()
     private var facesPanelWidth: NSLayoutConstraint!
     private var facesTopToInfo: NSLayoutConstraint?
@@ -486,7 +502,9 @@ final class PreviewOverlayView: NSView {
         filmstripScroll.drawsBackground = false
         filmstripScroll.hasHorizontalScroller = true
         filmstripScroll.hasVerticalScroller = false
-        filmstripScroll.autohidesScrollers = true
+        // Stay on screen while the roll overflows. Arrow keys move the strip
+        // without a scroll gesture, so an overlay bar vanishes mid-cull.
+        filmstripScroll.persistentScroller = true
         filmstripScroll.translatesAutoresizingMaskIntoConstraints = false
         addSubview(filmstripScroll)
 

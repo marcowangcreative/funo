@@ -77,6 +77,15 @@ enum Theme {
     static let panelRadius: CGFloat = 0
     static let controlRadius: CGFloat = 3
 
+    /// Color tag in the caption. Larger than the old 8px square so it reads
+    /// at thumbnail size, still a square chip, never an edge on the photo.
+    static let captionChip: CGFloat = 12
+    /// Gap that stays put whether or not the chip and the stars are filled.
+    static let captionChipGap: CGFloat = 4
+    /// Label color mixed into the caption row only. 12% is inside the
+    /// 10–15% band: visible across a grid, not a wash over the photograph.
+    static let captionTint: CGFloat = 0.12
+
     /// A keyboard key drawn as a small keycap chip - how real Mac apps show
     /// shortcuts, instead of typing them into a monospace string. Words stay
     /// in the system font; only the KEY itself is a chip.
@@ -139,6 +148,12 @@ enum Theme {
     // mono - the data voice
     static var monoEyebrow: NSFont { mono(9, .medium) }        // engraved labels, badges
     static var monoCaption: NSFont { mono(10.5) }              // chips, status, small data
+    /// Width of five stars in the caption font. The slot is this wide even
+    /// when the rating is empty, so the filename does not slide.
+    static let captionMarkWidth: CGFloat = {
+        let width = ("★★★★★" as NSString).size(withAttributes: [.font: monoCaption]).width
+        return ceil(width) + 4
+    }()
     static var monoData: NSFont { mono(12) }                   // values, fields, footers
     static var monoDataStrong: NSFont { mono(12, .semibold) }  // bright values
     static var monoInput: NSFont { mono(15) }                  // the ⌘F field

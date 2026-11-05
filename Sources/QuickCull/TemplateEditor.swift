@@ -85,7 +85,7 @@ final class TemplateEditor: NSWindowController, NSWindowDelegate {
         exampleLabel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(exampleLabel)
 
-        let scroll = NSScrollView()
+        let scroll = GraphiteScrollView()
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false

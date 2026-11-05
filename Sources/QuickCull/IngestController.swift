@@ -195,7 +195,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTableViewD
         errorView.textColor = Theme.tx1
         errorView.drawsBackground = false
         errorView.string = ""
-        let errorScroll = NSScrollView()
+        let errorScroll = GraphiteScrollView()
         errorScroll.hasVerticalScroller = true
         errorScroll.drawsBackground = false
         errorScroll.documentView = errorView
@@ -292,7 +292,7 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTableViewD
     }
 
     private func scroll(_ table: NSTableView) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = GraphiteScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false

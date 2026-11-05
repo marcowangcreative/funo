@@ -95,7 +95,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
 
     private var roots: [FolderNode] = []
     private let outlineView = NSOutlineView()
-    private let scrollView = NSScrollView()
+    private let scrollView = GraphiteScrollView()
 
     override func loadView() {
         view = NSView()

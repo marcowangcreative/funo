@@ -1,8 +1,10 @@
 import Foundation
 
 /// What a contact-sheet caption draws under the thumbnail.
-/// The photograph itself stays bare: color is a square, stars and the
-/// filename sit in this row, format trails. No edge, no wash, no overlay.
+/// The photograph itself stays bare. Color is a square in a reserved slot,
+/// stars occupy a fixed 5-column slot even when empty, and the filename
+/// follows those slots so a rating change cannot slide it. Format trails.
+/// A light caption-row tint is drawn by the view; nothing is painted on the photo.
 public struct CellCaption: Equatable {
     /// 0 hides the color square. 1...5 is the label class.
     public var colorLabel: Int
@@ -13,6 +15,16 @@ public struct CellCaption: Equatable {
     public var format: String
 
     public var showsColorDot: Bool { colorLabel > 0 }
+
+    /// The star column is always five marks wide. Empty, reject, and five
+    /// stars occupy the same slot, so the filename's start does not move.
+    public static let reservedStarColumns = 5
+
+    /// Slot units before the filename: color, gap, stars, gap.
+    /// The same for every rating and every label, including none.
+    public static func filenameLeadUnits() -> Int { 1 + 1 + reservedStarColumns + 1 }
+
+    public func filenameLeadUnits() -> Int { Self.filenameLeadUnits() }
 
     public init(colorLabel: Int, mark: String, rejected: Bool, filename: String, format: String) {
         self.colorLabel = colorLabel
