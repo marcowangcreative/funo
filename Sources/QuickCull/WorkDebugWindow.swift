@@ -60,7 +60,7 @@ final class WorkDebugWindow {
         }
         text?.stringValue = jobs.map { job in
             let age = now - (job.startedAt ?? job.enqueuedAt)
-            return String(format: "%@  %@  %.0fs  %@  %@", job.lane.label, job.stateLabel, age, job.volume, job.name)
+            return String(format: "%@  %@  %.0fs  %@  %@", job.lane.label, job.state.stateLabel, age, job.volume, job.name)
         }.joined(separator: "\n")
     }
 }

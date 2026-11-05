@@ -219,7 +219,7 @@ final class RatingsStore {
     /// Four writers, not one thread per file. `concurrentPerform` on a few
     /// thousand sidecars opened a thread per file and stuck the rest of the
     /// background work.
-    private func writeSidecars(_ batch: [(String, Int?, Int?, Int)]) {
+    private func writeSidecars(_ batch: [(String, Int, Int, Int)]) {
         let pool = OperationQueue()
         pool.name = "quickcull.xmp.parallel"
         pool.maxConcurrentOperationCount = 4
