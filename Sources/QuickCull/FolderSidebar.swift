@@ -3,8 +3,11 @@ import AppKit
 /// One node in the lazy directory tree. Children are only read from disk
 /// when the user expands the folder - never recursively.
 final class FolderNode {
-    let url: URL
-    let displayName: String
+    /// Stable for the life of the row. Path can change on rename; the outline
+    /// view keeps expansion because it holds this object, not the path.
+    let stableID = UUID().uuidString
+    var url: URL
+    var displayName: String
     let isSectionHeader: Bool
     /// True = removable MEDIA (SD/CF card, flash stick) → card glyph.
     /// Resolved ONCE at mount enumeration; the cell renderer must never
@@ -19,6 +22,24 @@ final class FolderNode {
         self.displayName = displayName ?? FileManager.default.displayName(atPath: url.path)
         self.isSectionHeader = isSectionHeader
         self.isRemovableMedia = isRemovableMedia
+    }
+
+    var identityKey: String {
+        isSectionHeader ? "header:\(displayName)" : stableID
+    }
+
+    var standardizedPath: String { url.standardizedFileURL.path }
+
+    /// Point this row and its already-loaded descendants at a renamed folder
+    /// without replacing the objects the outline view has expanded.
+    func retarget(to newURL: URL, name: String) {
+        url = newURL
+        displayName = name
+        guard let kids = loadedChildren else { return }
+        for child in kids {
+            let childURL = newURL.appendingPathComponent(child.url.lastPathComponent, isDirectory: true)
+            child.retarget(to: childURL, name: child.displayName)
+        }
     }
 
     var children: [FolderNode] {
@@ -96,6 +117,16 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     private var roots: [FolderNode] = []
     private let outlineView = NSOutlineView()
     private let scrollView = GraphiteScrollView()
+    /// Same header objects for the life of the sidebar. New objects would
+    /// collapse every group on the next reload.
+    private let favoritesHeader = FolderNode(url: URL(fileURLWithPath: "/"), displayName: "FAVORITES", isSectionHeader: true)
+    private let placesHeader = FolderNode(url: URL(fileURLWithPath: "/"), displayName: "PLACES", isSectionHeader: true)
+    private let drivesHeader = FolderNode(url: URL(fileURLWithPath: "/Volumes"), displayName: "DRIVES", isSectionHeader: true)
+    /// False until the first reloadData. Later updates are incremental.
+    private var treeReady = false
+    /// Structural updates can move the selection. That must not be treated
+    /// as the user clicking a folder.
+    private var suppressSelection = false
 
     override func loadView() {
         view = NSView()
@@ -150,10 +181,12 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         ])
 
         outlineView.reloadData()
-        // Pre-expand the Places group so the app doesn't open onto an empty pane.
+        // Pre-expand the groups so the app doesn't open onto an empty pane.
+        // This is the only full reload. Later updates insert and remove rows.
         for root in roots {
             outlineView.expandItem(root)
         }
+        treeReady = true
     }
 
     // MARK: - Favorites (persisted; any folder can be pinned as a workspace)
@@ -163,12 +196,24 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         set { UserDefaults.standard.set(newValue, forKey: "QuickCullFavorites") }
     }
 
-    private func rebuildSidebar() {
-        roots.removeAll()
-        placesGroupChildren.removeAll()
-        buildRoots()
-        outlineView.reloadData()
-        for root in roots { outlineView.expandItem(root) }
+    /// Favorites, places, and drives can appear or disappear. The outline
+    /// rows already on screen stay the same objects, so expansion and scroll
+    /// survive. A full reloadData is what was resetting the tree.
+    private func syncRootStructure() {
+        syncFavorites()
+        syncPlaces()
+        syncDrives()
+        var desired: [FolderNode] = []
+        if !(placesGroupChildren[ObjectIdentifier(favoritesHeader)] ?? []).isEmpty {
+            desired.append(favoritesHeader)
+        }
+        if !(placesGroupChildren[ObjectIdentifier(placesHeader)] ?? []).isEmpty {
+            desired.append(placesHeader)
+        }
+        if !(placesGroupChildren[ObjectIdentifier(drivesHeader)] ?? []).isEmpty {
+            desired.append(drivesHeader)
+        }
+        applyDiff(parent: nil, desired: desired, current: roots) { self.roots = $0 }
     }
 
     // MARK: - Tree refresh (folders born outside f/uno)
@@ -183,28 +228,14 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         refreshTree()
     }
 
-    /// Re-read the tree from disk while KEEPING expansion and selection.
-    /// A naive invalidate+reload swaps nodes for new objects and the outline
-    /// collapses everything (the known collapse trap), so: capture the
-    /// expanded/selected URLs, re-list every expanded branch on a BACKGROUND
-    /// queue (an expanded job folder can hold 6k photos on an external drive
-    /// - never re-list that on main), then rebuild, graft the pre-read
-    /// children, and re-expand by URL, parents before children.
+    /// Re-read expanded branches off the main thread and patch each level
+    /// in place. Clicking a folder or switching tabs does not come through here.
     func refreshTree() {
+        guard treeReady else { return }
         lastTreeRefreshAt = Date()
-        var expandedPaths: [String] = []
-        for row in 0..<outlineView.numberOfRows {
-            if let node = outlineView.item(atRow: row) as? FolderNode,
-               !node.isSectionHeader, outlineView.isItemExpanded(node) {
-                expandedPaths.append(node.url.path)
-            }
-        }
-        let selectedPath: String? = {
-            let row = outlineView.selectedRow
-            guard row >= 0, let node = outlineView.item(atRow: row) as? FolderNode,
-                  !node.isSectionHeader else { return nil }
-            return node.url.path
-        }()
+        let expandedPaths = captureExpandedPaths()
+        let selectedPath = selectedFolderPath()
+        let scroll = scrollView.contentView.bounds.origin
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var fresh: [String: [FolderNode]] = [:]
             for path in expandedPaths {
@@ -212,22 +243,32 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.rebuildSidebar()
-                // Parents before children, so each expand finds a loaded parent.
-                for path in expandedPaths.sorted(by: { $0.count < $1.count }) {
+                // Roots first (a card mounting), then each open branch.
+                // Nothing here calls reloadData.
+                self.syncRootStructure()
+                let keep = SidebarTreeDiff.preservedExpansion(expandedPaths, present: Set(fresh.keys).union(expandedPaths))
+                for path in keep {
                     guard let node = self.findNode(path: path) else { continue }
-                    if let kids = fresh[path] { node.preloadChildren(kids) }
-                    self.outlineView.expandItem(node)
-                }
-                if let selectedPath, let node = self.findNode(path: selectedPath) {
-                    let row = self.outlineView.row(forItem: node)
-                    if row >= 0 {
-                        self.outlineView.selectRowIndexes(IndexSet(integer: row),
-                                                          byExtendingSelection: false)
+                    if let kids = fresh[path] {
+                        self.applyDiff(parent: node, desired: self.reused(kids, replacing: node.childrenIfLoaded ?? []),
+                                       current: node.childrenIfLoaded ?? []) {
+                            node.preloadChildren($0)
+                        }
+                    }
+                    if !self.outlineView.isItemExpanded(node) {
+                        self.outlineView.expandItem(node)
                     }
                 }
+                self.restoreTreePosition(scroll: scroll, selectedPath: selectedPath)
             }
         }
+    }
+
+    /// Match freshly read children to the objects already in the outline,
+    /// so an expanded row is not replaced by a lookalike.
+    private func reused(_ fresh: [FolderNode], replacing existing: [FolderNode]) -> [FolderNode] {
+        let byPath = Dictionary(uniqueKeysWithValues: existing.map { ($0.standardizedPath, $0) })
+        return fresh.map { byPath[$0.standardizedPath] ?? $0 }
     }
 
     /// Walk the loaded tree to the node for `path` (nil if a branch on the
@@ -260,58 +301,167 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     @objc private func refreshFolders(_ sender: Any?) { refreshTree() }
 
     private func buildRoots() {
-        let fm = FileManager.default
-
-        // Favorites first - sorted output folders one click away.
-        let favorites = favoritePaths
-            .filter { fm.fileExists(atPath: $0) }
-            .map { FolderNode(url: URL(fileURLWithPath: $0)) }
-        if !favorites.isEmpty {
-            let favGroup = FolderNode(url: fm.homeDirectoryForCurrentUser, displayName: "FAVORITES", isSectionHeader: true)
-            placesGroupChildren[ObjectIdentifier(favGroup)] = favorites
-            roots.append(favGroup)
+        syncFavorites()
+        syncPlaces()
+        syncDrives()
+        var desired: [FolderNode] = []
+        if !(placesGroupChildren[ObjectIdentifier(favoritesHeader)] ?? []).isEmpty {
+            desired.append(favoritesHeader)
         }
+        if !(placesGroupChildren[ObjectIdentifier(placesHeader)] ?? []).isEmpty {
+            desired.append(placesHeader)
+        }
+        if !(placesGroupChildren[ObjectIdentifier(drivesHeader)] ?? []).isEmpty {
+            desired.append(drivesHeader)
+        }
+        roots = desired
+    }
 
-        var places: [FolderNode] = []
+    private func syncFavorites() {
+        let fm = FileManager.default
+        let current = placesGroupChildren[ObjectIdentifier(favoritesHeader)] ?? []
+        let desired = favoritePaths.filter { fm.fileExists(atPath: $0) }.map { path -> FolderNode in
+            let standard = URL(fileURLWithPath: path).standardizedFileURL.path
+            return current.first { $0.standardizedPath == standard }
+                ?? FolderNode(url: URL(fileURLWithPath: path))
+        }
+        applyDiff(parent: favoritesHeader, desired: desired, current: current) {
+            self.placesGroupChildren[ObjectIdentifier(self.favoritesHeader)] = $0
+        }
+    }
 
+    private func syncPlaces() {
+        let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+        let current = placesGroupChildren[ObjectIdentifier(placesHeader)] ?? []
+        var desired: [FolderNode] = []
         for (name, sub) in [("Pictures", "Pictures"), ("Desktop", "Desktop"), ("Downloads", "Downloads")] {
             let url = home.appendingPathComponent(sub, isDirectory: true)
-            if fm.fileExists(atPath: url.path) {
-                places.append(FolderNode(url: url, displayName: name))
-            }
+            guard fm.fileExists(atPath: url.path) else { continue }
+            let standard = url.standardizedFileURL.path
+            desired.append(current.first { $0.standardizedPath == standard }
+                           ?? FolderNode(url: url, displayName: name))
         }
-        places.append(FolderNode(url: home, displayName: "Home"))
+        let homePath = home.standardizedFileURL.path
+        desired.append(current.first { $0.standardizedPath == homePath }
+                       ?? FolderNode(url: home, displayName: "Home"))
+        applyDiff(parent: placesHeader, desired: desired, current: current) {
+            self.placesGroupChildren[ObjectIdentifier(self.placesHeader)] = $0
+        }
+    }
 
-        let placesGroup = FolderNode(url: home, displayName: "PLACES", isSectionHeader: true)
-        placesGroupChildren[ObjectIdentifier(placesGroup)] = places
-        roots.append(placesGroup)
-
-        // Mounted volumes (external drives, cards, network shares).
-        var drives: [FolderNode] = []
-        if let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey, .volumeIsRemovableKey], options: [.skipHiddenVolumes]) {
+    private func syncDrives() {
+        let fm = FileManager.default
+        let current = placesGroupChildren[ObjectIdentifier(drivesHeader)] ?? []
+        var desired: [FolderNode] = []
+        if let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey, .volumeIsRemovableKey],
+                                              options: [.skipHiddenVolumes]) {
             for vol in volumes {
                 let values = try? vol.resourceValues(forKeys: [.volumeNameKey, .volumeIsRemovableKey])
-                let node = FolderNode(url: vol,
-                                      displayName: values?.volumeName ?? vol.lastPathComponent,
-                                      isRemovableMedia: values?.volumeIsRemovable ?? false)
-                // Drive rows are ROOTS - they never pass through children(of:),
-                // so the visibility-driven prefetch never warms them. Without
-                // this, the FIRST expand of a drive read its directory on the
-                // main thread while the disk woke. Warm them up front instead.
-                node.prefetchChildren()
-                drives.append(node)
+                let standard = vol.standardizedFileURL.path
+                if let existing = current.first(where: { $0.standardizedPath == standard }) {
+                    existing.displayName = values?.volumeName ?? vol.lastPathComponent
+                    desired.append(existing)
+                } else {
+                    let node = FolderNode(url: vol,
+                                          displayName: values?.volumeName ?? vol.lastPathComponent,
+                                          isRemovableMedia: values?.volumeIsRemovable ?? false)
+                    // Drive rows sit under the header. Warm them so the first
+                    // expand doesn't read the directory on the main thread
+                    // while the disk wakes.
+                    node.prefetchChildren()
+                    desired.append(node)
+                }
             }
         }
-        if !drives.isEmpty {
-            let drivesGroup = FolderNode(url: URL(fileURLWithPath: "/Volumes"), displayName: "DRIVES", isSectionHeader: true)
-            placesGroupChildren[ObjectIdentifier(drivesGroup)] = drives
-            roots.append(drivesGroup)
+        applyDiff(parent: drivesHeader, desired: desired, current: current) {
+            self.placesGroupChildren[ObjectIdentifier(self.drivesHeader)] = $0
         }
     }
 
     /// Fixed children for section-header rows (so headers don't hit the disk).
     private var placesGroupChildren: [ObjectIdentifier: [FolderNode]] = [:]
+
+    /// Insert, remove, or move rows. The child array the data source reads
+    /// is updated before each outline call. A no-op diff leaves scroll alone.
+    private func applyDiff(parent: FolderNode?,
+                           desired: [FolderNode],
+                           current: [FolderNode],
+                           store: ([FolderNode]) -> Void) {
+        let parentVisible = parent == nil
+            || roots.contains(where: { $0 === parent })
+            || outlineView.row(forItem: parent!) >= 0
+        if !treeReady || !parentVisible {
+            store(desired)
+            return
+        }
+        let edits = SidebarTreeDiff.diff(old: current.map(\.identityKey), new: desired.map(\.identityKey))
+        if edits.isEmpty {
+            store(desired)
+            return
+        }
+        let scroll = scrollView.contentView.bounds.origin
+        let selected = selectedFolderPath()
+        suppressSelection = true
+        defer { suppressSelection = false }
+        var byKey = Dictionary(uniqueKeysWithValues: current.map { ($0.identityKey, $0) })
+        for node in desired where byKey[node.identityKey] == nil {
+            byKey[node.identityKey] = node
+        }
+        var list = current
+        for edit in edits {
+            switch edit {
+            case .remove(let index):
+                guard list.indices.contains(index) else { continue }
+                list.remove(at: index)
+                store(list)
+                outlineView.removeItems(at: IndexSet(integer: index), inParent: parent, withAnimation: [])
+            case .insert(let key, let index):
+                guard let node = byKey[key] else { continue }
+                let at = min(index, list.count)
+                list.insert(node, at: at)
+                store(list)
+                outlineView.insertItems(at: IndexSet(integer: at), inParent: parent, withAnimation: [])
+                if !node.isSectionHeader { node.prefetchChildren() }
+            case .move(let key, let from, let to):
+                guard list.indices.contains(from), list[from].identityKey == key else { continue }
+                let node = list.remove(at: from)
+                let at = min(to, list.count)
+                list.insert(node, at: at)
+                store(list)
+                outlineView.moveItem(at: from, inParent: parent, to: at, inParent: parent)
+            }
+        }
+        restoreTreePosition(scroll: scroll, selectedPath: selected)
+    }
+
+    private func captureExpandedPaths() -> [String] {
+        var paths: [String] = []
+        for row in 0..<outlineView.numberOfRows {
+            guard let node = outlineView.item(atRow: row) as? FolderNode,
+                  !node.isSectionHeader, outlineView.isItemExpanded(node) else { continue }
+            paths.append(node.standardizedPath)
+        }
+        return paths
+    }
+
+    private func selectedFolderPath() -> String? {
+        let row = outlineView.selectedRow
+        guard row >= 0, let node = outlineView.item(atRow: row) as? FolderNode,
+              !node.isSectionHeader else { return nil }
+        return node.standardizedPath
+    }
+
+    private func restoreTreePosition(scroll: NSPoint, selectedPath: String?) {
+        if outlineView.selectedRow < 0, let selectedPath, let node = findNode(path: selectedPath) {
+            let row = outlineView.row(forItem: node)
+            if row >= 0 {
+                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        }
+        scrollView.contentView.scroll(to: scroll)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
 
     private func children(of node: FolderNode) -> [FolderNode] {
         let kids: [FolderNode]
@@ -442,6 +592,7 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        if suppressSelection { return }
         let row = outlineView.selectedRow
         guard row >= 0, let node = outlineView.item(atRow: row) as? FolderNode, !node.isSectionHeader else { return }
         // A RIGHT-click selects the row to show the context menu - it must
@@ -473,21 +624,13 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     /// tree, and reveal() would walk right past them. Invalidate every
     /// loaded node that is an ancestor of `url`; the reveal re-reads.
     func refreshBranchContaining(_ url: URL) {
-        var ancestors: [FolderNode] = []
-        for group in roots {
-            ancestors.append(contentsOf: placesGroupChildren[ObjectIdentifier(group)] ?? [])
+        let parentPath = url.deletingLastPathComponent().standardizedFileURL.path
+        if let parent = findNode(path: parentPath) {
+            refreshBranch(parent)
+            return
         }
-        var index = 0
-        while index < ancestors.count {
-            let node = ancestors[index]
-            index += 1
-            let base = node.url.path
-            guard url.path == base || url.path.hasPrefix(base.hasSuffix("/") ? base : base + "/") else { continue }
-            if let kids = node.childrenIfLoaded {
-                ancestors.append(contentsOf: kids)
-                node.invalidateChildren()
-                outlineView.reloadItem(node, reloadChildren: true)
-            }
+        if let node = findNode(path: url.standardizedFileURL.path) {
+            refreshBranch(node)
         }
     }
 
@@ -674,9 +817,17 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     }
 
     private func refreshBranch(_ node: FolderNode) {
-        node.invalidateChildren()
-        outlineView.reloadItem(node, reloadChildren: true)
-        outlineView.expandItem(node)
+        guard !node.isSectionHeader else { return }
+        let fresh = FolderNode.readChildren(of: node.url)
+        let current = node.childrenIfLoaded ?? []
+        let desired = reused(fresh, replacing: current)
+        let wasExpanded = outlineView.isItemExpanded(node)
+        applyDiff(parent: node, desired: desired, current: current) { node.preloadChildren($0) }
+        if wasExpanded, !outlineView.isItemExpanded(node) {
+            outlineView.expandItem(node)
+        }
+        // Disclosure triangle: an emptied folder is no longer expandable.
+        outlineView.reloadItem(node, reloadChildren: false)
     }
 
     @objc private func ejectVolume(_ sender: Any?) {
@@ -719,10 +870,22 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
         guard !FileManager.default.fileExists(atPath: dest.path) else { NSSound.beep(); return }
         do {
             try FileManager.default.moveItem(at: node.url, to: dest)
+            node.retarget(to: dest, name: name)
+            outlineView.reloadItem(node, reloadChildren: false)
             if let parent = outlineView.parent(forItem: node) as? FolderNode {
-                refreshBranch(parent)
-            } else {
-                outlineView.reloadData()
+                let current = parent.isSectionHeader
+                    ? (placesGroupChildren[ObjectIdentifier(parent)] ?? [])
+                    : (parent.childrenIfLoaded ?? [])
+                let desired = current.sorted {
+                    $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+                }
+                applyDiff(parent: parent, desired: desired, current: current) { list in
+                    if parent.isSectionHeader {
+                        self.placesGroupChildren[ObjectIdentifier(parent)] = list
+                    } else {
+                        parent.preloadChildren(list)
+                    }
+                }
             }
         } catch {
             NSSound.beep()
@@ -769,7 +932,20 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
     }
 
     @objc private func volumesChanged(_ notification: Notification) {
-        rebuildSidebar()
+        guard treeReady else { return }
+        let scroll = scrollView.contentView.bounds.origin
+        let selected = selectedFolderPath()
+        let hadDrives = roots.contains(where: { $0 === drivesHeader })
+        syncDrives()
+        var desired = roots.filter { $0 !== drivesHeader }
+        if !(placesGroupChildren[ObjectIdentifier(drivesHeader)] ?? []).isEmpty {
+            desired.append(drivesHeader)
+        }
+        applyDiff(parent: nil, desired: desired, current: roots) { self.roots = $0 }
+        if !hadDrives, roots.contains(where: { $0 === drivesHeader }) {
+            outlineView.expandItem(drivesHeader)
+        }
+        restoreTreePosition(scroll: scroll, selectedPath: selected)
     }
 
     @objc private func openInNewTab(_ sender: Any?) {
@@ -791,7 +967,22 @@ final class FolderSidebarViewController: NSViewController, NSOutlineViewDataSour
             favs.append(node.url.path)
         }
         favoritePaths = favs
-        rebuildSidebar()
+        guard treeReady else { return }
+        let scroll = scrollView.contentView.bounds.origin
+        let selected = selectedFolderPath()
+        let hadFavorites = roots.contains(where: { $0 === favoritesHeader })
+        syncFavorites()
+        var desired: [FolderNode] = []
+        if !(placesGroupChildren[ObjectIdentifier(favoritesHeader)] ?? []).isEmpty {
+            desired.append(favoritesHeader)
+        }
+        if roots.contains(where: { $0 === placesHeader }) { desired.append(placesHeader) }
+        if roots.contains(where: { $0 === drivesHeader }) { desired.append(drivesHeader) }
+        applyDiff(parent: nil, desired: desired, current: roots) { self.roots = $0 }
+        if !hadFavorites, roots.contains(where: { $0 === favoritesHeader }) {
+            outlineView.expandItem(favoritesHeader)
+        }
+        restoreTreePosition(scroll: scroll, selectedPath: selected)
     }
 }
 
