@@ -920,7 +920,7 @@ private final class GraphiteRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none, isSelected else { return }
         let rect = bounds.insetBy(dx: 6, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        let path = NSBezierPath(roundedRect: rect, xRadius: Theme.panelRadius, yRadius: Theme.panelRadius)
         NSColor(calibratedWhite: 1, alpha: 0.09).setFill()
         path.fill()
     }

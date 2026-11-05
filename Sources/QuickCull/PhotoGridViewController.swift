@@ -167,6 +167,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
 
         // Selection is a 1px stroke on the thumbnail layer. No card, no mask,
         // no shadow — the contents path stays a single layer assign.
+        thumbView.layer?.cornerRadius = Theme.imageRadius
         thumbView.layer?.borderColor = Theme.tx0.cgColor
         thumbView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumbView)
@@ -1410,9 +1411,9 @@ final class PhotoGridViewController: NSViewController,
         for (dx, dy) in [(8, -6), (4, -3)] {
             NSColor(srgbRed: 0.137, green: 0.149, blue: 0.161, alpha: 0.85).setFill()
             NSBezierPath(roundedRect: front.offsetBy(dx: CGFloat(dx), dy: CGFloat(dy)),
-                         xRadius: 5, yRadius: 5).fill()
+                         xRadius: Theme.imageRadius, yRadius: Theme.imageRadius).fill()
         }
-        let path = NSBezierPath(roundedRect: front, xRadius: 5, yRadius: 5)
+        let path = NSBezierPath(roundedRect: front, xRadius: Theme.imageRadius, yRadius: Theme.imageRadius)
         Theme.bg2.setFill(); path.fill()
         Theme.accent.setStroke(); path.lineWidth = 1.5; path.stroke()
         let text = count > 9999 ? "9999+" : "\(count)"
@@ -1994,7 +1995,8 @@ final class PhotoGridViewController: NSViewController,
     private static func dotImage(_ color: NSColor) -> NSImage {
         NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
             color.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            let chip = rect.insetBy(dx: 2, dy: 2)
+            NSBezierPath(roundedRect: chip, xRadius: Theme.imageRadius, yRadius: Theme.imageRadius).fill()
             return true
         }
     }

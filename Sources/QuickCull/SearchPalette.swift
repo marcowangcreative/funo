@@ -58,7 +58,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 12
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor
@@ -324,7 +324,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         let row = ClickRow()
         row.wantsLayer = true
-        row.layer?.cornerRadius = 6
+        row.layer?.cornerRadius = Theme.panelRadius
         row.layer?.backgroundColor = highlighted
             ? Theme.accent.withAlphaComponent(0.16).cgColor
             : NSColor.clear.cgColor

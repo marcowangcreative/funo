@@ -65,6 +65,18 @@ enum Theme {
     ]
     static let labelNames = ["None", "Red", "Yellow", "Green", "Blue", "Purple"]
 
+    /// Corner scale, matched to Capture One's workspace.
+    ///
+    /// Photographs, thumbnails, the viewer, and selection strokes are square
+    /// (`imageRadius`). Rails, panels, floating sheets, and list rows are
+    /// square (`panelRadius`). Buttons, fields, keycaps, token chips, and
+    /// progress tracks share one radius (`controlRadius`, 3 pt, inside the
+    /// 2-4 pt range on those controls). Color-label chips stay square, the
+    /// same as Capture One's tags.
+    static let imageRadius: CGFloat = 0
+    static let panelRadius: CGFloat = 0
+    static let controlRadius: CGFloat = 3
+
     /// A keyboard key drawn as a small keycap chip - how real Mac apps show
     /// shortcuts, instead of typing them into a monospace string. Words stay
     /// in the system font; only the KEY itself is a chip.
@@ -79,7 +91,7 @@ enum Theme {
         chip.layer?.backgroundColor = Theme.bg3.cgColor
         chip.layer?.borderColor = Theme.line.cgColor
         chip.layer?.borderWidth = 1
-        chip.layer?.cornerRadius = 3.5
+        chip.layer?.cornerRadius = Theme.controlRadius
         chip.translatesAutoresizingMaskIntoConstraints = false
         chip.addSubview(label)
         NSLayoutConstraint.activate([
@@ -206,7 +218,7 @@ final class ColorFilterBar: NSView {
             b.setButtonType(.momentaryChange)
             b.tag = label
             b.wantsLayer = true
-            b.layer?.cornerRadius = 0
+            b.layer?.cornerRadius = Theme.imageRadius
             if label == 0 {
                 b.layer?.backgroundColor = Theme.bg3.cgColor
                 b.toolTip = "Show only unlabeled photos (N). Click again to clear."

@@ -91,6 +91,7 @@ final class FilmstripItem: NSCollectionViewItem {
         super.viewDidLoad()
         thumb.imageScaling = .scaleProportionallyUpOrDown
         thumb.wantsLayer = true
+        thumb.layer?.cornerRadius = Theme.imageRadius
         thumb.layer?.borderColor = Theme.tx0.cgColor
         thumb.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(thumb)
@@ -177,10 +178,11 @@ final class FilmstripResizeHandle: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeUpDown) }
 
     override func draw(_ dirtyRect: NSRect) {
-        // A visible grab capsule so the affordance reads against the dark
-        // filmstrip: rounded bg3 background + a bright grip line.
+        // A visible grab so the affordance reads against the dark filmstrip:
+        // a flat control-radius plate plus a bright grip line.
         let capsule = bounds.insetBy(dx: 0, dy: 3)
-        let bg = NSBezierPath(roundedRect: capsule, xRadius: capsule.height / 2, yRadius: capsule.height / 2)
+        let bg = NSBezierPath(roundedRect: capsule,
+                              xRadius: Theme.controlRadius, yRadius: Theme.controlRadius)
         Theme.bg3.setFill()
         bg.fill()
         Theme.line.setStroke()
@@ -188,7 +190,7 @@ final class FilmstripResizeHandle: NSView {
         bg.stroke()
         let grip = NSRect(x: bounds.midX - 14, y: bounds.midY - 1.5, width: 28, height: 3)
         Theme.tx1.setFill()
-        NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
+        NSBezierPath(roundedRect: grip, xRadius: Theme.controlRadius, yRadius: Theme.controlRadius).fill()
     }
 
     var onDoubleClick: (() -> Void)?
@@ -318,7 +320,7 @@ final class PreviewOverlayView: NSView {
         let stageBackdrop = NSView()
         stageBackdrop.wantsLayer = true
         stageBackdrop.layer?.backgroundColor = Theme.surround.color.cgColor
-        stageBackdrop.layer?.cornerRadius = 6
+        stageBackdrop.layer?.cornerRadius = Theme.imageRadius
         stageBackdrop.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stageBackdrop)
         self.stageBackdrop = stageBackdrop
@@ -443,7 +445,7 @@ final class PreviewOverlayView: NSView {
         // Info card: histogram + shooting data, top of the right rail.
         infoPanel.wantsLayer = true
         infoPanel.layer?.backgroundColor = Theme.bg1.cgColor
-        infoPanel.layer?.cornerRadius = 0
+        infoPanel.layer?.cornerRadius = Theme.panelRadius
         infoPanel.layer?.borderColor = Theme.line.cgColor
         infoPanel.layer?.borderWidth = 1
         infoPanel.layer?.masksToBounds = true // collapses cleanly to height 0
@@ -537,7 +539,7 @@ final class PreviewOverlayView: NSView {
         // spare. A contained card, not floating heads on black.
         facesPanel.wantsLayer = true
         facesPanel.layer?.backgroundColor = Theme.bg1.cgColor
-        facesPanel.layer?.cornerRadius = 0
+        facesPanel.layer?.cornerRadius = Theme.panelRadius
         facesPanel.layer?.borderColor = Theme.line.cgColor
         facesPanel.layer?.borderWidth = 1
         facesPanel.translatesAutoresizingMaskIntoConstraints = false
@@ -1416,7 +1418,7 @@ final class PreviewOverlayView: NSView {
     private func faceCell(image: NSImage, face: FaceInfo, faceIndex: Int, size: CGFloat) -> NSView {
         let cell = NSView()
         cell.wantsLayer = true
-        cell.layer?.cornerRadius = 5
+        cell.layer?.cornerRadius = Theme.imageRadius
         cell.layer?.masksToBounds = true
         cell.layer?.backgroundColor = Theme.bg2.cgColor
         cell.identifier = NSUserInterfaceItemIdentifier("\(faceIndex)")

@@ -303,10 +303,22 @@ final class IngestController: NSWindowController, NSWindowDelegate, NSTableViewD
     private func tokenRow(_ tokens: [String], action: Selector) -> NSStackView {
         let buttons = tokens.map { token -> NSButton in
             let button = NSButton(title: token, target: self, action: action)
+            button.isBordered = false
+            button.wantsLayer = true
             button.font = Theme.monoCaption
-            button.bezelStyle = .rounded
-            button.controlSize = .small
+            button.attributedTitle = NSAttributedString(string: token, attributes: [
+                .font: Theme.monoCaption,
+                .foregroundColor: Theme.tx1
+            ])
+            button.layer?.backgroundColor = Theme.bg3.cgColor
+            button.layer?.borderColor = Theme.line.cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.cornerRadius = Theme.controlRadius
             button.setButtonType(.momentaryPushIn)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let titleWidth = (token as NSString).size(withAttributes: [.font: Theme.monoCaption]).width
+            button.widthAnchor.constraint(equalToConstant: ceil(titleWidth) + 14).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
             return button
         }
         let row = NSStackView(views: buttons)

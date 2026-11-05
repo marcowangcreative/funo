@@ -58,7 +58,7 @@ final class ShortcutsOverlayView: NSView {
     private func build() {
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 14
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor
