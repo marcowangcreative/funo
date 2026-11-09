@@ -65,7 +65,7 @@ final class LicenseWindowController: NSWindowController, NSWindowDelegate {
         // Key field in a dark inset well.
         fieldWrap.wantsLayer = true
         fieldWrap.layer?.backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 1).cgColor
-        fieldWrap.layer?.cornerRadius = 8
+        fieldWrap.layer?.cornerRadius = Theme.controlRadius
         fieldWrap.layer?.borderWidth = 1
         fieldWrap.layer?.borderColor = Theme.line.cgColor
         keyField.font = Theme.monoData
@@ -207,7 +207,7 @@ final class BrassButton: NSButton {
         isBordered = false
         wantsLayer = true
         layer?.backgroundColor = Theme.accent.cgColor
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = Theme.controlRadius
         attributedTitle = NSAttributedString(string: title, attributes: [
             .font: Theme.bodyStrong,
             .foregroundColor: NSColor(calibratedRed: 0.09, green: 0.075, blue: 0.06, alpha: 1)

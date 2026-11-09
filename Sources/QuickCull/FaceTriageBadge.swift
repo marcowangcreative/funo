@@ -65,7 +65,7 @@ final class RangefinderBadgeView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         // Plate
         let plate = bounds.insetBy(dx: 0.5, dy: 0.5)
-        let bg = NSBezierPath(roundedRect: plate, xRadius: 5, yRadius: 5)
+        let bg = NSBezierPath(roundedRect: plate, xRadius: Theme.controlRadius, yRadius: Theme.controlRadius)
         Theme.bg1.withAlphaComponent(0.94).setFill(); bg.fill()
         Theme.line.setStroke(); bg.lineWidth = 1; bg.stroke()
 

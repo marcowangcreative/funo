@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Photo surround: the background photos are judged against. Chrome stays
 /// graphite; only the stage and contact-sheet backdrop change. 18% gray is
@@ -64,6 +65,27 @@ enum Theme {
     ]
     static let labelNames = ["None", "Red", "Yellow", "Green", "Blue", "Purple"]
 
+    /// Corner scale, matched to Capture One's workspace.
+    ///
+    /// Photographs, thumbnails, the viewer, and selection strokes are square
+    /// (`imageRadius`). Rails, panels, floating sheets, and list rows are
+    /// square (`panelRadius`). Buttons, fields, keycaps, token chips, and
+    /// progress tracks share one radius (`controlRadius`, 3 pt, inside the
+    /// 2-4 pt range on those controls). Color-label chips stay square, the
+    /// same as Capture One's tags.
+    static let imageRadius: CGFloat = 0
+    static let panelRadius: CGFloat = 0
+    static let controlRadius: CGFloat = 3
+
+    /// Color tag in the caption. Larger than the old 8px square so it reads
+    /// at thumbnail size, still a square chip, never an edge on the photo.
+    static let captionChip: CGFloat = 12
+    /// Gap that stays put whether or not the chip and the stars are filled.
+    static let captionChipGap: CGFloat = 4
+    /// Label color mixed into the caption row only. 12% is inside the
+    /// 10–15% band: visible across a grid, not a wash over the photograph.
+    static let captionTint: CGFloat = 0.12
+
     /// A keyboard key drawn as a small keycap chip - how real Mac apps show
     /// shortcuts, instead of typing them into a monospace string. Words stay
     /// in the system font; only the KEY itself is a chip.
@@ -78,7 +100,7 @@ enum Theme {
         chip.layer?.backgroundColor = Theme.bg3.cgColor
         chip.layer?.borderColor = Theme.line.cgColor
         chip.layer?.borderWidth = 1
-        chip.layer?.cornerRadius = 3.5
+        chip.layer?.cornerRadius = Theme.controlRadius
         chip.translatesAutoresizingMaskIntoConstraints = false
         chip.addSubview(label)
         NSLayoutConstraint.activate([
@@ -126,6 +148,12 @@ enum Theme {
     // mono - the data voice
     static var monoEyebrow: NSFont { mono(9, .medium) }        // engraved labels, badges
     static var monoCaption: NSFont { mono(10.5) }              // chips, status, small data
+    /// Width of five stars in the caption font. The slot is this wide even
+    /// when the rating is empty, so the filename does not slide.
+    static let captionMarkWidth: CGFloat = {
+        let width = ("★★★★★" as NSString).size(withAttributes: [.font: monoCaption]).width
+        return ceil(width) + 4
+    }()
     static var monoData: NSFont { mono(12) }                   // values, fields, footers
     static var monoDataStrong: NSFont { mono(12, .semibold) }  // bright values
     static var monoInput: NSFont { mono(15) }                  // the ⌘F field
@@ -193,38 +221,30 @@ final class ColorFilterBar: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            heightAnchor.constraint(equalToConstant: 24)
+            heightAnchor.constraint(equalToConstant: 16)
         ])
-        // Ring-and-gap dots: an 18pt button whose border is the selection
-        // ring, with the 12pt color dot inset as a sublayer - selecting
-        // draws a ring *around* the dot with breathing room instead of
-        // fattening the dot itself. Geometry never changes; only the ring
-        // and alpha do.
-        // R Y G B P, then Lightroom's grey = "no label" (the to-do pile).
+
+        // Six flat squares: five labels, then gray for unlabeled.
+        // Active squares get a 1px light outline. Clicking the last one
+        // off returns to every color. No rings, no halos.
         for label in [1, 2, 3, 4, 5, 0] {
             let b = NSButton(title: "", target: self, action: #selector(tapped(_:)))
             b.isBordered = false
             b.setButtonType(.momentaryChange)
             b.tag = label
             b.wantsLayer = true
-            b.layer?.cornerRadius = 9
-            let dot = CALayer()
-            dot.frame = CGRect(x: 3, y: 3, width: 12, height: 12)
-            dot.cornerRadius = 6
+            b.layer?.cornerRadius = Theme.imageRadius
             if label == 0 {
-                dot.backgroundColor = NSColor(white: 0.42, alpha: 1).cgColor
-                dot.borderColor = Theme.line.cgColor
-                dot.borderWidth = 1
-                b.toolTip = "Show photos with no color label"
+                b.layer?.backgroundColor = Theme.bg3.cgColor
+                b.toolTip = "Show only unlabeled photos (N). Click again to clear."
             } else {
-                dot.backgroundColor = Theme.labelColors[label].cgColor
+                b.layer?.backgroundColor = Theme.labelColors[label].cgColor
                 let key = label == 5 ? "P" : "\(label + 5)"
-                b.toolTip = "Show \(Theme.labelNames[label].lowercased())-labeled (key \(key))"
+                b.toolTip = "Show only \(Theme.labelNames[label].lowercased()) (key \(key)). Click another color to include it."
             }
-            b.layer?.addSublayer(dot)
             b.translatesAutoresizingMaskIntoConstraints = false
-            b.widthAnchor.constraint(equalToConstant: 18).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 18).isActive = true
+            b.widthAnchor.constraint(equalToConstant: 10).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 10).isActive = true
             stack.addArrangedSubview(b)
             buttons.append(b)
         }
@@ -235,33 +255,34 @@ final class ColorFilterBar: NSView {
 
     @objc private func tapped(_ sender: NSButton) {
         // Multi-select: each dot toggles; selected colors combine as OR.
-        if selected.contains(sender.tag) {
-            selected.remove(sender.tag)
-        } else {
-            selected.insert(sender.tag)
-        }
-        restyle(animated: true)
-        onChange?(selected)
+        // The last one turning off is All — nothing is hidden.
+        setSelection(ColorLabelFilter.toggle(sender.tag, in: selected), notify: true)
     }
 
     /// Programmatic clear - does NOT fire onChange.
     func clear() {
         guard !selected.isEmpty else { return }
-        selected = []
+        setSelection([], notify: false)
+    }
+
+    /// Mirror an external change (keyboard). Does not call `onChange`.
+    func setSelection(_ labels: Set<Int>) {
+        setSelection(labels, notify: false)
+    }
+
+    private func setSelection(_ labels: Set<Int>, notify: Bool) {
+        selected = labels
         restyle(animated: true)
+        if notify { onChange?(selected) }
     }
 
     private func restyle(animated: Bool = false) {
         let apply = {
             for b in self.buttons {
                 let on = self.selected.contains(b.tag)
-                b.layer?.borderWidth = on ? 1.5 : 0
-                b.layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
-                let target: CGFloat
-                if self.selected.isEmpty || on { target = 1.0 }
-                else if b.tag == self.hovered { target = 0.7 }
-                else { target = 0.35 }
-                (animated ? b.animator() : b).alphaValue = target
+                b.layer?.borderWidth = on ? 1 : 0
+                b.layer?.borderColor = Theme.tx0.cgColor
+                b.alphaValue = 1
             }
         }
         if animated {
@@ -326,12 +347,7 @@ final class StarFilterBar: NSView {
 
     init() {
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = Theme.bg2.cgColor
-        layer?.borderColor = Theme.line.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = barHeight / 2
-        layer?.masksToBounds = true
+        // Flat glyphs on the toolbar. No pill, no border, no mask.
         heightAnchor.constraint(equalToConstant: barHeight).isActive = true
 
         // The Lightroom comparator: ≥ / = / ≤, click to cycle.
@@ -375,12 +391,6 @@ final class StarFilterBar: NSView {
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
 
-        rejectsHighlight.wantsLayer = true
-        rejectsHighlight.layer?.backgroundColor = Theme.accent.cgColor
-        rejectsHighlight.layer?.cornerRadius = (barHeight - inset * 2) / 2
-        rejectsHighlight.alphaValue = 0
-        addSubview(rejectsHighlight)
-
         rejectsButton.target = self
         rejectsButton.action = #selector(rejectsTapped(_:))
         rejectsButton.isBordered = false
@@ -410,7 +420,6 @@ final class StarFilterBar: NSView {
 
     override func layout() {
         super.layout()
-        rejectsHighlight.frame = rejectsButton.frame.insetBy(dx: inset, dy: inset)
     }
 
     @objc private func starTapped(_ sender: NSButton) {
@@ -462,10 +471,9 @@ final class StarFilterBar: NSView {
             .foregroundColor: cmpActive ? Theme.tx0 : Theme.tx2,
             .font: Theme.monoDataStrong
         ])
-        (animated ? rejectsHighlight.animator() : rejectsHighlight).alphaValue = rejectsOnly ? 1 : 0
         rejectsButton.attributedTitle = NSAttributedString(string: "Rejects", attributes: [
-            .foregroundColor: rejectsOnly ? Theme.accentText : Theme.tx1,
-            .font: NSFont.systemFont(ofSize: 11.5, weight: rejectsOnly ? .semibold : .medium)
+            .foregroundColor: rejectsOnly ? Theme.tx0 : Theme.tx1,
+            .font: Theme.secondary
         ])
     }
 
@@ -504,7 +512,6 @@ final class FilterBar: NSView {
     private(set) var selectedIndex = 0
     private var buttons: [NSButton] = []
     private let titles: [String]
-    private let indicator = NSView()
     private var hovered: Int?
 
     private let barHeight: CGFloat = 26
@@ -513,18 +520,8 @@ final class FilterBar: NSView {
     init(titles: [String]) {
         self.titles = titles
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = Theme.bg2.cgColor
-        layer?.borderColor = Theme.line.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = barHeight / 2
-        layer?.masksToBounds = true
+        // Words, not a pill. The active word is primary text.
         heightAnchor.constraint(equalToConstant: barHeight).isActive = true
-
-        indicator.wantsLayer = true
-        indicator.layer?.backgroundColor = Theme.accent.cgColor
-        indicator.layer?.cornerRadius = (barHeight - inset * 2) / 2
-        addSubview(indicator)
 
         // Fixed widths, measured at the widest weight ever rendered.
         let measureFont = Theme.secondaryStrong
@@ -554,14 +551,8 @@ final class FilterBar: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private func indicatorFrame() -> NSRect {
-        guard buttons.indices.contains(selectedIndex) else { return .zero }
-        return buttons[selectedIndex].frame.insetBy(dx: inset, dy: inset)
-    }
-
     override func layout() {
         super.layout()
-        indicator.frame = indicatorFrame()
     }
 
     @objc private func tapped(_ sender: NSButton) {
@@ -579,23 +570,16 @@ final class FilterBar: NSView {
 
     private func moveSelection(to index: Int) {
         selectedIndex = index
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.16
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            ctx.allowsImplicitAnimation = true
-            indicator.animator().frame = indicatorFrame()
-        }
         restyle()
     }
 
     private func restyle() {
         for b in buttons {
             let on = b.tag == selectedIndex
-            let color: NSColor = on ? Theme.accentText
-                                    : (b.tag == hovered ? Theme.tx0 : Theme.tx1)
+            let color: NSColor = on ? Theme.tx0 : (b.tag == hovered ? Theme.tx0 : Theme.tx1)
             b.attributedTitle = NSAttributedString(string: titles[b.tag], attributes: [
                 .foregroundColor: color,
-                .font: NSFont.systemFont(ofSize: 11, weight: on ? .semibold : .medium)
+                .font: Theme.secondary
             ])
         }
     }

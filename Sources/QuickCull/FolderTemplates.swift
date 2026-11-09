@@ -1,4 +1,5 @@
 import Foundation
+import QuickCullCore
 
 /// Folder-structure templates: a named list of relative paths ("Ceremony",
 /// "Reception/Speeches") stamped into any folder from the sidebar.
@@ -6,6 +7,25 @@ import Foundation
 enum FolderTemplates {
 
     private static let key = "QuickCullFolderTemplates"
+    private static let patternKey = "QuickCullIngestPathPatterns"
+
+    /// Path patterns saved next to the old folder lists. Missing names stay
+    /// `{Job}` so a Wedding template from last year still creates its folders.
+    static var pathPatterns: [String: String] {
+        get { (UserDefaults.standard.dictionary(forKey: patternKey) as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: patternKey) }
+    }
+
+    static func unified() -> [IngestTemplate] {
+        IngestTemplates.migrate(folderLists: all, pathPatterns: pathPatterns)
+    }
+
+    static func save(name: String, paths: [String], pathPattern: String) {
+        save(name: name, paths: paths)
+        var patterns = pathPatterns
+        patterns[name] = pathPattern
+        pathPatterns = patterns
+    }
 
     static var all: [String: [String]] {
         get { (UserDefaults.standard.dictionary(forKey: key) as? [String: [String]]) ?? [:] }
@@ -65,6 +85,9 @@ enum FolderTemplates {
         var templates = all
         templates[name] = nil
         all = templates
+        var patterns = pathPatterns
+        patterns[name] = nil
+        pathPatterns = patterns
     }
 
     private static func relativeSubfolders(of url: URL, depth: Int) -> [String] {

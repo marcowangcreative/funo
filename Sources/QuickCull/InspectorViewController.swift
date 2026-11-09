@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import QuickCullCore
 
 /// Per-channel histogram + clipping stats.
 struct HistogramData {
@@ -29,7 +30,7 @@ final class HistogramView: NSView {
         layer?.backgroundColor = Theme.bg2.cgColor
         layer?.borderColor = Theme.line.cgColor
         layer?.borderWidth = 1
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = Theme.panelRadius
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -198,7 +199,7 @@ final class InspectorViewController: NSViewController {
 
         thumbView.imageScaling = .scaleProportionallyDown
         thumbView.wantsLayer = true
-        thumbView.layer?.cornerRadius = 8
+        thumbView.layer?.cornerRadius = Theme.imageRadius
         thumbView.layer?.masksToBounds = true
         thumbView.layer?.backgroundColor = NSColor.black.cgColor
         thumbView.translatesAutoresizingMaskIntoConstraints = false
@@ -223,7 +224,7 @@ final class InspectorViewController: NSViewController {
             b.setButtonType(.momentaryChange)
             b.tag = label
             b.wantsLayer = true
-            b.layer?.cornerRadius = 8
+            b.layer?.cornerRadius = Theme.imageRadius
             b.layer?.backgroundColor = Theme.labelColors[label].cgColor
             b.toolTip = "\(Theme.labelNames[label]) label (key \(label + 5))"
             b.translatesAutoresizingMaskIntoConstraints = false
@@ -460,6 +461,17 @@ final class InspectorViewController: NSViewController {
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
 
+        // First, so the expanded info card's height budget cannot trim it.
+        // Camera clock, not the Mac's zone. TIFF DateTime is the fallback
+        // when a file has no DateTimeOriginal (some JPEGs, scans).
+        let rawWhen = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+            ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
+        if let rawWhen {
+            rows.append(("Date", CaptureTime.display(exif: rawWhen) ?? rawWhen))
+        } else if let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date {
+            rows.append(("Date", CaptureTime.display(fileDate: modified)))
+        }
+
         if let model = tiff?[kCGImagePropertyTIFFModel] as? String {
             rows.append(("Camera", model))
         }
@@ -510,9 +522,6 @@ final class InspectorViewController: NSViewController {
         }
         if let flash = exif?[kCGImagePropertyExifFlash] as? Int {
             rows.append(("Flash", flash & 0x1 != 0 ? "Fired" : "Off"))
-        }
-        if let date = exif?[kCGImagePropertyExifDateTimeOriginal] as? String {
-            rows.append(("Captured", date))
         }
         return rows
     }

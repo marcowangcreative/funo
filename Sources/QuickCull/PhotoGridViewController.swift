@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Item view that reports double-clicks without disturbing the collection
 /// view's normal click-to-select machinery.
@@ -36,25 +37,77 @@ final class CullCollectionView: NSCollectionView {
     }
 }
 
-/// One cell in the contact sheet, styled after the mockup: rounded graphite
-/// card, thumbnail, meta row (filename + format badge), amber stars overlay,
-/// dimmed + red ✕ when rejected.
+/// One cell in the contact sheet. The thumbnail is only the photograph.
+/// Color chip, stars, filename, and format sit in one caption row. The chip
+/// and the five-star column keep their width when empty, so the filename
+/// does not move. A labeled row tints that caption only.
 /// Grid thumbnail: a plain layer-backed view (contents = cgImage) instead
 /// of NSImageView - pure GPU compositing, cheaper on fast scroll. .resizeAspect
 /// fits the WHOLE frame (no crop), matching the old scaleProportionallyDown.
 private final class GridThumbView: NSView {
+    private var image: NSImage?
+    /// The NSImage currently sitting in the layer. Re-assigning the same
+    /// buffer (every label/selection refresh) flashed the card.
+    private var displayedImage: NSImage?
+    /// False until the cell has been given a real frame. A contents assign
+    /// made while bounds are empty never appears once the frame arrives.
+    private var wasLaidOut = false
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        layerContentsRedrawPolicy = .never
         layer?.contentsGravity = .resizeAspect
+        layer?.contentsScale = 2
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let scale = window?.backingScaleFactor ?? 2
+        guard layer?.contentsScale != scale else { return }
+        layer?.contentsScale = scale
+        displayedImage = nil
+        applyContents()
+    }
+
     func setImage(_ image: NSImage?) {
-        guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            layer?.contents = nil
+        self.image = image
+        applyContents()
+    }
+
+    /// True when the cell has nothing to draw — the repair pass uses this
+    /// to re-request a thumb the collection view dropped on the floor.
+    var contentsMissing: Bool { layer?.contents == nil }
+
+    override func layout() {
+        super.layout()
+        let ready = bounds.width > 1 && bounds.height > 1
+        if ready, !wasLaidOut {
+            wasLaidOut = true
+            displayedImage = nil
+            applyContents()
+        } else if !ready {
+            wasLaidOut = false
+        }
+    }
+
+    private func applyContents() {
+        guard let image else {
+            displayedImage = nil
+            QuickCullImage.setContents(nil, of: layer)
             return
         }
-        layer?.contents = cg
+        if displayedImage === image, layer?.contents != nil { return }
+        guard let cg = image.quickCullCGImage() else {
+            // Extraction failed: drop whatever was showing rather than leave
+            // the previous photo in the cell.
+            displayedImage = nil
+            QuickCullImage.setContents(nil, of: layer)
+            return
+        }
+        QuickCullImage.setContents(cg, of: layer)
+        displayedImage = image
     }
 }
 
@@ -63,14 +116,71 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     static let identifier = NSUserInterfaceItemIdentifier("PhotoItem")
 
     private let thumbView = GridThumbView(frame: .zero)
+    private let caption = NSView()
+    private let colorDot = NSView()
+    private let markLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
-    private let starsLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
-    private let chipLabel = NSTextField(labelWithString: "")
-    private let container = NSView()
+    private let formatLabel = NSTextField(labelWithString: "")
 
     private(set) var representedURL: URL?
+    /// URL of an in-flight thumbnail request, so a layout repair doesn't
+    /// stack another waiter on the same decode.
+    private var pendingThumbURL: URL?
+    /// Consecutive nil deliveries for the current file. Caps the repair loop
+    /// when a file genuinely can't be decoded.
+    private var thumbFailures = 0
     var onDoubleClick: (() -> Void)?
+
+    var thumbnailNeedsRequest: Bool {
+        representedURL != nil && thumbView.contentsMissing && pendingThumbURL == nil
+            && thumbFailures < ThumbRetryPolicy.failureCap
+    }
+
+    var thumbnailMissing: Bool {
+        representedURL != nil && thumbView.contentsMissing
+    }
+
+    /// queued, running on a lane, failed, cancelled, or no request.
+    func thumbnailStateLabel() -> String {
+        if thumbFailures >= ThumbRetryPolicy.failureCap { return "failed" }
+        guard let url = representedURL else { return "no request" }
+        if pendingThumbURL != nil {
+            switch ThumbnailLoader.shared.presence(for: url) {
+            case .queued: return "queued"
+            case .running(let lane): return "running \(lane)"
+            case .failed: return "failed"
+            case .cancelled: return "cancelled"
+            case .noRequest: return "queued"
+            }
+        }
+        switch ThumbnailLoader.shared.presence(for: url) {
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        case .queued: return "queued"
+        case .running(let lane): return "running \(lane)"
+        case .noRequest: return "no request"
+        }
+    }
+
+    func isWaitingForThumbnail(_ url: URL) -> Bool { pendingThumbURL == url }
+
+    func noteThumbnailRequest(_ url: URL) { pendingThumbURL = url }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        if editingBase != nil { endNameEdit() }
+        representedURL = nil
+        pendingThumbURL = nil
+        thumbFailures = 0
+        onDoubleClick = nil
+        onRenameCommitted = nil
+        thumbView.setImage(nil)
+        thumbView.alphaValue = 1
+        thumbView.layer?.borderWidth = 0
+        caption.layer?.backgroundColor = NSColor.clear.cgColor
+        colorDot.layer?.backgroundColor = NSColor.clear.cgColor
+        nameLabel.textColor = Theme.tx1
+    }
 
     override func loadView() {
         let v = DoubleClickView()
@@ -82,164 +192,155 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 9
-        container.layer?.masksToBounds = true
-        container.layer?.backgroundColor = Theme.bg2.cgColor
-        container.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(container)
-
+        // Selection is a 1px stroke on the thumbnail layer. No card, no mask,
+        // no shadow — the contents path stays a single layer assign.
+        thumbView.layer?.cornerRadius = Theme.imageRadius
+        thumbView.layer?.borderColor = Theme.tx0.cgColor
         thumbView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(thumbView)
+        view.addSubview(thumbView)
+
+        caption.wantsLayer = true
+        caption.layer?.cornerRadius = Theme.panelRadius
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(caption)
+
+        colorDot.wantsLayer = true
+        colorDot.layer?.cornerRadius = Theme.imageRadius
+        colorDot.translatesAutoresizingMaskIntoConstraints = false
+        caption.addSubview(colorDot)
+
+        markLabel.font = Theme.monoCaption
+        markLabel.textColor = Theme.accent
+        markLabel.alignment = .left
+        markLabel.lineBreakMode = .byClipping
+        markLabel.usesSingleLineMode = true
+        markLabel.translatesAutoresizingMaskIntoConstraints = false
+        caption.addSubview(markLabel)
 
         nameLabel.font = Theme.monoCaption
         nameLabel.textColor = Theme.tx1
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.usesSingleLineMode = true
-        nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.delegate = self
         nameLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(nameClicked(_:))))
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(nameLabel)
+        caption.addSubview(nameLabel)
 
-        badgeLabel.font = Theme.monoEyebrow
-        badgeLabel.textColor = Theme.tx2
-        badgeLabel.wantsLayer = true
-        badgeLabel.layer?.borderColor = Theme.line.cgColor
-        badgeLabel.layer?.borderWidth = 1
-        badgeLabel.layer?.cornerRadius = 4
-        badgeLabel.alignment = .center
-        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(badgeLabel)
+        formatLabel.font = Theme.monoCaption
+        formatLabel.textColor = Theme.tx2
+        formatLabel.alignment = .right
+        formatLabel.translatesAutoresizingMaskIntoConstraints = false
+        formatLabel.setContentHuggingPriority(.required, for: .horizontal)
+        formatLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        caption.addSubview(formatLabel)
 
-        // Stars live in the card's top padding - on graphite, never fighting
-        // a bright image for contrast.
-        starsLabel.font = Theme.secondary
-        starsLabel.textColor = Theme.accent
-        starsLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(starsLabel)
-
-        // Scale-aware cull chip: once thumbs shrink past the point where a
-        // star row can survive, the cull state compresses into a solid chip
-        // with constant pixel weight (see applyCullScale).
-        chipLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
-        chipLabel.alignment = .center
-        chipLabel.wantsLayer = true
-        chipLabel.layer?.cornerRadius = 3
-        chipLabel.isHidden = true
-        chipLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(chipLabel)
-
+        let markWidth = markLabel.widthAnchor.constraint(equalToConstant: Theme.captionMarkWidth)
+        markWidth.priority = .required
         NSLayoutConstraint.activate([
-            container.topAnchor.constraint(equalTo: view.topAnchor),
-            container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            container.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbView.topAnchor.constraint(equalTo: view.topAnchor),
+            thumbView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            thumbView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbView.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -3),
 
-            starsLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
-            starsLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            starsLabel.heightAnchor.constraint(equalToConstant: 15),
+            caption.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            caption.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            caption.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            caption.heightAnchor.constraint(equalToConstant: 16),
 
-            chipLabel.centerYAnchor.constraint(equalTo: starsLabel.centerYAnchor),
-            chipLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            chipLabel.heightAnchor.constraint(equalToConstant: 14),
-            chipLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 18),
+            colorDot.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
+            colorDot.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            colorDot.widthAnchor.constraint(equalToConstant: Theme.captionChip),
+            colorDot.heightAnchor.constraint(equalToConstant: Theme.captionChip),
 
-            thumbView.topAnchor.constraint(equalTo: container.topAnchor, constant: 25),
-            thumbView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            thumbView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
-            thumbView.bottomAnchor.constraint(equalTo: nameLabel.topAnchor, constant: -3),
+            markLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            markLabel.leadingAnchor.constraint(equalTo: colorDot.trailingAnchor, constant: Theme.captionChipGap),
+            markWidth,
 
-            nameLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            nameLabel.trailingAnchor.constraint(equalTo: badgeLabel.leadingAnchor, constant: -6),
-            nameLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
-            nameLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 13),
+            nameLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
+            nameLabel.leadingAnchor.constraint(equalTo: markLabel.trailingAnchor, constant: Theme.captionChipGap),
+            nameLabel.trailingAnchor.constraint(equalTo: formatLabel.leadingAnchor, constant: -6),
 
-            badgeLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            badgeLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            badgeLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 26),
-
+            formatLabel.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
+            formatLabel.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
         ])
+        thumbView.layer?.borderWidth = isSelected ? 1 : 0
+        nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
     }
 
     func configure(asset: PhotoAsset) {
         if editingBase != nil { endNameEdit() } // cell reused mid-edit
+        let urlChanged = representedURL != asset.url
+        if urlChanged {
+            pendingThumbURL = nil
+            thumbFailures = 0
+        }
         representedURL = asset.url
-        nameLabel.stringValue = asset.filename
-        thumbView.setImage(ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize))
-        if asset.hasJPEGPair {
-            badgeLabel.stringValue = "R+J"
-        } else if asset.isRAW {
-            badgeLabel.stringValue = "RAW"
-        } else {
-            badgeLabel.stringValue = asset.url.pathExtension.uppercased()
+        let format = CellCaption.formatTag(isRAW: asset.isRAW, hasJPEGPair: asset.hasJPEGPair,
+                                           pathExtension: asset.url.pathExtension)
+        formatLabel.stringValue = format
+        if editingBase == nil { nameLabel.stringValue = asset.filename }
+        // A cache miss on a reused cell used to clear the layer and wait.
+        // When the URL hasn't changed (selection/label refresh, a reload
+        // that recycled the same photo), keep the pixels we already have
+        // instead of flashing blank.
+        if let cached = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
+            thumbView.setImage(cached)
+        } else if urlChanged {
+            thumbView.setImage(nil)
         }
         refreshCullState(assetID: asset.id)
     }
 
-    func setThumbnail(_ image: NSImage?, for url: URL) {
-        guard representedURL == url else { return } // cell was reused; drop stale pixels
-        thumbView.setImage(image)
+    /// True when the cell still needs a decode because the orientation changed
+    /// under an in-flight request. The pending flag is cleared for every
+    /// delivery of this URL, including that mismatch.
+    @discardableResult
+    func setThumbnail(_ image: NSImage?, for url: URL, rotation: Int) -> Bool {
+        guard representedURL == url else { return false }
+        if pendingThumbURL == url { pendingThumbURL = nil }
+        guard RatingsStore.shared.rotation(for: url.path) == rotation else { return true }
+        if let image {
+            thumbFailures = ThumbRetryPolicy.decide(outcome: .ready, failures: thumbFailures, hasWaiter: true).failures
+            thumbView.setImage(image)
+        } else {
+            // Nil here is a real decode failure. Cancellations are re-queued
+            // inside the loader and never arrive as nil.
+            let decision = ThumbRetryPolicy.decide(outcome: .failed, failures: thumbFailures, hasWaiter: true)
+            thumbFailures = decision.failures
+        }
+        return false
     }
 
     func refreshCullState(assetID: String) {
-        let rating = RatingsStore.shared.rating(for: assetID)
-        let isRejected = RatingsStore.shared.isRejected(assetID)
-        container.alphaValue = isRejected ? 0.26 : 1.0
-        if isRejected {
-            starsLabel.stringValue = "✕"
-            starsLabel.textColor = Theme.red
+        let caption = CellCaption.make(
+            filename: nameLabel.stringValue,
+            format: formatLabel.stringValue,
+            rating: RatingsStore.shared.rating(for: assetID),
+            rejected: RatingsStore.shared.isRejected(assetID),
+            colorLabel: RatingsStore.shared.colorLabel(for: assetID)
+        )
+        // Reject dims the photograph only. The caption stays full strength
+        // so the ✕ and the filename stay readable.
+        thumbView.alphaValue = caption.rejected ? 0.4 : 1
+        if caption.showsColorDot {
+            let color = Theme.labelColors[caption.colorLabel]
+            colorDot.layer?.backgroundColor = color.cgColor
+            self.caption.layer?.backgroundColor = color.withAlphaComponent(Theme.captionTint).cgColor
         } else {
-            starsLabel.stringValue = rating > 0 ? String(repeating: "★", count: rating) : ""
-            starsLabel.textColor = Theme.accent
+            colorDot.layer?.backgroundColor = NSColor.clear.cgColor
+            self.caption.layer?.backgroundColor = NSColor.clear.cgColor
         }
-        // Color label tints the whole card - reads at a glance from across
-        // the room, the way Photo Mechanic color classes do.
-        let color = RatingsStore.shared.colorLabel(for: assetID)
-        if color > 0 {
-            let tint = Theme.bg2.blended(withFraction: 0.42, of: Theme.labelColors[color]) ?? Theme.bg2
-            container.layer?.backgroundColor = tint.cgColor
-        } else {
-            container.layer?.backgroundColor = Theme.bg2.cgColor
-        }
-        // Chip content mirrors the star row (the card tint already carries
-        // the color label at every size, so the chip earns its place only
-        // for rejects and star counts - the two states the row loses).
-        if isRejected {
-            chipLabel.stringValue = "✕"
-            chipLabel.layer?.backgroundColor = Theme.red.cgColor
-            chipLabel.textColor = .white
-        } else if rating > 0 {
-            chipLabel.stringValue = "★\(rating)"
-            let bg = color > 0 ? Theme.labelColors[color] : Theme.accent
-            chipLabel.layer?.backgroundColor = bg.cgColor
-            chipLabel.textColor = color > 0 ? .white : Theme.bg1
-        } else {
-            chipLabel.stringValue = ""
-        }
-        applyCullScale()
-    }
-
-    /// The star-row-vs-chip switch: the elegant row at generous card sizes,
-    /// the solid chip once the card narrows past ~100pt and the row stops
-    /// reading. One rule, driven by the size slider the grid already has.
-    private func applyCullScale() {
-        let compact = view.bounds.width < 100
-        let hasChip = !chipLabel.stringValue.isEmpty
-        chipLabel.isHidden = !(compact && hasChip)
-        starsLabel.isHidden = compact && hasChip
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        applyCullScale()
+        markLabel.stringValue = caption.mark
+        markLabel.textColor = caption.rejected ? Theme.red : Theme.accent
     }
 
     override var isSelected: Bool {
         didSet {
-            container.layer?.borderWidth = isSelected ? 2.5 : 0
-            container.layer?.borderColor = Theme.accent.cgColor
+            thumbView.layer?.borderWidth = isSelected ? 1 : 0
+            if editingBase == nil {
+                nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
+            }
         }
     }
 
@@ -272,6 +373,7 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         nameLabel.isSelectable = false
         nameLabel.drawsBackground = false
         if let url = representedURL { nameLabel.stringValue = url.lastPathComponent }
+        nameLabel.textColor = isSelected ? Theme.tx0 : Theme.tx1
         editingBase = nil
     }
 
@@ -306,6 +408,8 @@ final class PhotoGridViewController: NSViewController,
 
     private var allAssets: [PhotoAsset] = []
     private(set) var displayedAssets: [PhotoAsset] = []
+    /// Whole-folder ⌘F index. Rebuilt only when `allAssets` is replaced.
+    private(set) var folderSearchIndex = FolderSearchIndex(photos: [])
     /// Stars filter as a THRESHOLD (click the 3rd star = 3★ & up, like
     /// Lightroom) because ratings are a scale; colors multi-select because
     /// labels are categories. nil / empty = no filter.
@@ -315,10 +419,27 @@ final class PhotoGridViewController: NSViewController,
     private var colorFilter: Set<Int> = []   // 0 = "no label" (grey dot)
     private var sortKey: SortKey = .name
     private var sortAscending = true
-    private var captureDates: [String: Date] = [:]
+    /// True once this folder's capture times have been read. Until then a
+    /// time sort is not shown, so the grid cannot reshuffle as dates arrive.
+    private var captureReady = false
+    private var captureReadInFlight = false
+    private var captureReadDone = 0
+    private var captureReadTotal = 0
+    private struct CaptureStamp {
+        var hasDate: Bool
+        var seconds: TimeInterval
+        var subsecMillis: Int
+        /// `path|size|mtime`. Empty until a read or cache hit records it.
+        var fileIdentity: String = ""
+    }
+
+    private final class CaptureReadBatch {
+        var records: [CaptureDateRecord] = []
+    }
+    private var captureTimes: [String: CaptureStamp] = [:]
     private var currentFolder: URL?
 
-    private let scrollView = NSScrollView()
+    private let scrollView = GraphiteScrollView()
     private let collectionView = CullCollectionView()
     private let layout = NSCollectionViewFlowLayout()
     private var selectionAnchor: Int?
@@ -345,10 +466,17 @@ final class PhotoGridViewController: NSViewController,
         onStatusChanged?(text, undo)
     }
 
-    private var scanGeneration = 0
+    /// Bumped on every folder load. A listing that finishes after a newer
+    /// click is dropped, and a path change blanks the grid in the same turn.
+    private var folderLoad = FolderLoadGate()
     private var firstThumbMS: Double?
     private var scanStartedAt: Date?
     private var scanMS: Double = 0
+    private var gridLogged = false
+    private var screenLogged = false
+    private var datesLogged = false
+    private var screenFilled = 0
+    private var screenTarget = 0
     private var pairedHidden = 0
 
     var onOpenPreview: ((Int) -> Void)?
@@ -426,7 +554,21 @@ final class PhotoGridViewController: NSViewController,
         folderMonitor = nil
         externalReloadTimer?.invalidate()
         externalReloadTimer = nil
+        if let faceObserver {
+            FaceAnalyzer.shared.removeObserver(faceObserver)
+            self.faceObserver = nil
+        }
     }
+
+    deinit {
+        if let faceObserver {
+            FaceAnalyzer.shared.removeObserver(faceObserver)
+        }
+    }
+
+    /// Face-analyzer subscription. One per grid, removed on close, so a
+    /// background or closed tab can't steal results from the one on screen.
+    private var faceObserver: UUID?
     /// A face-analysis result landed (asset id) - lets the preview update live.
     var onFaceResult: ((String) -> Void)?
 
@@ -466,20 +608,24 @@ final class PhotoGridViewController: NSViewController,
             self?.buildContextMenu(for: ip)
         }
 
-        // Face analysis trickles in - restyle the badge on whichever card is
-        // visible, refresh the Eyes ✓ filter (throttled), update progress.
-        FaceAnalyzer.shared.onResult = { [weak self] id in
-            self?.onFaceResult?(id)
-        }
-        FaceAnalyzer.shared.onProgress = { [weak self] done, total in
-            guard let self else { return }
-            self.aiDone = done
-            self.aiTotal = total
-            // Cached folders stream thousands of results in a burst; a full
-            // updateStatus (2x O(n) rated/rejected recount + footer relayout)
-            // per result stormed the main thread. Coalesce to ~7 Hz.
-            self.scheduleStatusUpdate()
-        }
+        // Face analysis trickles in. Every grid listens; only the active tab
+        // forwards to the preview, so a later-created (or since-closed) tab
+        // can't replace the callback and leave the faces panel stuck empty.
+        faceObserver = FaceAnalyzer.shared.addObserver(
+            onResult: { [weak self] id in
+                guard let self, self.isActiveTab else { return }
+                self.onFaceResult?(id)
+            },
+            onProgress: { [weak self] done, total in
+                guard let self else { return }
+                self.aiDone = done
+                self.aiTotal = total
+                // Cached folders stream thousands of results in a burst; a full
+                // updateStatus (2x O(n) rated/rejected recount + footer relayout)
+                // per result stormed the main thread. Coalesce to ~7 Hz.
+                self.scheduleStatusUpdate()
+            }
+        )
 
         // ── Toolbar ──────────────────────────────────────────────
         let toolbar = NSView()
@@ -487,10 +633,6 @@ final class PhotoGridViewController: NSViewController,
         toolbar.layer?.backgroundColor = Theme.bg1.cgColor
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(toolbar)
-
-        let showLabel = Theme.sectionHeader("Show")
-        showLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(showLabel)
 
         filterBar.translatesAutoresizingMaskIntoConstraints = false
         filterBar.onChange = { [weak self] threshold, comparison, rejects in
@@ -508,18 +650,15 @@ final class PhotoGridViewController: NSViewController,
         }
         toolbar.addSubview(colorFilterBar)
 
-        let sortLabel = Theme.sectionHeader("Sort")
-        sortLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(sortLabel)
-
         sortBar.translatesAutoresizingMaskIntoConstraints = false
         sortBar.onChange = { [weak self] index in
             guard let self, let key = SortKey(rawValue: index) else { return }
             self.sortKey = key
-            self.resort(keepSelection: true)
-            if key == .capture, self.captureDates.isEmpty, !self.allAssets.isEmpty {
-                self.scanCaptureDates(self.allAssets, generation: self.scanGeneration)
+            if key == .capture, !self.captureReady {
+                self.updateStatus()
+                return
             }
+            self.resort(keepSelection: true)
         }
         toolbar.addSubview(sortBar)
 
@@ -533,15 +672,11 @@ final class PhotoGridViewController: NSViewController,
         sortDirectionButton.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(sortDirectionButton)
 
-        let sizeLabel = Theme.sectionHeader("Size")
-        sizeLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(sizeLabel)
-
         sizeSlider.minValue = 120
         sizeSlider.maxValue = 320
         sizeSlider.doubleValue = 176
         sizeSlider.controlSize = .small
-        sizeSlider.trackFillColor = Theme.accent
+        sizeSlider.trackFillColor = Theme.tx2
         sizeSlider.target = self
         sizeSlider.action = #selector(thumbSizeChanged(_:))
         sizeSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -586,7 +721,7 @@ final class PhotoGridViewController: NSViewController,
 
         // The status line renders in the WINDOW footer (StatusFooterView) -
         // this grid feeds it via onStatusChanged when it's the active tab.
-        compactHiddenViews = [sizeLabel, sizeSlider]
+        compactHiddenViews = [sizeSlider]
 
         emptyLabel.font = Theme.headline
         emptyLabel.textColor = Theme.tx2
@@ -610,30 +745,24 @@ final class PhotoGridViewController: NSViewController,
             toolbar.topAnchor.constraint(equalTo: view.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.heightAnchor.constraint(equalToConstant: 42),
+            toolbar.heightAnchor.constraint(equalToConstant: 32),
 
-            showLabel.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 14),
-            showLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            filterBar.leadingAnchor.constraint(equalTo: showLabel.trailingAnchor, constant: 10),
+            filterBar.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 12),
             filterBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            colorFilterBar.leadingAnchor.constraint(equalTo: filterBar.trailingAnchor, constant: 12),
+            colorFilterBar.leadingAnchor.constraint(equalTo: filterBar.trailingAnchor, constant: 14),
             colorFilterBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sep1.leadingAnchor.constraint(equalTo: colorFilterBar.trailingAnchor, constant: 16),
+            sep1.leadingAnchor.constraint(equalTo: colorFilterBar.trailingAnchor, constant: 14),
             sep1.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sortLabel.leadingAnchor.constraint(equalTo: sep1.trailingAnchor, constant: 16),
-            sortLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            sortBar.leadingAnchor.constraint(equalTo: sortLabel.trailingAnchor, constant: 10),
+            sortBar.leadingAnchor.constraint(equalTo: sep1.trailingAnchor, constant: 14),
             sortBar.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             sortDirectionButton.leadingAnchor.constraint(equalTo: sortBar.trailingAnchor, constant: 6),
             sortDirectionButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            sizeSlider.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -14),
-            sizeSlider.widthAnchor.constraint(equalToConstant: 120),
+            sizeSlider.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -12),
+            sizeSlider.widthAnchor.constraint(equalToConstant: 96),
             sizeSlider.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            sizeLabel.trailingAnchor.constraint(equalTo: sizeSlider.leadingAnchor, constant: -8),
-            sizeLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
             toolbarLine.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor),
             toolbarLine.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),
@@ -789,6 +918,70 @@ final class PhotoGridViewController: NSViewController,
         for v in compactHiddenViews where v.isHidden != compact {
             v.isHidden = compact
         }
+        scheduleVisibleRepair()
+    }
+
+    /// NSCollectionView sometimes recycles a visible item without asking the
+    /// data source again — after a reload (file op, folder refresh) or a
+    /// fast scroll. Those cells keep the previous photo or stay blank until
+    /// something else forces a rebind. One pass per turn, only over what's
+    /// actually on screen.
+    private var visibleRepairScheduled = false
+    /// Runs only while a visible cell is still missing a thumbnail.
+    private var missingThumbTimer: Timer?
+
+    private func scheduleVisibleRepair() {
+        guard isActiveTab, !visibleRepairScheduled, !displayedAssets.isEmpty else { return }
+        visibleRepairScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.visibleRepairScheduled = false
+            self.repairVisibleThumbnails()
+        }
+    }
+
+    private func repairVisibleThumbnails() {
+        guard isActiveTab else {
+            stopMissingThumbTimer()
+            return
+        }
+        var missing: [(String, String)] = []
+        var stillTrying = false
+        for ip in collectionView.indexPathsForVisibleItems() {
+            guard ip.item < displayedAssets.count,
+                  let item = collectionView.item(at: ip) as? PhotoItem else { continue }
+            let asset = displayedAssets[ip.item]
+            if item.representedURL != asset.url {
+                item.configure(asset: asset)
+                requestThumbnail(for: item, url: asset.url)
+            } else if item.thumbnailNeedsRequest {
+                requestThumbnail(for: item, url: asset.url)
+            }
+            if item.thumbnailMissing {
+                missing.append((asset.filename, item.thumbnailStateLabel()))
+                if item.thumbnailNeedsRequest || item.isWaitingForThumbnail(asset.url) {
+                    stillTrying = true
+                }
+            }
+        }
+        ThumbWatch.shared.setMissing(missing)
+        if stillTrying {
+            startMissingThumbTimer()
+        } else {
+            stopMissingThumbTimer()
+        }
+    }
+
+    private func startMissingThumbTimer() {
+        guard missingThumbTimer == nil else { return }
+        missingThumbTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.repairVisibleThumbnails()
+        }
+    }
+
+    private func stopMissingThumbTimer() {
+        missingThumbTimer?.invalidate()
+        missingThumbTimer = nil
     }
 
     /// One click out of any filtered view - the "my photos disappeared"
@@ -858,6 +1051,13 @@ final class PhotoGridViewController: NSViewController,
 
     // MARK: - Folder loading & filtering
 
+    /// The open folder, or a folder inside it, was moved. Rescan the new path.
+    func relocateOpenFolder(from: String, to: String) {
+        guard let current = currentFolder?.standardizedFileURL.path,
+              let rewritten = SidebarRelocation.rekey(path: current, from: from, to: to) else { return }
+        loadFolder(URL(fileURLWithPath: rewritten, isDirectory: true))
+    }
+
     func loadFolder(_ url: URL) {
         removeWelcome()
         // History: only genuine folder CHANGES push an entry - reloads of
@@ -872,54 +1072,85 @@ final class PhotoGridViewController: NSViewController,
         onFolderChanged?(url)
 
         currentFolder = url
+        folderScanInFlight = true
         bannerView.isHidden = true
         watchFolder(url)
         lastSelfLoadAt = Date()
-        scanGeneration += 1
-        let generation = scanGeneration
+        // Blank before the listing returns. Otherwise the cells keep showing
+        // the previous folder for the whole scan, which is the flash.
+        let ticket = folderLoad.begin(to: url.standardizedFileURL.path)
+        let generation = ticket.generation
+        let sameFolder = !ticket.blank
+        let previousTimes = sameFolder ? captureTimes : [:]
+        if ticket.blank {
+            allAssets = []
+            displayedAssets = []
+            rebuildSearchIndex()
+            collectionView.reloadData()
+        }
         firstThumbMS = nil
         scanStartedAt = Date()
+        gridLogged = false
+        screenLogged = false
+        datesLogged = false
+        screenFilled = 0
+        screenTarget = 0
         emptyLabel.stringValue = ""
         // Only surface "Opening…" if the scan is actually slow (a cold load).
         // Fast, cached, or empty folders finish first and jump straight to the
         // result, so the footer never flickers "Opening…" for no reason.
         openingStatusWork?.cancel()
         let openingWork = DispatchWorkItem { [weak self] in
-            guard let self, self.scanGeneration == generation else { return }
+            guard let self, self.folderLoad.accepts(generation) else { return }
             self.pushStatus("Opening \(url.lastPathComponent)…")
         }
         openingStatusWork = openingWork
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: openingWork)
 
+        WorkRunner.shared.setFolderLoading(true)
+        if !sameFolder {
+            // A reload of this same folder must not cancel in-flight thumbs.
+            // A real folder change drops prefetch only. A cell that is waiting
+            // keeps its job.
+            ThumbnailLoader.shared.cancelWithoutWaiters()
+            ThumbnailLoader.shared.resetStats()
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
-                guard let self, self.scanGeneration == generation else { return }
+                guard let self, self.folderLoad.accepts(generation) else { return }
+                WorkRunner.shared.setFolderLoading(false)
+                self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
-                if self.sortKey == .name {
-                    self.allAssets = self.sortAscending ? result.assets : result.assets.reversed()
+                self.scanMS = result.elapsed * 1000
+                self.pairedHidden = result.pairedJPEGCount
+                self.captureReadDone = 0
+                self.captureReadTotal = result.assets.count
+                self.captureReadInFlight = !result.assets.isEmpty
+                if !sameFolder {
+                    self.captureTimes = [:]
+                    self.captureReady = result.assets.isEmpty
+                }
+                // Show the grid as soon as the listing is in. A capture-time
+                // sort that is not ready yet uses filename order, and the
+                // real order is applied once, in place, when the dates land.
+                if self.sortKey == .capture && !self.captureReady {
+                    self.allAssets = self.nameSorted(result.assets)
                 } else {
                     self.allAssets = self.sorted(result.assets)
                 }
-                self.scanMS = result.elapsed * 1000
-                self.pairedHidden = result.pairedJPEGCount
-                self.captureDates = [:]
-                self.applyFilter(keepSelection: false)
+                self.rebuildSearchIndex()
+                self.applyFilter(keepSelection: sameFolder, scrollToTop: !sameFolder)
+                self.noteGridShown()
                 self.scanSidecars(self.allAssets, generation: generation)
-                // Capture dates need an EXIF header read PER FILE - thousands
-                // of drive reads that fight the thumbnails. The default name
-                // sort never uses them, so only pay it when sorting by
-                // capture (and lazily on the first switch to it).
-                if self.sortKey == .capture {
-                    self.scanCaptureDates(result.assets, generation: generation)
-                }
+                self.scanCaptureDates(result.assets, generation: generation, previous: previousTimes, sameFolder: sameFolder)
                 // Face analysis reads a big decode PER photo. On a 5k folder
                 // on an external drive it saturates I/O and starves the very
                 // thumbnails the user is looking at. Let the thumbnails win
                 // the drive first; start faces ~2 s later, and bail if the
                 // user has already moved to another folder.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self, self.scanGeneration == generation else { return }
+                    guard let self, self.folderLoad.accepts(generation) else { return }
                     FaceAnalyzer.shared.analyzeFolder(self.allAssets)
                 }
             }
@@ -929,24 +1160,98 @@ final class PhotoGridViewController: NSViewController,
     /// EXIF capture times + existing XMP sidecars load in the background.
     /// Sidecar ratings/labels from Lightroom/Photo Mechanic are adopted so
     /// culls done elsewhere show up here.
-    private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
-        // Dates only - sidecar adoption streams separately (scanSidecars).
-        // A capture date needs an image-header read, 10–50× the cost of a
-        // sidecar; bundling them made Lightroom/PM ratings wait ~2 s behind
-        // the EXIF pass on a 2,000-RAW folder.
+    private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int,
+                                   previous: [String: CaptureStamp] = [:], sameFolder: Bool = false) {
+        guard !assets.isEmpty else {
+            if sameFolder {
+                allAssets = []
+                rebuildSearchIndex()
+                applyFilter(keepSelection: true)
+            }
+            return
+        }
+        WorkRunner.shared.cancel(group: "exif")
+        let started = Date()
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            var dates: [String: Date] = [:]
+            let cached = CaptureDateStore.shared.snapshot()
+            var hits: [String: CaptureStamp] = [:]
+            var misses: [PhotoAsset] = []
             for asset in assets {
-                if let date = FolderScanner.captureDate(of: asset.url) {
-                    dates[asset.id] = date
+                let values = try? asset.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let size = Int64(values?.fileSize ?? 0)
+                let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+                let identity = CaptureDateCache.identity(path: asset.url.path, size: size, mtime: mtime)
+                if var kept = previous[asset.id], kept.fileIdentity == identity || kept.fileIdentity.isEmpty {
+                    kept.fileIdentity = identity
+                    hits[asset.id] = kept
+                } else if let record = cached.record(path: asset.url.path, size: size, mtime: mtime) {
+                    hits[asset.id] = CaptureStamp(hasDate: record.hasDate, seconds: record.seconds,
+                                                  subsecMillis: record.subsecMillis, fileIdentity: identity)
+                } else {
+                    misses.append(asset)
                 }
             }
             DispatchQueue.main.async {
-                guard let self, self.scanGeneration == generation else { return }
-                self.captureDates = dates
-                if self.sortKey == .capture { self.resort(keepSelection: true) }
+                guard let self, self.folderLoad.accepts(generation) else { return }
+                self.captureTimes = hits
+                self.captureReadDone = hits.count
+                self.captureReadTotal = assets.count
+                if misses.isEmpty {
+                    self.finishCaptureRead(generation: generation, started: started)
+                    return
+                }
+                let batch = CaptureReadBatch()
+                for asset in misses {
+                    let place = WorkRunner.shared.classify(asset.url)
+                    WorkRunner.shared.submit(
+                        group: "exif", name: asset.filename, lane: .metadata,
+                        volume: place.volume, pace: place.pace, generation: generation
+                    ) { isCancelled in
+                        if isCancelled() {
+                            DispatchQueue.main.async {
+                                self.noteCapturePiece(generation: generation, id: asset.id, stamp: nil,
+                                                      record: nil, batch: batch, started: started, total: assets.count)
+                            }
+                            return
+                        }
+                        let read = FolderScanner.readCapture(asset.url)
+                        let identity = CaptureDateCache.identity(path: asset.url.path, size: read.size, mtime: read.mtime)
+                        let record = CaptureDateRecord(identity: identity, hasDate: read.hasDate,
+                                                       seconds: read.seconds, subsecMillis: read.subsecMillis)
+                        let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds,
+                                                  subsecMillis: read.subsecMillis, fileIdentity: identity)
+                        DispatchQueue.main.async {
+                            self.noteCapturePiece(generation: generation, id: asset.id, stamp: stamp,
+                                                  record: record, batch: batch, started: started, total: assets.count)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private func noteCapturePiece(generation: Int, id: String, stamp: CaptureStamp?, record: CaptureDateRecord?,
+                                  batch: CaptureReadBatch, started: Date, total: Int) {
+        guard folderLoad.accepts(generation) else { return }
+        if let stamp { captureTimes[id] = stamp }
+        if let record { batch.records.append(record) }
+        captureReadDone += 1
+        if captureReadDone % 250 == 0 { updateStatus() }
+        if captureReadDone >= total {
+            CaptureDateStore.shared.merge(batch.records)
+            finishCaptureRead(generation: generation, started: started)
+        }
+    }
+
+    private func finishCaptureRead(generation: Int, started: Date) {
+        guard folderLoad.accepts(generation) else { return }
+        captureReady = true
+        captureReadInFlight = false
+        if sortKey == .capture {
+            resort(keepSelection: true)
+        }
+        noteDatesReady()
+        updateStatus()
     }
 
     /// Foreign sidecar ratings (Lightroom / Photo Mechanic culls) stream in
@@ -982,7 +1287,7 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private func applySidecarBatch(_ batch: [(String, Int?, Int?)], generation: Int) {
-        guard scanGeneration == generation else { return }
+        guard folderLoad.accepts(generation) else { return }
         var adoptedAny = false
         for (id, rating, label) in batch {
             if RatingsStore.shared.adopt(rating: rating, label: label, for: id) {
@@ -995,7 +1300,6 @@ final class PhotoGridViewController: NSViewController,
         // folders, so pay it only when a filter could be hiding photos.
         let filterActive = rejectsOnly || starThreshold != nil || !colorFilter.isEmpty
         if filterActive {
-            preserveScrollOnNextApply = true
             applyFilter(keepSelection: true)
         }
         refreshVisibleCullStates()
@@ -1004,41 +1308,62 @@ final class PhotoGridViewController: NSViewController,
 
     // MARK: - Sorting
 
+    private func nameSorted(_ assets: [PhotoAsset]) -> [PhotoAsset] {
+        assets.sorted { nameOrdered($0, before: $1) }
+    }
+
     private func sorted(_ assets: [PhotoAsset]) -> [PhotoAsset] {
-        var result: [PhotoAsset]
         switch sortKey {
         case .name:
-            result = assets.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }
+            return assets.sorted { nameOrdered($0, before: $1) }
         case .capture:
-            result = assets.sorted {
-                let a = captureDates[$0.id] ?? $0.modificationDate
-                let b = captureDates[$1.id] ?? $1.modificationDate
-                if a != b { return a < b }
-                return $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
-            }
+            return assets.sorted { captureOrdered($0, before: $1) }
         }
-        return sortAscending ? result : result.reversed()
+    }
+
+    /// Direction is only this flag. The array is never reversed in place.
+    private func nameOrdered(_ a: PhotoAsset, before b: PhotoAsset) -> Bool {
+        let order = a.filename.localizedStandardCompare(b.filename)
+        if order == .orderedSame { return false }
+        return sortAscending ? order == .orderedAscending : order == .orderedDescending
+    }
+
+    private func captureOrdered(_ a: PhotoAsset, before b: PhotoAsset) -> Bool {
+        let left = captureTimes[a.id]
+        let right = captureTimes[b.id]
+        return CaptureSort.isOrderedBefore(
+            CaptureSortKey(filename: a.filename, hasDate: left?.hasDate ?? false,
+                           seconds: left?.seconds ?? 0, subsecMillis: left?.subsecMillis ?? 0),
+            CaptureSortKey(filename: b.filename, hasDate: right?.hasDate ?? false,
+                           seconds: right?.seconds ?? 0, subsecMillis: right?.subsecMillis ?? 0),
+            ascending: sortAscending
+        )
     }
 
     private func resort(keepSelection: Bool) {
+        guard sortKey != .capture || captureReady else { return }
         allAssets = sorted(allAssets)
+        rebuildSearchIndex()
         applyFilter(keepSelection: keepSelection)
     }
 
     @objc private func toggleSortDirection(_ sender: Any?) {
         sortAscending.toggle()
         sortDirectionButton.title = sortAscending ? "↑" : "↓"
+        // Dates still coming in: remember the direction and apply it once,
+        // instead of flipping a half-sorted list.
+        guard sortKey != .capture || captureReady else {
+            updateStatus()
+            return
+        }
         resort(keepSelection: true)
     }
 
-    /// Reloads of the SAME folder (watcher refresh, undo, post-trash) keep
-    /// the user's scroll position - jumping to the top mid-cull because a
-    /// sidecar landed on disk is disorienting. Genuine filter/folder changes
-    /// still start at the top.
-    private var preserveScrollOnNextApply = false
-
-    private func applyFilter(keepSelection: Bool) {
+    private func applyFilter(keepSelection: Bool, anchor pinned: VisibleAnchor? = nil, scrollToTop: Bool = false) {
         let previous = keepSelection ? selectedAsset : nil
+        // Captured before the model swap. A real folder change is the only
+        // path that passes scrollToTop.
+        let anchor = scrollToTop ? nil : (pinned ?? captureVisibleAnchor())
         displayedAssets = allAssets.filter { asset in
             let store = RatingsStore.shared
             if rejectsOnly {
@@ -1052,23 +1377,28 @@ final class PhotoGridViewController: NSViewController,
                 case .atMost:  guard rating <= starThreshold else { return false }
                 }
             }
-            if !colorFilter.isEmpty {
-                guard colorFilter.contains(store.colorLabel(for: asset.id)) else { return false }
+            if !ColorLabelFilter.shows(label: store.colorLabel(for: asset.id), active: colorFilter) {
+                return false
             }
             return true
         }
-        let savedOrigin: NSPoint? = preserveScrollOnNextApply
-            ? scrollView.contentView.bounds.origin : nil
-        preserveScrollOnNextApply = false
         collectionView.reloadData()
-        if let savedOrigin {
-            scrollView.layoutSubtreeIfNeeded()
-            let maxY = max(0, collectionView.frame.height - scrollView.contentView.bounds.height)
-            scrollView.contentView.scroll(to: NSPoint(x: savedOrigin.x, y: min(savedOrigin.y, maxY)))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+        if let anchor {
+            restoreAnchor(anchor)
         } else {
             collectionView.scroll(NSPoint.zero)
         }
+        collectionView.layoutSubtreeIfNeeded()
+        if !screenLogged {
+            let visible = collectionView.indexPathsForVisibleItems().filter { $0.item < displayedAssets.count }.count
+            if visible > 0 { screenTarget = visible }
+            if screenTarget > 0, screenFilled >= screenTarget { logFirstScreen() }
+        }
+        let screen = max(screenTarget, 48)
+        ThumbnailLoader.shared.warmFolder(
+            displayedAssets.map(\.url),
+            leading: min(displayedAssets.count, screen * 4),
+            maxPixel: ThumbnailLoader.thumbnailPixelSize)
         // The welcome overlay owns the empty screen - never stack
         // "No photos in this folder" on top of it.
         emptyLabel.stringValue = welcomeOverlay != nil ? ""
@@ -1076,16 +1406,9 @@ final class PhotoGridViewController: NSViewController,
                 ? (allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
                 : "")
 
-        if let pendingID = pendingSelectionID {
-            pendingSelectionID = nil
+        if pendingSelectionID != nil {
             pendingSelection = nil
-            if let index = displayedAssets.firstIndex(where: { $0.id == pendingID }) {
-                select(index: index)
-            } else if !displayedAssets.isEmpty {
-                select(index: 0)
-            } else {
-                onSelectionChanged?(nil)
-            }
+            takePendingSelection()
         } else if let pending = pendingSelection {
             pendingSelection = nil
             if !displayedAssets.isEmpty {
@@ -1104,6 +1427,128 @@ final class PhotoGridViewController: NSViewController,
         updateStatus()
     }
 
+    /// Top visible photo plus its distance from the top of the viewport.
+    private func captureVisibleAnchor() -> VisibleAnchor? {
+        let originY = scrollView.contentView.bounds.origin.y
+        var best: (Int, CGFloat)?
+        for ip in collectionView.indexPathsForVisibleItems() where ip.item < displayedAssets.count {
+            guard let frame = collectionView.layoutAttributesForItem(at: ip)?.frame else { continue }
+            if best == nil || frame.minY < best!.1 {
+                best = (ip.item, frame.minY)
+            }
+        }
+        guard let best else { return nil }
+        return VisibleAnchor(id: displayedAssets[best.0].id, offset: Double(best.1 - originY))
+    }
+
+    private func restoreAnchor(_ anchor: VisibleAnchor) {
+        guard let index = displayedAssets.firstIndex(where: { $0.id == anchor.id }) else { return }
+        collectionView.layoutSubtreeIfNeeded()
+        let ip = IndexPath(item: index, section: 0)
+        guard let frame = collectionView.layoutAttributesForItem(at: ip)?.frame else { return }
+        let y = frame.minY - CGFloat(anchor.offset)
+        let maxY = max(0, collectionView.frame.height - scrollView.contentView.bounds.height)
+        let clamped = min(max(0, y), maxY)
+        scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: clamped))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// RAW and JPEG that share a stem leave the grid together.
+    private func companionIDs(in assets: [PhotoAsset]) -> [String: String] {
+        var byStem: [String: [String]] = [:]
+        for asset in assets {
+            let stem = asset.url.deletingPathExtension().path
+            byStem[stem, default: []].append(asset.id)
+        }
+        var map: [String: String] = [:]
+        for ids in byStem.values where ids.count == 2 {
+            map[ids[0]] = ids[1]
+            map[ids[1]] = ids[0]
+        }
+        return map
+    }
+
+    /// Drop photos f/uno itself moved, trashed, or cut. No directory rescan
+    /// and no reload, so the scroll position does not jump.
+    private func removeAssets(ids: Set<String>) {
+        let removing = GridEdit.withCompanions(ids, companions: companionIDs(in: allAssets))
+        guard allAssets.contains(where: { removing.contains($0.id) }) else { return }
+        lastSelfLoadAt = Date()
+        let anchor = captureVisibleAnchor()
+        let plan = GridEdit.removalPlan(order: displayedAssets.map(\.id), removing: removing, anchor: anchor)
+        allAssets.removeAll { removing.contains($0.id) }
+        for id in removing { captureTimes[id] = nil }
+        rebuildSearchIndex()
+        let indexPaths = Set(plan.removedIndexes.map { IndexPath(item: $0, section: 0) })
+        guard !indexPaths.isEmpty else {
+            updateStatus()
+            return
+        }
+        let remaining = displayedAssets.filter { !removing.contains($0.id) }
+        collectionView.deselectItems(at: collectionView.selectionIndexPaths)
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        collectionView.performBatchUpdates({
+            self.displayedAssets = remaining
+            self.collectionView.deleteItems(at: indexPaths)
+        }, completionHandler: { [weak self] _ in
+            guard let self else { return }
+            if let anchor = plan.anchor { self.restoreAnchor(anchor) }
+            if let id = plan.selectionID,
+               let index = self.displayedAssets.firstIndex(where: { $0.id == id }) {
+                self.select(index: index)
+            } else {
+                self.onSelectionChanged?(nil)
+            }
+            self.emptyLabel.stringValue = self.welcomeOverlay != nil ? ""
+                : (self.displayedAssets.isEmpty
+                    ? (self.allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
+                    : "")
+            self.updateStatus()
+        })
+        NSAnimationContext.endGrouping()
+    }
+
+    /// A rename keeps the photo in the same cell. The id changes with the path.
+    private func replaceRenamed(_ migrations: [(String, String)]) {
+        guard !migrations.isEmpty else { return }
+        lastSelfLoadAt = Date()
+        let anchor = captureVisibleAnchor()
+        var changed: Set<IndexPath> = []
+        for (old, newID) in migrations {
+            guard let index = allAssets.firstIndex(where: { $0.id == old }) else { continue }
+            let oldAsset = allAssets[index]
+            let newURL = URL(fileURLWithPath: newID)
+            let updated = PhotoAsset(url: newURL, filename: newURL.lastPathComponent, isRAW: oldAsset.isRAW,
+                                     modificationDate: oldAsset.modificationDate, hasJPEGPair: oldAsset.hasJPEGPair)
+            allAssets[index] = updated
+            if var stamp = captureTimes.removeValue(forKey: old) {
+                // Path changed, so the old size/mtime key no longer matches.
+                // An empty identity tells the next same-folder refresh to
+                // keep this time and bind it to the new path.
+                stamp.fileIdentity = ""
+                captureTimes[updated.id] = stamp
+            }
+            if let displayed = displayedAssets.firstIndex(where: { $0.id == old }) {
+                displayedAssets[displayed] = updated
+                changed.insert(IndexPath(item: displayed, section: 0))
+            }
+        }
+        rebuildSearchIndex()
+        if !changed.isEmpty {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            collectionView.reloadItems(at: changed)
+            NSAnimationContext.endGrouping()
+        }
+        if let anchor { restoreAnchor(anchor) }
+        if let focus = migrations.first?.1,
+           let index = displayedAssets.firstIndex(where: { $0.id == focus }) {
+            select(index: index)
+        }
+        updateStatus()
+    }
+
     func updateStatus() {
         // A flash (esp. an undoable one) owns the status line until it
         // expires - routine stat refreshes must not stomp it.
@@ -1114,6 +1559,9 @@ final class PhotoGridViewController: NSViewController,
         }
         var parts: [String] = []
         parts.append("\(allAssets.count) photos")
+        if captureReadInFlight {
+            parts.append("reading times \(captureReadDone)/\(captureReadTotal)")
+        }
         if isFiltering { parts.append("showing \(displayedAssets.count)") }
         if pairedHidden > 0 { parts.append("+\(pairedHidden) paired JPEGs hidden") }
         #if DEBUG
@@ -1143,9 +1591,41 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private func reportFirstThumbIfNeeded() {
-        guard firstThumbMS == nil, let started = scanStartedAt else { return }
-        firstThumbMS = Date().timeIntervalSince(started) * 1000
-        updateStatus()
+        guard let started = scanStartedAt else { return }
+        if firstThumbMS == nil {
+            firstThumbMS = Date().timeIntervalSince(started) * 1000
+            updateStatus()
+        }
+        guard !screenLogged else { return }
+        if screenTarget == 0 {
+            let visible = collectionView.indexPathsForVisibleItems().filter { $0.item < displayedAssets.count }.count
+            if visible > 0 { screenTarget = visible }
+        }
+        screenFilled += 1
+        if screenTarget > 0, screenFilled >= screenTarget { logFirstScreen() }
+    }
+
+    private func noteGridShown() {
+        guard !gridLogged, let started = scanStartedAt else { return }
+        gridLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        FolderMetrics.shared.noteGrid(files: allAssets.count, gridMS: ms)
+    }
+
+    private func logFirstScreen() {
+        guard !screenLogged, let started = scanStartedAt else { return }
+        screenLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        let stats = ThumbnailLoader.shared.stats()
+        FolderMetrics.shared.noteScreen(ms: ms, cache: stats.cache, embedded: stats.embedded, full: stats.full)
+    }
+
+    private func noteDatesReady() {
+        guard !datesLogged, let started = scanStartedAt else { return }
+        datesLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        let stats = ThumbnailLoader.shared.stats()
+        FolderMetrics.shared.noteDates(files: allAssets.count, ms: ms, cache: stats.cache, embedded: stats.embedded, full: stats.full)
     }
 
     // MARK: - NSCollectionViewDataSource
@@ -1169,17 +1649,36 @@ final class PhotoGridViewController: NSViewController,
             self.performRenames([(asset, base)])
         }
 
+        requestThumbnail(for: photoItem, url: asset.url)
         if ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) == nil {
-            let url = asset.url
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self, weak photoItem] image in
-                photoItem?.setThumbnail(image, for: url)
-                if image != nil { self?.reportFirstThumbIfNeeded() }
-            }
             scheduleFocusPass()
         } else {
             reportFirstThumbIfNeeded()
         }
         return item
+    }
+
+    /// Cache hit applies immediately. A miss registers one waiter; repeats
+    /// for the same cell+url are ignored so the repair pass can't pile on.
+    /// `force` bypasses that guard — rotation needs a new decode even when
+    /// a request for this path is already in flight.
+    private func requestThumbnail(for item: PhotoItem, url: URL, force: Bool = false) {
+        let rotation = RatingsStore.shared.rotation(for: url.path)
+        if let cached = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
+            item.setThumbnail(cached, for: url, rotation: rotation)
+            reportFirstThumbIfNeeded()
+            return
+        }
+        if !force, item.isWaitingForThumbnail(url) { return }
+        item.noteThumbnailRequest(url)
+        ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self, weak item] image in
+            guard let item else { return }
+            if item.setThumbnail(image, for: url, rotation: rotation) {
+                self?.requestThumbnail(for: item, url: url, force: true)
+            }
+            if image != nil { self?.reportFirstThumbIfNeeded() }
+            self?.scheduleVisibleRepair()
+        }
     }
 
     /// Coalesced "what's on screen now" report to the loader - keeps the
@@ -1197,7 +1696,6 @@ final class PhotoGridViewController: NSViewController,
             let items = self.collectionView.indexPathsForVisibleItems().map(\.item)
                 .filter { $0 < self.displayedAssets.count }
             let visibleURLs = items.map { self.displayedAssets[$0].url }
-            ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
 
             // Direction-aware lookahead: warm ~3 screens of thumbs ahead of
             // the scroll (and one behind) so a steady scroll lands on cells
@@ -1207,6 +1705,11 @@ final class PhotoGridViewController: NSViewController,
             // run at .normal priority; visible cells (.high) always preempt,
             // and cache hits return before creating any op, so a warm folder
             // pays nothing.
+            //
+            // focusVisible runs AFTER the warm so those lookahead ops are
+            // demoted to .low in the same pass. Doing it first left the new
+            // prefetches at .normal, above any visible cell the snapshot had
+            // missed, and the screen went blank behind them.
             guard let lo = items.min(), let hi = items.max() else { return }
             let goingForward = self.lastVisibleTop.map { lo >= $0 } ?? true
             self.lastVisibleTop = lo
@@ -1227,6 +1730,11 @@ final class PhotoGridViewController: NSViewController,
                 warm(lo - ahead, lo - 1)
                 warm(hi + 1, hi + behind)
             }
+            let aheadEnd = min(count - 1, hi + ahead)
+            let aheadURLs = aheadEnd >= hi + 1
+                ? (hi + 1...aheadEnd).map { self.displayedAssets[$0].url }
+                : []
+            ThumbnailLoader.shared.focusVisible(visibleURLs, ahead: aheadURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
         }
     }
 
@@ -1295,9 +1803,9 @@ final class PhotoGridViewController: NSViewController,
         for (dx, dy) in [(8, -6), (4, -3)] {
             NSColor(srgbRed: 0.137, green: 0.149, blue: 0.161, alpha: 0.85).setFill()
             NSBezierPath(roundedRect: front.offsetBy(dx: CGFloat(dx), dy: CGFloat(dy)),
-                         xRadius: 5, yRadius: 5).fill()
+                         xRadius: Theme.imageRadius, yRadius: Theme.imageRadius).fill()
         }
-        let path = NSBezierPath(roundedRect: front, xRadius: 5, yRadius: 5)
+        let path = NSBezierPath(roundedRect: front, xRadius: Theme.imageRadius, yRadius: Theme.imageRadius)
         Theme.bg2.setFill(); path.fill()
         Theme.accent.setStroke(); path.lineWidth = 1.5; path.stroke()
         let text = count > 9999 ? "9999+" : "\(count)"
@@ -1326,6 +1834,49 @@ final class PhotoGridViewController: NSViewController,
         collectionView.deselectAll(nil)
         onSelectionChanged?(nil)
         flash("Selection cleared")
+    }
+
+    /// Toolbar / keyboard color filter. Toggles one label in the OR set.
+    /// Stars and rejects stay as they are. The last swatch turning off is All.
+    @discardableResult
+    private func toggleColorFilter(_ label: Int) -> Bool {
+        let next = ColorLabelFilter.toggle(label, in: colorFilter)
+        colorFilter = next
+        colorFilterBar.setSelection(next)
+        applyFilter(keepSelection: true)
+        if next.isEmpty {
+            flash("Showing all color labels")
+        } else {
+            let names = next.sorted().map { $0 == 0 ? "unlabeled" : Theme.labelNames[$0].lowercased() }
+            flash("Showing \(names.joined(separator: ", "))")
+        }
+        return true
+    }
+
+    /// Secondary to the view filter: select the photos that wear `label`
+    /// without hiding the rest. A multi-selection is narrowed to that label;
+    /// otherwise every match in the current filtered folder is selected.
+    /// `label` 0 is unlabeled.
+    func selectByColorLabel(_ label: Int) {
+        let displayed = displayedAssets.map {
+            ColorLabelSelection.Photo(id: $0.id, label: RatingsStore.shared.colorLabel(for: $0.id))
+        }
+        let selectedIDs = Set(selectedAssets.map(\.id))
+        let ids = ColorLabelSelection.idsToSelect(
+            displayed: displayed,
+            selectedIDs: selectedIDs,
+            label: label
+        )
+        let name = label == 0 ? "unlabeled" : Theme.labelNames[min(max(label, 0), 5)].lowercased()
+        guard !ids.isEmpty else {
+            let scope = ColorLabelSelection.scopeName(selectedCount: selectedIDs.count)
+            flash("No \(name) photos in this \(scope)")
+            NSSound.beep()
+            return
+        }
+        select(ids: ids, focusID: ids[0])
+        let noun = ids.count == 1 ? "photo" : "photos"
+        flash("\(ids.count) \(name) \(noun) selected")
     }
 
     // MARK: - Clipboard (⌘C copy, ⌘X cut, ⌘V paste - files, like Finder
@@ -1397,7 +1948,11 @@ final class PhotoGridViewController: NSViewController,
                     let skippedNote = result.skipped > 0 ? " - \(result.skipped) skipped" : ""
                     let cardNote = (cutRequested && !isCut) ? " (memory card untouched)" : ""
                     self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)\(cardNote)")
-                    self.reloadCurrentFolderPreservingSelection()
+                    if isCut {
+                        self.removeAssets(ids: Set(result.records.map { $0.from.path }))
+                    } else if folder.standardizedFileURL.path == self.currentFolder?.standardizedFileURL.path {
+                        self.reloadCurrentFolderPreservingSelection()
+                    }
                 }
             }
             if collisions > 0 {
@@ -1426,7 +1981,6 @@ final class PhotoGridViewController: NSViewController,
         // async trash finished made it feel laggy and detached ("too long").
         Self.trashSound?.stop()
         Self.trashSound?.play()
-        let anchor = selectedIndex ?? 0
         let urls = assets.map { $0.url }
         flash("Moving \(urls.count) photo\(urls.count == 1 ? "" : "s") to Trash…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1434,7 +1988,7 @@ final class PhotoGridViewController: NSViewController,
             DispatchQueue.main.async {
                 FileOpsHistory.push("move to Trash", result.records)
                 self?.flashUndoable("Moved \(result.primaries) photo\(result.primaries == 1 ? "" : "s") to Trash")
-                self?.reloadCurrentFolder(selecting: anchor)
+                self?.removeAssets(ids: Set(result.records.map { $0.from.path }))
             }
         }
     }
@@ -1452,15 +2006,12 @@ final class PhotoGridViewController: NSViewController,
 
     /// Called after a drag-move to a sidebar folder completed.
     func noteFilesMoved(count: Int, to destination: URL) {
-        let anchor = selectedIndex ?? 0
         flashUndoable("Moved \(count) photo\(count == 1 ? "" : "s") to \(destination.lastPathComponent)")
-        reloadCurrentFolder(selecting: anchor)
     }
 
     func reloadCurrentFolder(selecting index: Int? = nil) {
         guard let folder = currentFolder else { return }
         pendingSelection = index
-        preserveScrollOnNextApply = true
         loadFolder(folder)
     }
 
@@ -1508,7 +2059,10 @@ final class PhotoGridViewController: NSViewController,
             // or the collection view re-applies the old index paths to
             // whatever photos now occupy those positions ("random" highlight).
             self.collectionView.deselectItems(at: self.collectionView.selectionIndexPaths)
-            self.preserveScrollOnNextApply = true
+            if let paths = note.userInfo?["paths"] as? [String], !paths.isEmpty {
+                self.removeAssets(ids: Set(paths))
+                return
+            }
             self.loadFolder(folder)
         }
     }
@@ -1605,11 +2159,76 @@ final class PhotoGridViewController: NSViewController,
     private func reloadCurrentFolderPreservingSelection() {
         pendingSelectionID = selectedAsset?.id
         guard let folder = currentFolder else { return }
-        preserveScrollOnNextApply = true
         loadFolder(folder)
     }
 
     private var pendingSelectionID: String?
+    /// Folded filename stem for a drive-wide hit whose path may be the JPEG
+    /// of a RAW+JPEG pair. Nil means the id itself is the asset to select.
+    private var pendingSelectionStem: String?
+    /// True from the moment a folder scan is kicked off until its results land.
+    private var folderScanInFlight = false
+
+    /// Select this file once its folder is on screen. If a scan is already
+    /// running, the selection waits for that scan so we don't match the
+    /// previous folder's list.
+    func armSearchSelection(_ file: URL) {
+        pendingSelectionID = file.standardizedFileURL.path
+        pendingSelectionStem = FolderSearchIndex.fold(file.deletingPathExtension().lastPathComponent)
+        if !folderScanInFlight {
+            takePendingSelection()
+        }
+    }
+
+    private func displayedIndex(forID id: String, stem: String?) -> Int? {
+        let wanted = URL(fileURLWithPath: id).standardizedFileURL.path
+        if let exact = displayedAssets.firstIndex(where: {
+            $0.id == id || $0.url.standardizedFileURL.path == wanted
+        }) {
+            return exact
+        }
+        guard let stem, !stem.isEmpty else { return nil }
+        return displayedAssets.firstIndex {
+            FolderSearchIndex.fold($0.url.deletingPathExtension().lastPathComponent) == stem
+        }
+    }
+
+    private func assetID(forID id: String, stem: String?) -> String? {
+        let wanted = URL(fileURLWithPath: id).standardizedFileURL.path
+        if let exact = allAssets.first(where: {
+            $0.id == id || $0.url.standardizedFileURL.path == wanted
+        }) {
+            return exact.id
+        }
+        guard let stem, !stem.isEmpty else { return nil }
+        return allAssets.first {
+            FolderSearchIndex.fold($0.url.deletingPathExtension().lastPathComponent) == stem
+        }?.id
+    }
+
+    /// Consume a queued search/rename selection. A file hidden by the current
+    /// filter clears that filter and selects it.
+    private func takePendingSelection() {
+        guard let pendingID = pendingSelectionID else { return }
+        let stem = pendingSelectionStem
+        pendingSelectionID = nil
+        pendingSelectionStem = nil
+        if let index = displayedIndex(forID: pendingID, stem: stem) {
+            select(index: index)
+            return
+        }
+        if let resolved = assetID(forID: pendingID, stem: stem) {
+            pendingSelectionID = resolved
+            pendingSelectionStem = nil
+            clearAllFilters(nil)
+            return
+        }
+        if !displayedAssets.isEmpty {
+            select(index: 0)
+        } else {
+            onSelectionChanged?(nil)
+        }
+    }
 
     private func flash(_ text: String, duration: TimeInterval = 2.5, undoable: Bool = false) {
         pushStatus(text, undo: undoable)
@@ -1648,10 +2267,19 @@ final class PhotoGridViewController: NSViewController,
         if let asset = selectedAsset { onSelectionChanged?(asset) }
     }
 
-    /// (index, filename) pairs for the ⌘F palette - visible photos only,
-    /// so a jump target is always somewhere the grid can actually go.
-    func searchablePhotos() -> [(Int, String)] {
-        displayedAssets.enumerated().map { ($0.offset, $0.element.filename) }
+    private func rebuildSearchIndex() {
+        folderSearchIndex = FolderSearchIndex(photos: allAssets.map { ($0.id, $0.filename) })
+    }
+
+    /// Jump to a ⌘F hit. The index is the whole folder, so a photo hidden
+    /// by the color, star, or reject filter is brought back first.
+    func revealSearchHit(_ id: String) {
+        guard allAssets.contains(where: { $0.id == id }) else { return }
+        if displayedAssets.firstIndex(where: { $0.id == id }) == nil {
+            clearAllFilters(nil)
+        }
+        guard let index = displayedAssets.firstIndex(where: { $0.id == id }) else { return }
+        select(index: index)
     }
 
     func select(index: Int) {
@@ -1790,6 +2418,12 @@ final class PhotoGridViewController: NSViewController,
             // Unlabel - clears the color outright (vs. re-pressing its key).
             applyToSelection(advance: false) { RatingsStore.shared.setColorLabel(0, for: $0) }
             return true
+        case "6": return toggleColorFilter(1)
+        case "7": return toggleColorFilter(2)
+        case "8": return toggleColorFilter(3)
+        case "9": return toggleColorFilter(4)
+        case "p": return toggleColorFilter(5)
+        case "n": return toggleColorFilter(0)
         case "[", "]":
             // Photo Mechanic muscle memory: [ rotates CCW, ] rotates CW.
             rotateSelection(by: chars == "]" ? 90 : -90)
@@ -1830,7 +2464,8 @@ final class PhotoGridViewController: NSViewController,
     private static func dotImage(_ color: NSColor) -> NSImage {
         NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
             color.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            let chip = rect.insetBy(dx: 2, dy: 2)
+            NSBezierPath(roundedRect: chip, xRadius: Theme.imageRadius, yRadius: Theme.imageRadius).fill()
             return true
         }
     }
@@ -1874,6 +2509,32 @@ final class PhotoGridViewController: NSViewController,
         let colorRoot = NSMenuItem(title: "Color Label", action: nil, keyEquivalent: "")
         colorRoot.submenu = colorMenu
         menu.addItem(colorRoot)
+
+        let selectColorMenu = NSMenu()
+        for label in 1...5 {
+            let item = NSMenuItem(title: Theme.labelNames[label], action: #selector(menuSelectColor(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.tag = label
+            item.image = Self.dotImage(Theme.labelColors[label])
+            selectColorMenu.addItem(item)
+        }
+        selectColorMenu.addItem(.separator())
+        let selectNone = NSMenuItem(title: "Unlabeled", action: #selector(menuSelectColor(_:)), keyEquivalent: "")
+        selectNone.target = self
+        selectNone.tag = 0
+        selectColorMenu.addItem(selectNone)
+        let selectColorRoot = NSMenuItem(title: "Select All with Label", action: nil, keyEquivalent: "")
+        selectColorRoot.submenu = selectColorMenu
+        menu.addItem(selectColorRoot)
+        let clickedLabel = RatingsStore.shared.colorLabel(for: displayedAssets[ip.item].id)
+        if clickedLabel > 0 {
+            let only = NSMenuItem(title: "Select All \(Theme.labelNames[clickedLabel])",
+                                  action: #selector(menuSelectColor(_:)), keyEquivalent: "")
+            only.target = self
+            only.tag = clickedLabel
+            menu.addItem(only)
+        }
 
         let reject = NSMenuItem(title: "Reject", action: #selector(menuToggleReject(_:)), keyEquivalent: "x")
         reject.keyEquivalentModifierMask = []
@@ -1980,6 +2641,10 @@ final class PhotoGridViewController: NSViewController,
         applyToSelection(advance: false) { RatingsStore.shared.setColorLabel(label, for: $0) }
     }
 
+    @objc private func menuSelectColor(_ sender: NSMenuItem) {
+        selectByColorLabel(sender.tag)
+    }
+
     @objc private func menuToggleReject(_ sender: NSMenuItem) {
         applyToSelection(advance: false) { RatingsStore.shared.toggleRejected($0) }
     }
@@ -2052,7 +2717,6 @@ final class PhotoGridViewController: NSViewController,
             var migrations: [(String, String)] = []
             var renamed = 0
             var skipped = 0
-            var firstNewID: String?
 
             for (asset, newBase) in plans {
                 let parent = asset.url.deletingLastPathComponent()
@@ -2079,7 +2743,6 @@ final class PhotoGridViewController: NSViewController,
                     renamed += 1
                     let newID = parent.appendingPathComponent(newBase + "." + asset.url.pathExtension).path
                     migrations.append((asset.id, newID))
-                    if firstNewID == nil { firstNewID = newID }
                 }
             }
 
@@ -2092,8 +2755,7 @@ final class PhotoGridViewController: NSViewController,
                 var message = "Renamed \(renamed) photo\(renamed == 1 ? "" : "s")"
                 if skipped > 0 { message += " · \(skipped) skipped (name in use)" }
                 self.flashUndoable(message)
-                self.pendingSelectionID = firstNewID
-                if let folder = self.currentFolder { self.loadFolder(folder) }
+                self.replaceRenamed(migrations)
             }
         }
     }
@@ -2115,9 +2777,7 @@ final class PhotoGridViewController: NSViewController,
             guard ip.item < displayedAssets.count,
                   let item = collectionView.item(at: ip) as? PhotoItem else { continue }
             let url = displayedAssets[ip.item].url
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak item] image in
-                item?.setThumbnail(image, for: url)
-            }
+            requestThumbnail(for: item, url: url, force: true)
         }
     }
 
@@ -2149,13 +2809,9 @@ final class PhotoGridViewController: NSViewController,
             let asset = displayedAssets[ip.item]
             item.refreshCullState(assetID: asset.id)
             // A rotation in the preview invalidates this thumb's cache key.
-            if let cached = ThumbnailLoader.shared.cachedImage(for: asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
-                item.setThumbnail(cached, for: asset.url)
-            } else {
-                ThumbnailLoader.shared.request(asset.url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak item] image in
-                    item?.setThumbnail(image, for: asset.url)
-                }
-            }
+            // requestThumbnail no-ops when the pixels are already showing, so
+            // a label change doesn't reassign the layer and flash the card.
+            requestThumbnail(for: item, url: asset.url)
         }
         scheduleStatusUpdate() // coalesced O(n) recount, see applyToSelection
     }

@@ -161,6 +161,32 @@ final class CacheDB {
         }
     }
 
+    /// One statement, many keys. Used to warm a screen of thumbnails without
+    /// a `queue.sync` per file. Skips the atime bump; a later single get can
+    /// touch the row.
+    func getMany(_ keys: [String]) -> [String: Data] {
+        guard !keys.isEmpty else { return [:] }
+        return queue.sync {
+            guard let db else { return [:] }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT v FROM blobs WHERE k=?;", -1, &stmt, nil) == SQLITE_OK else {
+                return [:]
+            }
+            defer { sqlite3_finalize(stmt) }
+            var found: [String: Data] = [:]
+            found.reserveCapacity(keys.count)
+            for key in keys {
+                sqlite3_reset(stmt)
+                sqlite3_clear_bindings(stmt)
+                sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+                guard sqlite3_step(stmt) == SQLITE_ROW, let bytes = sqlite3_column_blob(stmt, 0) else { continue }
+                let count = Int(sqlite3_column_bytes(stmt, 0))
+                found[key] = Data(bytes: bytes, count: count)
+            }
+            return found
+        }
+    }
+
     func set(_ key: String, _ data: Data) {
         queue.async { [weak self] in
             guard let self, let db = self.db else { return }

@@ -1,0 +1,192 @@
+import XCTest
+@testable import QuickCullCore
+
+final class WorkSchedulerTests: XCTestCase {
+    func testVisibleRunsBeforeBackground() {
+        let scheduler = WorkScheduler()
+        let background = scheduler.enqueue(
+            group: "index", name: "walk", lane: .background, volume: "/Volumes/Slow",
+            pace: .card, generation: 1, now: 0)
+        let visible = scheduler.enqueue(
+            group: "thumb", name: "cell", lane: .visible, volume: "/Volumes/Slow",
+            pace: .card, generation: 1, now: 1)
+        let first = scheduler.promoteNext(now: 2)
+        XCTAssertEqual(first?.id, visible)
+        XCTAssertEqual(first?.lane, .visible)
+        XCTAssertNotEqual(first?.id, background)
+    }
+
+    func testCancelGenerationDropsQueuedWork() {
+        let scheduler = WorkScheduler()
+        let stale = scheduler.enqueue(
+            group: "exif", name: "old folder", lane: .prefetch, volume: "/",
+            pace: .internalDisk, generation: 3, now: 0)
+        _ = scheduler.enqueue(
+            group: "exif", name: "new folder", lane: .prefetch, volume: "/",
+            pace: .internalDisk, generation: 4, now: 1)
+        scheduler.cancel(group: "exif", generation: 3)
+        XCTAssertTrue(scheduler.isCancelled(stale))
+        let next = scheduler.promoteNext(now: 2)
+        XCTAssertEqual(next?.name, "new folder")
+        XCTAssertEqual(next?.generation, 4)
+    }
+
+    func testSlowVolumeAllowsOnlyTwoReads() {
+        let scheduler = WorkScheduler(cardLimit: 2, externalLimit: 6, internalLimit: 6, globalLimit: 8)
+        for index in 0..<4 {
+            scheduler.enqueue(
+                group: "thumb", name: "file \(index)", lane: .visible, volume: "/Volumes/Card",
+                pace: .card, generation: 1, now: TimeInterval(index))
+        }
+        let first = scheduler.promoteNext(now: 10)
+        let second = scheduler.promoteNext(now: 11)
+        XCTAssertNotNil(first)
+        XCTAssertNotNil(second)
+        XCTAssertNil(scheduler.promoteNext(now: 12))
+        scheduler.finish(first!.id)
+        XCTAssertNotNil(scheduler.promoteNext(now: 13))
+    }
+
+    func testExternalDriveRunsMoreThanTwoAtATime() {
+        let scheduler = WorkScheduler(cardLimit: 2, externalLimit: 6, internalLimit: 8, globalLimit: 12)
+        for index in 0..<8 {
+            scheduler.enqueue(
+                group: "thumb", name: "file \(index)", lane: .visible, volume: "/Volumes/Extreme Pro",
+                pace: .external, generation: 1, now: TimeInterval(index))
+        }
+        var started = 0
+        while scheduler.promoteNext(now: 20) != nil {
+            started += 1
+        }
+        XCTAssertGreaterThan(started, 2)
+        XCTAssertEqual(started, 6)
+    }
+
+    func testCaptureDatesLeaveRoomForTheRestOfTheFolder() {
+        let scheduler = WorkScheduler(cardLimit: 2, externalLimit: 6, internalLimit: 8,
+                                      globalLimit: 12, metadataLimit: 2)
+        for index in 0..<4 {
+            scheduler.enqueue(
+                group: "exif", name: "date \(index)", lane: .metadata, volume: "/Volumes/Extreme Pro",
+                pace: .external, generation: 1, now: TimeInterval(index))
+        }
+        scheduler.enqueue(
+            group: "thumb", name: "later", lane: .prefetch, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 10)
+        var dates = 0
+        var thumbs = 0
+        while let job = scheduler.promoteNext(now: 20) {
+            if job.lane == .metadata { dates += 1 } else { thumbs += 1 }
+        }
+        XCTAssertEqual(dates, 2)
+        XCTAssertGreaterThan(thumbs, 0)
+    }
+
+    func testVisibleThumbBeatsNeighborPreviewWhichBeatsFaces() {
+        let scheduler = WorkScheduler(cardLimit: 2, externalLimit: 4, internalLimit: 4, globalLimit: 8)
+        let face = scheduler.enqueue(
+            group: "faces", name: "face", lane: .background, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 0)
+        let neighbor = scheduler.enqueue(
+            group: "thumb", name: "neighbor preview", lane: .prefetch, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 1)
+        let thumb = scheduler.enqueue(
+            group: "thumb", name: "filmstrip", lane: .visible, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 2)
+        XCTAssertLessThan(WorkLane.selected, WorkLane.visible)
+        XCTAssertLessThan(WorkLane.visible, WorkLane.prefetch)
+        XCTAssertLessThan(WorkLane.prefetch, WorkLane.background)
+        let first = scheduler.promoteNext(now: 3)
+        XCTAssertEqual(first?.id, thumb)
+        XCTAssertEqual(first?.lane, .visible)
+        // A face must not start while that thumbnail is still running.
+        let second = scheduler.promoteNext(now: 4)
+        XCTAssertEqual(second?.id, neighbor)
+        XCTAssertEqual(second?.lane, .prefetch)
+        XCTAssertNil(scheduler.promoteNext(now: 5))
+        scheduler.finish(thumb)
+        scheduler.finish(neighbor)
+        XCTAssertEqual(scheduler.promoteNext(now: 6)?.id, face)
+    }
+
+    func testFolderLoadHoldsTheIndexWalk() {
+        let scheduler = WorkScheduler()
+        scheduler.setFolderLoading(true)
+        scheduler.enqueue(
+            group: "index", name: "walk", lane: .background, volume: "/",
+            pace: .internalDisk, generation: 1, now: 0)
+        scheduler.enqueue(
+            group: "thumb", name: "cell", lane: .visible, volume: "/",
+            pace: .internalDisk, generation: 1, now: 1)
+        XCTAssertTrue(scheduler.backgroundShouldYield)
+        XCTAssertEqual(scheduler.promoteNext(now: 2)?.name, "cell")
+        XCTAssertNil(scheduler.promoteNext(now: 3))
+        scheduler.setFolderLoading(false)
+        scheduler.finish(scheduler.live().first { $0.state == .running }!.id)
+        XCTAssertEqual(scheduler.promoteNext(now: 4)?.name, "walk")
+    }
+
+    func testTwentyThousandJobsPromoteAndChangeLanesQuickly() {
+        let scheduler = WorkScheduler()
+        var ids: [Int] = []
+        ids.reserveCapacity(20_000)
+        for index in 0..<20_000 {
+            ids.append(scheduler.enqueue(
+                group: "thumb", name: "file \(index)", lane: .prefetch, volume: "/fast",
+                pace: .internalDisk, generation: 1, now: TimeInterval(index)))
+        }
+        let started = Date()
+        for id in ids.prefix(1_000) {
+            scheduler.noteLane(id, .visible)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
+        scheduler.applyLaneNotes()
+        let move = Date()
+        for id in ids.dropFirst(1_000).prefix(1_000) {
+            scheduler.setLane(id, .selected)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(move), 0.05)
+        var startedCount = 0
+        var firstLane: WorkLane?
+        while let job = scheduler.promoteNext(now: 1) {
+            if firstLane == nil { firstLane = job.lane }
+            startedCount += 1
+        }
+        // The open photo's preview outranks on-screen thumbnails, and both
+        // outrank the rest of the folder. The limit fills with the preview lane.
+        XCTAssertEqual(firstLane, .selected)
+        XCTAssertEqual(startedCount, 6)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
+    }
+
+    func testNoteLaneDoesNotBlockTheCallerOnTheJobLock() {
+        let scheduler = WorkScheduler()
+        let id = scheduler.enqueue(
+            group: "thumb", name: "cell", lane: .prefetch, volume: "/",
+            pace: .internalDisk, generation: 1, now: 0)
+        scheduler.noteLane(id, .visible)
+        let before = scheduler.promoteNext(now: 1)
+        XCTAssertEqual(before?.id, id)
+        XCTAssertEqual(before?.lane, .prefetch)
+        scheduler.finish(id)
+        scheduler.applyLaneNotes()
+        let again = scheduler.enqueue(
+            group: "thumb", name: "next", lane: .prefetch, volume: "/",
+            pace: .internalDisk, generation: 1, now: 2)
+        scheduler.noteLane(again, .visible)
+        scheduler.applyLaneNotes()
+        XCTAssertEqual(scheduler.promoteNext(now: 3)?.lane, .visible)
+    }
+
+    func testWatchdogFindsAJobThatRunsTooLong() {
+        let scheduler = WorkScheduler(timeout: 5)
+        scheduler.enqueue(
+            group: "index", name: "stuck walk", lane: .background, volume: "/",
+            pace: .internalDisk, generation: 1, now: 0)
+        let job = scheduler.promoteNext(now: 1)!
+        XCTAssertTrue(scheduler.overdue(now: 6).isEmpty)
+        XCTAssertEqual(scheduler.overdue(now: 6.1).map(\.name), ["stuck walk"])
+        scheduler.markTimedOut(job.id, now: 6.1)
+        XCTAssertTrue(scheduler.isCancelled(job.id))
+    }
+}

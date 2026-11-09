@@ -1,4 +1,5 @@
 import AppKit
+import QuickCullCore
 
 /// Window layout: folder tree | contact sheet. (The metadata inspector is
 /// the third column in the mockup; it joins in milestone 2.)
@@ -16,11 +17,19 @@ final class MainSplitViewController: NSSplitViewController {
         guard previewOverlay == nil, surveyOverlay == nil, searchPalette == nil,
               let container = view.window?.contentView else { return }
         let palette = SearchPaletteView(frame: container.bounds)
-        palette.photoSource = { [weak self] in self?.grid.searchablePhotos() ?? [] }
-        palette.onJumpToPhoto = { [weak self] index in self?.grid.select(index: index) }
+        palette.photoSource = { [weak self] in self?.grid.folderSearchIndex ?? FolderSearchIndex(photos: []) }
+        palette.currentFolderPath = { [weak self] in self?.grid.currentFolderURL?.path }
+        palette.onJumpToPhoto = { [weak self] id in self?.grid.revealSearchHit(id) }
         palette.onOpenFolder = { [weak self] url, newTab in
             self?.tabs.open(url, inNewTab: newTab)
             self?.sidebar.reveal(url)   // the tree shows where you landed
+        }
+        palette.onOpenFile = { [weak self] url in
+            guard let self else { return }
+            let folder = url.deletingLastPathComponent()
+            self.tabs.open(folder, inNewTab: true)
+            self.grid.armSearchSelection(url)
+            self.sidebar.reveal(folder)
         }
         palette.onDismiss = { [weak self] in
             self?.searchPalette = nil
@@ -186,7 +195,7 @@ final class MainSplitViewController: NSSplitViewController {
 
         sidebar.onSelectFolder = { [weak self] url in
             guard let self, !FileOpProgress.shared.isActive else { return }
-            self.tabs.open(url, inNewTab: false)
+            self.tabs.open(url, inNewTab: true)
         }
 
         sidebar.onOpenFolderInNewTab = { [weak self] url in
@@ -194,8 +203,17 @@ final class MainSplitViewController: NSSplitViewController {
             self.tabs.open(url, inNewTab: true)
         }
 
+        sidebar.onOpenFolderInPlace = { [weak self] url in
+            guard let self, !FileOpProgress.shared.isActive else { return }
+            guard self.previewOverlay == nil, self.surveyOverlay == nil else { return }
+            self.tabs.openInActiveTab(url)
+        }
+
         sidebar.onFilesMoved = { [weak self] count, destination in
             self?.grid.noteFilesMoved(count: count, to: destination)
+        }
+        sidebar.onFolderRelocated = { [weak self] from, to in
+            self?.tabs.relocateOpenFolders(from: from, to: to)
         }
     }
 

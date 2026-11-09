@@ -1,27 +1,28 @@
 import AppKit
+import QuickCullCore
 
-/// ⌘F - the Spotlight-style palette. No persistent search bar (chrome you
-/// aren't using), no catalog (the filesystem stays the only truth). One
-/// field, two kinds of answers:
-///   · photos in the CURRENT folder - "6954" jumps to MWP36954.CR3 (clients
-///     reference gallery frame numbers; suffix digits are the hero match)
-///   · folders ANYWHERE - instant hits from places you've been (MRU, tabs),
-///     then async hits from Spotlight's own index (NSMetadataQuery - we
-///     borrow the OS's index rather than building one).
+/// ⌘F. The open folder is answered from memory. Everywhere else comes from
+/// f/uno's own volume index, which is already cached, so hits paint on the
+/// next turn instead of waiting for Spotlight. Spotlight is merged in when
+/// it returns something. A stale Spotlight index is not a miss.
 final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
     // MARK: results
 
     enum Result {
-        case photo(index: Int, name: String)
+        case photo(id: String, name: String)
         case folder(url: URL, detail: String)
+        case driveFile(url: URL, detail: String)
     }
 
-    var onJumpToPhoto: ((Int) -> Void)?
+    var onJumpToPhoto: ((String) -> Void)?
     var onOpenFolder: ((URL, _ newTab: Bool) -> Void)?
+    /// A file that is not in the open folder: open its folder, then select it.
+    var onOpenFile: ((URL) -> Void)?
     var onDismiss: (() -> Void)?
-    /// Supplied by the grid each time the palette opens.
-    var photoSource: (() -> [(Int, String)])?
+    /// The active folder's full index. Rebuilt when that folder's file list changes.
+    var photoSource: (() -> FolderSearchIndex)?
+    var currentFolderPath: (() -> String?)?
 
     private let panel = NSView()
     private let field = NSTextField()
@@ -29,12 +30,35 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     private let emptyLabel = NSTextField(labelWithString: "")
     private var results: [Result] = []
     private var highlighted = 0
+    private var activeQuery = ""
+    private var searchGeneration = 0
+    private var remoteItems: [DriveSearchMerge.Item] = []
+    private var diskItems: [VolumeNameEntry] = []
+    private var indexObserver: NSObjectProtocol?
     private var spotlightQuery: NSMetadataQuery?
     private var spotlightDebounce: Timer?
+    private var spotlightTokens: [NSObjectProtocol] = []
+    private let spotlightQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "quickcull.spotlight"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
 
     // MARK: recents (zero-I/O folder layer)
 
     private static let mruKey = "FunoFolderMRU"
+    static func rewriteRecent(from: String, to: String) {
+        var seen = Set<String>()
+        var next: [String] = []
+        for path in UserDefaults.standard.stringArray(forKey: mruKey) ?? [] {
+            let rewritten = SidebarRelocation.rekey(path: path, from: from, to: to) ?? path
+            if seen.insert(rewritten).inserted { next.append(rewritten) }
+        }
+        UserDefaults.standard.set(next, forKey: mruKey)
+    }
+
     static func noteRecent(_ url: URL) {
         var mru = UserDefaults.standard.stringArray(forKey: mruKey) ?? []
         mru.removeAll { $0 == url.path }
@@ -58,7 +82,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 12
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor
@@ -117,8 +141,18 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             emptyLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18),
             emptyLabel.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
+        indexObserver = NotificationCenter.default.addObserver(
+            forName: VolumeIndexService.didUpdate, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.activeQuery.isEmpty else { return }
+            self.scheduleVolumeSearch(self.activeQuery)
+        }
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit {
+        if let indexObserver { NotificationCenter.default.removeObserver(indexObserver) }
+    }
 
     // MARK: lifecycle
 
@@ -167,95 +201,166 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     // MARK: search
 
     private func refresh(query: String) {
-        results.removeAll()
+        let changed = query != activeQuery
+        activeQuery = query
+        searchGeneration += 1
+        if changed {
+            highlighted = 0
+            remoteItems = []
+            diskItems = []
+        }
         if query.isEmpty {
-            // Blank palette = recent folders, ready to jump.
+            results.removeAll()
             for url in Self.recents().prefix(6) {
                 results.append(.folder(url: url, detail: shortPath(url)))
             }
             emptyLabel.stringValue = ""
-            highlighted = 0
             rebuildRows()
             stopSpotlight()
             return
         }
+        publish(query: query, spotlightPending: query.count >= 3)
+        scheduleVolumeSearch(query)
+        scheduleSpotlight(query)
+    }
 
-        // 1. Photos in the current folder - suffix-digit matches first.
-        let q = query.lowercased()
-        let qIsDigits = !q.isEmpty && q.allSatisfy(\.isNumber)
-        var photoHits: [(Int, String, Int)] = []   // (index, name, rank)
-        for (index, name) in photoSource?() ?? [] {
-            let lower = name.lowercased()
-            let stem = (lower as NSString).deletingPathExtension
-            if qIsDigits {
-                if stem.hasSuffix(q) { photoHits.append((index, name, 0)) }
-                else if stem.contains(q) { photoHits.append((index, name, 1)) }
-            } else if lower.contains(q) {
-                photoHits.append((index, name, stem.hasPrefix(q) ? 0 : 1))
+    /// Current-folder hits paint immediately. The volume index is queried off
+    /// the main thread and merged as soon as it returns; Spotlight fills in later.
+    private func publish(query: String, spotlightPending: Bool) {
+        let index = photoSource?() ?? FolderSearchIndex(photos: [])
+        let hits = index.hits(query: query, limit: 8)
+        let rows = DriveSearchMerge.rows(
+            currentHits: hits,
+            currentIDs: Set(index.entries.map(\.id)),
+            currentFolderPath: currentFolderPath?() ?? "",
+            recents: Self.recents().map(\.path),
+            spotlight: remoteItems,
+            query: query,
+            home: NSHomeDirectory(),
+            indexed: diskItems,
+            bootVolumeName: VolumeIndexService.shared.bootVolumeName
+        )
+        results = rows.map { row in
+            switch row.kind {
+            case .currentFile(let id):
+                return .photo(id: id, name: row.name)
+            case .folder:
+                return .folder(url: URL(fileURLWithPath: row.path), detail: row.detail)
+            case .driveFile:
+                return .driveFile(url: URL(fileURLWithPath: row.path), detail: row.detail)
             }
         }
-        photoHits.sort { ($0.2, $0.0) < ($1.2, $1.0) }
-        for (index, name, _) in photoHits.prefix(5) {
-            results.append(.photo(index: index, name: name))
+        if results.isEmpty {
+            let indexing = query.count >= 2 && VolumeIndexService.shared.isScanning && diskItems.isEmpty
+            emptyLabel.stringValue = (spotlightPending || indexing) ? "searching…" : "no matches"
+        } else {
+            emptyLabel.stringValue = ""
         }
-
-        // 2. Folders you've been to - instant.
-        for url in Self.recents() where url.lastPathComponent.lowercased().contains(q) {
-            if results.count >= 11 { break }
-            results.append(.folder(url: url, detail: shortPath(url)))
-        }
-
-        emptyLabel.stringValue = results.isEmpty ? "searching…" : ""
-        highlighted = 0
         rebuildRows()
+    }
 
-        // 3. Spotlight, debounced - appended as macOS answers.
-        scheduleSpotlight(query)
+    private func scheduleVolumeSearch(_ query: String) {
+        let generation = searchGeneration
+        VolumeIndexService.shared.search(query: query, limit: 80) { [weak self] entries in
+            guard let self, generation == self.searchGeneration else { return }
+            self.diskItems = entries
+            let waiting = self.spotlightQuery != nil && self.remoteItems.isEmpty
+            self.publish(query: self.activeQuery, spotlightPending: waiting)
+        }
     }
 
     private func scheduleSpotlight(_ query: String) {
         stopSpotlight()
-        guard query.count >= 3, !query.allSatisfy(\.isNumber) else { return }
-        spotlightDebounce = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            self?.startSpotlight(query)
+        guard query.count >= 3 else { return }
+        let generation = searchGeneration
+        spotlightDebounce = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+            self?.startSpotlight(query, generation: generation)
         }
     }
 
-    private func startSpotlight(_ query: String) {
+    private func startSpotlight(_ query: String, generation: Int) {
+        guard generation == searchGeneration else { return }
         let mdq = NSMetadataQuery()
-        mdq.predicate = NSPredicate(format: "kMDItemContentType == 'public.folder' && kMDItemFSName CONTAINS[cd] %@", query)
-        mdq.searchScopes = [NSMetadataQueryLocalComputerScope]
-        NotificationCenter.default.addObserver(self, selector: #selector(spotlightFinished(_:)),
-                                               name: .NSMetadataQueryDidFinishGathering, object: mdq)
+        mdq.predicate = Self.spotlightPredicate(query)
+        mdq.searchScopes = Self.localVolumeScopes()
+        mdq.operationQueue = spotlightQueue
+        let deliver: (Notification) -> Void = { [weak self] note in
+            self?.deliverSpotlight(note, generation: generation, finished: note.name == .NSMetadataQueryDidFinishGathering)
+        }
+        spotlightTokens = [
+            NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidUpdate, object: mdq, queue: nil, using: deliver),
+            NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: mdq, queue: nil, using: deliver)
+        ]
         spotlightQuery = mdq
         mdq.start()
     }
 
-    @objc private func spotlightFinished(_ note: Notification) {
-        guard let mdq = note.object as? NSMetadataQuery, mdq === spotlightQuery else { return }
-        mdq.disableUpdates()
-        let known = Set(results.compactMap { if case .folder(let u, _) = $0 { return u.path } else { return nil } })
-        var added = 0
-        for item in mdq.results.prefix(80) {
-            guard added < 6,
-                  let path = (item as? NSMetadataItem)?.value(forAttribute: NSMetadataItemPathKey) as? String,
-                  !known.contains(path),
-                  !path.contains("/Library/") else { continue }
-            let url = URL(fileURLWithPath: path)
-            results.append(.folder(url: url, detail: shortPath(url)))
-            added += 1
+    /// Folders anywhere, plus images (including camera RAW) on mounted local volumes.
+    private static func spotlightPredicate(_ query: String) -> NSPredicate {
+        let extensions = PhotoAsset.rawExtensions
+            .union(PhotoAsset.jpegExtensions)
+            .union(PhotoAsset.otherImageExtensions)
+        let extClause = extensions.map { "kMDItemFSName ENDSWITH[c] '.\($0)'" }.joined(separator: " OR ")
+        let format = """
+        kMDItemFSName CONTAINS[cd] %@ AND (\
+        kMDItemContentType == 'public.folder' OR \
+        kMDItemContentTypeTree == 'public.image' OR \
+        kMDItemContentTypeTree == 'public.camera-raw-image' OR \
+        \(extClause))
+        """
+        return NSPredicate(format: format, query)
+    }
+
+    private static func localVolumeScopes() -> [Any] {
+        let keys: [URLResourceKey] = [.volumeIsLocalKey, .volumeIsBrowsableKey]
+        let urls = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        let local = urls.filter { url in
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            return values?.volumeIsLocal != false && values?.volumeIsBrowsable != false
         }
-        mdq.stop()
-        spotlightQuery = nil
-        if added > 0 { rebuildRows() }
-        if results.isEmpty { emptyLabel.stringValue = "no matches" }
+        return local.isEmpty ? [NSMetadataQueryLocalComputerScope] : local
+    }
+
+    private func deliverSpotlight(_ note: Notification, generation: Int, finished: Bool) {
+        guard let mdq = note.object as? NSMetadataQuery else { return }
+        let items = Self.readSpotlight(mdq, limit: 80)
+        if finished { mdq.stop() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, generation == self.searchGeneration else { return }
+            self.remoteItems = items
+            self.publish(query: self.activeQuery, spotlightPending: !finished)
+            if finished { self.spotlightQuery = nil }
+        }
+    }
+
+    /// Called on the query's operation queue. Do not touch AppKit views here.
+    private static func readSpotlight(_ mdq: NSMetadataQuery, limit: Int) -> [DriveSearchMerge.Item] {
+        mdq.disableUpdates()
+        defer { mdq.enableUpdates() }
+        var items: [DriveSearchMerge.Item] = []
+        items.reserveCapacity(min(limit, mdq.resultCount))
+        for case let item as NSMetadataItem in mdq.results {
+            guard let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { continue }
+            let name = (item.value(forAttribute: NSMetadataItemFSNameKey) as? String)
+                ?? (path as NSString).lastPathComponent
+            let type = item.value(forAttribute: NSMetadataItemContentTypeKey) as? String ?? ""
+            let tree = item.value(forAttribute: NSMetadataItemContentTypeTreeKey) as? [String] ?? []
+            let isFolder = type == "public.folder" || tree.contains("public.folder")
+            items.append(DriveSearchMerge.Item(path: path, name: name, isFolder: isFolder))
+            if items.count >= limit { break }
+        }
+        return items
     }
 
     private func stopSpotlight() {
         spotlightDebounce?.invalidate()
+        spotlightDebounce = nil
+        for token in spotlightTokens { NotificationCenter.default.removeObserver(token) }
+        spotlightTokens.removeAll()
         if let mdq = spotlightQuery {
-            NotificationCenter.default.removeObserver(self, name: .NSMetadataQueryDidFinishGathering, object: mdq)
-            mdq.stop()
+            let query = mdq
+            spotlightQueue.addOperation { query.stop() }
         }
         spotlightQuery = nil
     }
@@ -264,13 +369,12 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
 
     private func rebuildRows() {
         rowsStack.arrangedSubviews.forEach { rowsStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        var lastKind: Bool? = nil   // true = photo section, false = folder
+        var lastSection: String?
         for (i, result) in results.enumerated() {
-            let isPhoto: Bool
-            if case .photo = result { isPhoto = true } else { isPhoto = false }
-            if isPhoto != lastKind {
-                lastKind = isPhoto
-                rowsStack.addArrangedSubview(eyebrow(isPhoto ? "FRAMES" : "FOLDERS"))
+            let section = sectionTitle(for: result)
+            if section != lastSection {
+                lastSection = section
+                rowsStack.addArrangedSubview(eyebrow(section))
             }
             let row = makeRow(result, highlighted: i == highlighted, index: i)
             rowsStack.addArrangedSubview(row)
@@ -297,6 +401,14 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         return wrap
     }
 
+    private func sectionTitle(for result: Result) -> String {
+        switch result {
+        case .photo: return "THIS FOLDER"
+        case .folder: return "FOLDERS"
+        case .driveFile: return "FILES"
+        }
+    }
+
     private func makeRow(_ result: Result, highlighted: Bool, index: Int) -> NSView {
         let symbol: String
         let title: String
@@ -306,6 +418,8 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
             symbol = "photo"; title = name; detail = ""
         case .folder(let url, let d):
             symbol = "folder"; title = url.lastPathComponent; detail = d
+        case .driveFile(let url, let d):
+            symbol = "photo"; title = url.lastPathComponent; detail = d
         }
         let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = highlighted ? Theme.accent : Theme.tx2
@@ -324,7 +438,7 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         let row = ClickRow()
         row.wantsLayer = true
-        row.layer?.cornerRadius = 6
+        row.layer?.cornerRadius = Theme.panelRadius
         row.layer?.backgroundColor = highlighted
             ? Theme.accent.withAlphaComponent(0.16).cgColor
             : NSColor.clear.cgColor
@@ -349,12 +463,15 @@ final class SearchPaletteView: NSView, NSTextFieldDelegate {
     private func activate(_ index: Int, newTab: Bool) {
         guard index < results.count else { return }
         switch results[index] {
-        case .photo(let photoIndex, _):
+        case .photo(let id, _):
             dismiss()
-            onJumpToPhoto?(photoIndex)
+            onJumpToPhoto?(id)
         case .folder(let url, _):
             dismiss()
             onOpenFolder?(url, newTab)
+        case .driveFile(let url, _):
+            dismiss()
+            onOpenFile?(url)
         }
     }
 

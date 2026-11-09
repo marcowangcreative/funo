@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import QuickCullCore
 
 /// The heart of the prototype: turn a file URL into pixels on screen as fast
 /// as physically possible, by preferring the camera's own embedded preview
@@ -29,8 +30,125 @@ final class ThumbnailLoader {
     private let previewCache = NSCache<NSString, NSImage>() // fit-to-screen previews
     private let fullCache = NSCache<NSString, NSImage>()    // 100% zoom decodes
 
-    /// Pending operations keyed by cache key. Touched from the main thread only.
-    private var pending: [String: Operation] = [:]
+    /// Pending decodes keyed by cache key. Touched from the main thread only.
+    private var pending: [String: ThumbTicket] = [:]
+
+    private final class ThumbTicket {
+        var job = 0
+        var cancelled = false
+        var tier: Int = 0
+        var lane: WorkLane = .prefetch
+        var volumeQueued = false
+    }
+
+    private let statsLock = NSLock()
+    private var cacheHitCount = 0
+    private var embeddedCount = 0
+    private var fullCount = 0
+    private var countedCacheKeys = Set<String>()
+    private var warmToken = 0
+    /// Thumbnail keys the open filmstrip is showing. While this is set, grid
+    /// focus must not demote those decodes or keep its own cells in front.
+    private var filmstripVisibleKeys = Set<String>()
+    private let presenceLock = NSLock()
+    private var presence: [String: ThumbPresence] = [:]
+
+    enum ThumbPresence: Equatable {
+        case noRequest
+        case queued
+        case running(String)
+        case failed
+        case cancelled
+    }
+
+    func presence(for url: URL, maxPixel: CGFloat = ThumbnailLoader.thumbnailPixelSize) -> ThumbPresence {
+        let key = cacheKey(url, maxPixel)
+        presenceLock.lock()
+        defer { presenceLock.unlock() }
+        return presence[key] ?? .noRequest
+    }
+
+    private func setPresence(_ value: ThumbPresence?, for key: String) {
+        presenceLock.lock()
+        if let value {
+            presence[key] = value
+        } else {
+            presence.removeValue(forKey: key)
+        }
+        presenceLock.unlock()
+    }
+
+    /// Drop prefetch work for a folder change. A job a visible cell is
+    /// waiting on is left running.
+    func cancelWithoutWaiters() {
+        assert(Thread.isMainThread)
+        var ids: [Int] = []
+        for (key, ticket) in pending where waiters[key]?.isEmpty ?? true {
+            ticket.cancelled = true
+            if ticket.job != 0 { ids.append(ticket.job) }
+            pending[key] = nil
+            setPresence(.cancelled, for: key)
+        }
+        for id in ids { WorkRunner.shared.cancel(id: id) }
+        cancelWarm()
+    }
+    private let cacheQueue = DispatchQueue(label: "funo.thumb.cache", qos: .userInitiated)
+
+    struct Stats {
+        var cache: Int
+        var embedded: Int
+        var full: Int
+    }
+
+    func resetStats() {
+        statsLock.lock()
+        cacheHitCount = 0
+        embeddedCount = 0
+        fullCount = 0
+        countedCacheKeys.removeAll(keepingCapacity: true)
+        statsLock.unlock()
+    }
+
+    func stats() -> Stats {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        return Stats(cache: cacheHitCount, embedded: embeddedCount, full: fullCount)
+    }
+
+    private func recordCacheHit(_ key: String) {
+        statsLock.lock()
+        if countedCacheKeys.insert(key).inserted { cacheHitCount += 1 }
+        statsLock.unlock()
+    }
+
+    private func recordDecode(_ kind: DecodeKind) {
+        statsLock.lock()
+        switch kind {
+        case .embedded: embeddedCount += 1
+        case .full: fullCount += 1
+        }
+        statsLock.unlock()
+    }
+
+    func cancelWarm() {
+        statsLock.lock()
+        warmToken += 1
+        statsLock.unlock()
+    }
+
+    private func bumpWarm() -> Int {
+        statsLock.lock()
+        warmToken += 1
+        let token = warmToken
+        statsLock.unlock()
+        return token
+    }
+
+    private func warmIsCurrent(_ token: Int) -> Bool {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        return warmToken == token
+    }
 
     private init() {
         thumbCache.totalCostLimit = 500 * 1_024 * 1_024   // thousands of thumbs
@@ -68,53 +186,17 @@ final class ThumbnailLoader {
     /// mid-poll (very visible on slow memory cards).
     private var waiters: [String: [(NSImage?) -> Void]] = [:] // main thread
 
-    /// Per-volume decode queues: an internal SSD takes all cores, but a
-    /// memory card gets TWO lanes - fifteen parallel readers on one slow
-    /// USB card thrash it into delivering less than two would.
-    private var volumeQueues: [String: OperationQueue] = [:] // main thread
-
-    /// Directory → decode queue memo. queue(for:) runs on the MAIN thread for
-    /// every thumbnail request; resolving .volumeURLKey is a stat, and doing
-    /// one per visible cell against a waking external drive froze the click.
-    /// Every file in a folder shares a volume - the first answers for all.
-    private var dirQueueMemo: [String: OperationQueue] = [:] // main thread
-
-    private func queue(for url: URL) -> OperationQueue {
-        let dir = url.deletingLastPathComponent().path
-        if let memoed = dirQueueMemo[dir] { return memoed }
-        let volumePath = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? "/"
-        if let existing = volumeQueues[volumePath] { dirQueueMemo[dir] = existing; return existing }
-        let values = try? URL(fileURLWithPath: volumePath).resourceValues(
-            forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey])
-        // A genuinely slow memory card (SD/CF/USB flash) is the only volume
-        // that thrashes under parallelism; an external SSD/HDD is CPU-decode-
-        // bound just like the internal, so throttling it to 2 lanes (the old
-        // broad "removable" rule) starved the cores and read as load lag.
-        let isCard = values?.volumeIsRemovable ?? false
-        let isExternal = isCard
-            || (values?.volumeIsEjectable ?? false)
-            || !(values?.volumeIsInternal ?? true)
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let q = OperationQueue()
-        q.name = "quickcull.decode.\(volumePath)"
-        q.qualityOfService = .userInitiated
-        q.maxConcurrentOperationCount = isCard
-            ? 2                                // slow card: more lanes thrash it
-            : (isExternal ? max(4, cores - 2)  // external SSD/HDD: nearly full
-                          : max(4, cores - 1)) // internal SSD: all cores
-        volumeQueues[volumePath] = q
-        dirQueueMemo[dir] = q
-        return q
-    }
-
-    /// Request an image. Completion always fires on the main thread.
-    /// Calls are coalesced: many requests for the same file share one decode.
-    /// Drop every queued decode for files on `volumePath` - ejecting a card
-    /// fails while OUR reads hold it open. Executing decodes finish (they're
-    /// short); queued ones never start. Main thread (queues dict is main-only).
+    /// Drop every queued decode for files on `volumePath` before an eject.
     func cancelPending(underVolumePath volumePath: String) {
         assert(Thread.isMainThread)
-        volumeQueues[volumePath]?.cancelAllOperations()
+        for (key, ticket) in pending {
+            let path = key.split(separator: "#").first.map(String.init) ?? ""
+            let volume = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeURLKey]))?.volume?.path
+            guard volume == volumePath else { continue }
+            ticket.cancelled = true
+            pending[key] = nil
+        }
+        WorkRunner.shared.cancel(volume: volumePath)
     }
 
     func request(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
@@ -127,9 +209,9 @@ final class ThumbnailLoader {
         // A visible caller is waiting - promote an already-queued op (e.g.
         // from a prefetch) over the backlog. Previews go all the way to
         // .veryHigh: the frame on screen preempts everything else.
-        let want: Operation.QueuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
-        if let existing = pending[key], existing.queuePriority.rawValue < want.rawValue {
-            existing.queuePriority = want
+        let want: WorkLane = maxPixel > Self.thumbnailPixelSize ? .selected : .visible
+        if let existing = pending[key] {
+            WorkRunner.shared.setLane(existing.job, want)
         }
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
@@ -146,11 +228,135 @@ final class ThumbnailLoader {
     /// drops to low. Without this, on a slow card, requests from screens
     /// you scrolled PAST run first-come-first-served and the screen you're
     /// looking at starves blank behind them.
-    func focusVisible(_ urls: [URL], maxPixel: CGFloat) {
-        let tier = "\(Int(maxPixel))"
+    /// The loupe is open. These thumbnail URLs (visible frames plus a few
+    /// on each side) stay on the visible lane. Grid cells drop behind them.
+    func noteFilmstripVisible(_ urls: [URL]) {
+        assert(Thread.isMainThread)
+        let keys = Set(urls.map { cacheKey($0, Self.thumbnailPixelSize) })
+        filmstripVisibleKeys = keys
+        let tier = Int(Self.thumbnailPixelSize)
+        var lanes: [Int: WorkLane] = [:]
+        for (key, ticket) in pending where ticket.tier == tier && ticket.job != 0 {
+            let target: WorkLane = keys.contains(key) ? .visible : .prefetch
+            guard ticket.lane != target else { continue }
+            ticket.lane = target
+            lanes[ticket.job] = target
+        }
+        if !lanes.isEmpty { WorkRunner.shared.replaceLanes(lanes) }
+        for url in urls {
+            let key = cacheKey(url, Self.thumbnailPixelSize)
+            if cachedImage(for: url, maxPixel: Self.thumbnailPixelSize) != nil { continue }
+            if let ticket = pending[key] {
+                ticket.lane = .visible
+                if ticket.job != 0 { WorkRunner.shared.setLane(ticket.job, .visible) }
+                continue
+            }
+            request(url, maxPixel: Self.thumbnailPixelSize) { _ in }
+        }
+    }
+
+    func clearFilmstripVisible() {
+        assert(Thread.isMainThread)
+        filmstripVisibleKeys = []
+    }
+
+    /// 512 thumbnail, else the 3200 preview, else the full-res decode.
+    func anyCachedImage(for url: URL) -> NSImage? {
+        if let thumb = cachedImage(for: url, maxPixel: Self.thumbnailPixelSize) { return thumb }
+        if let preview = cachedImage(for: url, maxPixel: Self.previewPixelSize) { return preview }
+        return cachedImage(for: url, maxPixel: Self.fullPixelSize)
+    }
+
+    func focusVisible(_ urls: [URL], ahead: [URL] = [], maxPixel: CGFloat) {
+        // The grid behind an open loupe must not reorder the filmstrip.
+        if !filmstripVisibleKeys.isEmpty, maxPixel <= Self.thumbnailPixelSize { return }
+        let tier = Int(maxPixel)
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
-        for (key, op) in pending where op.name == tier {
-            op.queuePriority = visibleKeys.contains(key) ? .high : .low
+        let aheadKeys = Set(ahead.map { cacheKey($0, maxPixel) })
+        guard !visibleKeys.isEmpty || !aheadKeys.isEmpty else { return }
+        let floor: WorkLane = maxPixel > Self.thumbnailPixelSize ? .selected : .visible
+        var lanes: [Int: WorkLane] = [:]
+        for (key, ticket) in pending where ticket.tier == tier && ticket.job != 0 {
+            let waited = !(waiters[key]?.isEmpty ?? true)
+            let target: WorkLane
+            if visibleKeys.contains(key) || waited {
+                target = floor
+            } else if aheadKeys.contains(key) {
+                target = .lookahead
+            } else {
+                target = .prefetch
+            }
+            guard ticket.lane != target else { continue }
+            ticket.lane = target
+            lanes[ticket.job] = target
+        }
+        if !lanes.isEmpty { WorkRunner.shared.replaceLanes(lanes) }
+    }
+
+    /// Disk-cache warm for the open folder. The leading window (the screen
+    /// plus the next few) is read first, in one query, and does not take a
+    /// slot on the photo's volume. Misses are then decoded on that volume,
+    /// leading window before the rest of the folder.
+    func warmFolder(_ urls: [URL], leading: Int, maxPixel: CGFloat) {
+        let token = bumpWarm()
+        let capped = max(0, min(leading, urls.count))
+        let planned: [(URL, String, Int)] = urls.map { url in
+            let rotation = RatingsStore.shared.rotation(for: url.path)
+            return (url, "\(url.path)#\(Int(maxPixel))#\(rotation)", rotation)
+        }
+        cacheQueue.async { [weak self] in
+            guard let self else { return }
+            self.resolveCached(Array(planned.prefix(capped)), token: token, maxPixel: maxPixel, lane: .lookahead)
+            var index = capped
+            while index < planned.count {
+                if !self.warmIsCurrent(token) { return }
+                let end = min(index + 400, planned.count)
+                self.resolveCached(Array(planned[index..<end]), token: token, maxPixel: maxPixel, lane: .prefetch)
+                index = end
+            }
+        }
+    }
+
+    private func resolveCached(_ rows: [(URL, String, Int)], token: Int, maxPixel: CGFloat, lane: WorkLane) {
+        if !warmIsCurrent(token) { return }
+        struct Row { var url: URL; var memoryKey: String; var diskKey: String; var rotation: Int }
+        var pendingRows: [Row] = []
+        pendingRows.reserveCapacity(rows.count)
+        for (url, memoryKey, rotation) in rows {
+            if cache(for: maxPixel).object(forKey: memoryKey as NSString) != nil { continue }
+            guard let identity = CacheDB.identity(for: url) else { continue }
+            pendingRows.append(Row(url: url, memoryKey: memoryKey, diskKey: identity + "|t\(Int(maxPixel))|r\(rotation)", rotation: rotation))
+        }
+        let blobs = CacheDB.shared.getMany(pendingRows.map(\.diskKey))
+        final class Decoded { var image: NSImage? }
+        let decoded = pendingRows.map { _ in Decoded() }
+        DispatchQueue.concurrentPerform(iterations: pendingRows.count) { index in
+            guard let data = blobs[pendingRows[index].diskKey] else { return }
+            decoded[index].image = Self.decodeImmediate(data)
+        }
+        var hits: [(String, NSImage)] = []
+        var misses: [(URL, String, Int)] = []
+        for (index, row) in pendingRows.enumerated() {
+            if let image = decoded[index].image {
+                hits.append((row.memoryKey, image))
+            } else {
+                misses.append((row.url, row.memoryKey, row.rotation))
+            }
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.warmIsCurrent(token) else { return }
+            for (key, image) in hits {
+                self.recordCacheHit(key)
+                let cost = Int(image.size.width * image.size.height * 4)
+                self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
+                if let callbacks = self.waiters.removeValue(forKey: key) {
+                    self.pending[key] = nil
+                    callbacks.forEach { $0(image) }
+                }
+            }
+            for (url, key, rotation) in misses {
+                self.enqueueVolumeDecode(key: key, url: url, maxPixel: maxPixel, rotation: rotation, lane: lane)
+            }
         }
     }
 
@@ -159,76 +365,99 @@ final class ThumbnailLoader {
     func cancel(_ url: URL, maxPixel: CGFloat) {
         let key = cacheKey(url, maxPixel)
         guard waiters[key]?.isEmpty ?? true else { return }
-        pending[key]?.cancel()
+        if let ticket = pending[key] {
+            ticket.cancelled = true
+            WorkRunner.shared.cancel(id: ticket.job)
+        }
         pending[key] = nil
     }
 
     private func ensureOperation(key: String, url: URL, maxPixel: CGFloat) {
         guard pending[key] == nil else { return }
         let userRotation = RatingsStore.shared.rotation(for: url.path)
-
-        let op = BlockOperation()
-        op.name = "\(Int(maxPixel))" // tier tag for focusVisible()
-        // Priority tiers: the big preview the user is LOOKING AT preempts
-        // the thumbnail backlog (critical on slow cards, where hundreds of
-        // queued thumbs used to starve the sharp render for minutes).
-        // Priority ladder (2026-09-17): a WAITERLESS preview prefetch (the
-        // arrow-key neighbor warm) must NOT outrank the photo the user is
-        // looking at. The old flat .veryHigh for every >512px op let 3-4
-        // stale neighbor decodes win FIFO over the current frame - the
-        // "low res moment", worst on 2-lane card queues. Prefetches start
-        // .normal; request() promotes the moment a real viewer registers.
-        if !(waiters[key]?.isEmpty ?? true) {
-            op.queuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
-        } else {
-            op.queuePriority = .normal // prefetch of any tier
-        }
-        op.addExecutionBlock { [weak self, weak op] in
-            guard let op, !op.isCancelled else {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    // Only the AUTHORITATIVE op for this key may fail its
-                    // waiters. A cancelled prefetch can lose this slot to a
-                    // fresh visible-cell request (cancel() clears pending,
-                    // request() re-creates the op); firing that NEW caller's
-                    // waiters with nil from the dead op's corpse left grid
-                    // cells permanently blank during fast scrolls.
-                    guard self.pending[key] === op else { return }
-                    self.pending[key] = nil
-                    let stranded = self.waiters.removeValue(forKey: key) ?? []
-                    stranded.forEach { $0(nil) }
-                }
+        let ticket = ThumbTicket()
+        ticket.tier = Int(maxPixel)
+        let hasWaiter = !(waiters[key]?.isEmpty ?? true)
+        // A waiting preview is the photo on screen. A prefetch of a large
+        // preview is a neighbor: it must sit below visible filmstrip thumbs.
+        let lane: WorkLane = hasWaiter
+            ? (maxPixel > Self.thumbnailPixelSize ? .selected : .visible)
+            : (maxPixel > Self.thumbnailPixelSize ? .prefetch : .lookahead)
+        ticket.lane = lane
+        pending[key] = ticket
+        setPresence(.queued, for: key)
+        // The cache file is on the internal SSD. This probe does not take a
+        // slot on the volume that holds the photo.
+        WorkRunner.shared.submit(
+            group: "thumb-cache", name: url.lastPathComponent, lane: lane,
+            volume: DrivePacing.cacheVolume, pace: .internalDisk, generation: 0,
+            onQueued: { ticket.job = $0 }
+        ) { [weak self, weak ticket] isCancelled in
+            guard let self, let ticket else { return }
+            if isCancelled() || ticket.cancelled {
+                self.finishCancelled(key: key, url: url, maxPixel: maxPixel, ticket: ticket)
                 return
             }
-
-            // Disk cache (grid thumbnails only): second open of a folder
-            // skips decoding entirely.
-            // Disk-cache thumbnails AND previews (not the 8192 full-res -
-            // too big, rarely revisited). The LRU cache bounds the growth,
-            // so a revisited photo in expanded view is sharp INSTANTLY with
-            // no lower-res buffer flash.
-            var diskKey: String?
+            self.setPresence(.running(lane.label), for: key)
+            if let cached = self.cache(for: maxPixel).object(forKey: key as NSString) {
+                self.publish(key: key, url: url, ticket: ticket, image: cached, maxPixel: maxPixel, failure: nil)
+                return
+            }
             if maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
-                diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
+                let diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
+                if let data = CacheDB.shared.get(diskKey), let image = Self.decodeImmediate(data) {
+                    self.recordCacheHit(key)
+                    self.publish(key: key, url: url, ticket: ticket, image: image, maxPixel: maxPixel, failure: nil)
+                    return
+                }
             }
-            var image: NSImage?
-            if let diskKey, let data = CacheDB.shared.get(diskKey) {
-                // Force-decode NOW, on this background lane. NSImage(data:)
-                // keeps the JPEG compressed and pays decompression on MAIN
-                // at first draw - 25-100ms hitches per screenful of warm
-                // cells, and a per-arrow-press hitch on cached previews.
-                image = Self.decodeImmediate(data)
+            DispatchQueue.main.async { [weak self] in
+                self?.enqueueVolumeDecode(key: key, url: url, maxPixel: maxPixel, rotation: userRotation, lane: lane)
             }
-            var freshlyDecoded = false
-            if image == nil {
-                image = Self.decode(url: url, maxPixel: maxPixel, userRotation: userRotation)
-                freshlyDecoded = image != nil
+        }
+    }
+
+    /// Decode from the photo's own volume. Only called after the disk cache missed.
+    private func enqueueVolumeDecode(key: String, url: URL, maxPixel: CGFloat, rotation: Int, lane: WorkLane) {
+        assert(Thread.isMainThread)
+        if cache(for: maxPixel).object(forKey: key as NSString) != nil {
+            if let callbacks = waiters.removeValue(forKey: key) {
+                pending[key] = nil
+                let image = cache(for: maxPixel).object(forKey: key as NSString)
+                callbacks.forEach { $0(image) }
             }
-            // Persist AFTER delivery, off the decode lane: the JPEG encode
-            // of a 3200px preview is 50-150ms the viewer used to wait out
-            // before pixels appeared, and it held the lane the next decode
-            // needed.
-            if freshlyDecoded, let image, let diskKey {
+            return
+        }
+        let ticket = pending[key] ?? ThumbTicket()
+        guard !ticket.volumeQueued else { return }
+        ticket.volumeQueued = true
+        ticket.tier = Int(maxPixel)
+        let hasWaiter = !(waiters[key]?.isEmpty ?? true)
+        let useLane: WorkLane = hasWaiter
+            ? (maxPixel > Self.thumbnailPixelSize ? .selected : .visible)
+            : lane
+        ticket.lane = useLane
+        pending[key] = ticket
+        setPresence(.queued, for: key)
+        let place = WorkRunner.shared.classify(url)
+        WorkRunner.shared.submit(
+            group: "thumb", name: url.lastPathComponent, lane: useLane,
+            volume: place.volume, pace: place.pace, generation: 0,
+            onQueued: { ticket.job = $0 }
+        ) { [weak self, weak ticket] isCancelled in
+            guard let self, let ticket else { return }
+            if isCancelled() || ticket.cancelled {
+                self.finishCancelled(key: key, url: url, maxPixel: maxPixel, ticket: ticket)
+                return
+            }
+            self.setPresence(.running(useLane.label), for: key)
+            let decoded = Self.decode(url: url, maxPixel: maxPixel, userRotation: rotation)
+            if let decoded {
+                self.recordDecode(decoded.kind)
+            }
+            let image = decoded?.image
+            if let image, maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
+                let diskKey = identity + "|t\(Int(maxPixel))|r\(rotation)"
                 DispatchQueue.global(qos: .utility).async {
                     guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
                     let rep = NSBitmapImageRep(cgImage: cg)
@@ -237,19 +466,56 @@ final class ThumbnailLoader {
                     }
                 }
             }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.pending[key] === op { self.pending[key] = nil }
-                if let image {
-                    let cost = Int(image.size.width * image.size.height * 4)
-                    self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
-                }
-                let callbacks = self.waiters.removeValue(forKey: key) ?? []
-                callbacks.forEach { $0(image) }
+            if image == nil {
+                self.publish(key: key, url: url, ticket: ticket, image: nil, maxPixel: maxPixel, failure: "decode failed")
+            } else {
+                self.publish(key: key, url: url, ticket: ticket, image: image, maxPixel: maxPixel, failure: nil)
             }
         }
-        pending[key] = op
-        queue(for: url).addOperation(op)
+    }
+
+    /// A cancel is not a broken file. If a cell is still waiting, queue the
+    /// decode again and do not tell that cell the image was nil.
+    private func finishCancelled(key: String, url: URL, maxPixel: CGFloat, ticket: ThumbTicket) {
+        DispatchQueue.main.async { [weak self, weak ticket] in
+            guard let self, let ticket else { return }
+            let owns = self.pending[key] === ticket
+            let hasWaiter = !(self.waiters[key]?.isEmpty ?? true)
+            // A cancel that already dropped the slot still has to re-queue
+            // when a cell is waiting. A newer request owns the slot instead.
+            guard owns || (self.pending[key] == nil && hasWaiter) else { return }
+            let decision = ThumbRetryPolicy.decide(outcome: .cancelled, failures: 0, hasWaiter: hasWaiter)
+            self.setPresence(.cancelled, for: key)
+            self.pending[key] = nil
+            ticket.volumeQueued = false
+            ticket.cancelled = false
+            if hasWaiter {
+                FunoLog.write("funo thumb cancelled \(url.path)")
+            }
+            if decision.requeue {
+                self.setPresence(.queued, for: key)
+                self.ensureOperation(key: key, url: url, maxPixel: maxPixel)
+            }
+        }
+    }
+
+    private func publish(key: String, url: URL, ticket: ThumbTicket, image: NSImage?, maxPixel: CGFloat, failure: String?) {
+        DispatchQueue.main.async { [weak self, weak ticket] in
+            guard let self, let ticket else { return }
+            let authoritative = ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === ticket)
+            guard authoritative else { return }
+            self.pending[key] = nil
+            if let image {
+                let cost = Int(image.size.width * image.size.height * 4)
+                self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
+                self.setPresence(nil, for: key)
+            } else if let failure {
+                self.setPresence(.failed, for: key)
+                FunoLog.write("funo thumb failed \(url.path) \(failure)")
+            }
+            let callbacks = self.waiters.removeValue(forKey: key) ?? []
+            callbacks.forEach { $0(image) }
+        }
     }
 
     // MARK: - Decoding (background threads)
@@ -262,25 +528,27 @@ final class ThumbnailLoader {
               let cg = CGImageSourceCreateImageAtIndex(src, 0, opts) else {
             return NSImage(data: data)
         }
-        return NSImage(cgImage: cg, size: .zero)
+        return QuickCullImage.fromCGImage(cg)
     }
 
-    private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> NSImage? {
-        guard let image = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }
-        guard userRotation != 0 else { return image }
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-        return NSImage(cgImage: ImageTransform.rotate(cg, degreesCW: userRotation), size: .zero)
+    private enum DecodeKind { case embedded, full }
+
+    private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> (image: NSImage, kind: DecodeKind)? {
+        guard let decoded = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }
+        guard userRotation != 0 else { return decoded }
+        guard let cg = decoded.image.quickCullCGImage() else { return decoded }
+        return (QuickCullImage.fromCGImage(ImageTransform.rotate(cg, degreesCW: userRotation)), decoded.kind)
     }
 
     /// Decode with EXIF/container orientation applied (no user rotation yet).
-    private static func decodeOriented(url: URL, maxPixel: CGFloat) -> NSImage? {
+    private static func decodeOriented(url: URL, maxPixel: CGFloat) -> (image: NSImage, kind: DecodeKind)? {
         // Canon CR3: for large previews, pull the camera's full-resolution
         // embedded JPEG straight out of the container. ImageIO only exposes
         // the 1620×1080 PRVW; this gets us the 6000×4000 rendition with a
         // cheap JPEG decode instead of a RAW develop.
         if maxPixel > 1024, url.pathExtension.lowercased() == "cr3",
            let image = CR3PreviewExtractor.decodePreview(url: url, maxPixel: maxPixel) {
-            return image
+            return (image, .embedded)
         }
 
         let sourceOptions: [CFString: Any] = [
@@ -310,7 +578,7 @@ final class ThumbnailLoader {
             let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
             let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
             if biggestSide >= bar {
-                return NSImage(cgImage: cg, size: .zero)
+                return (QuickCullImage.fromCGImage(cg), .embedded)
             }
         }
 
@@ -321,7 +589,7 @@ final class ThumbnailLoader {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, forcedOptions as CFDictionary) {
-            return NSImage(cgImage: cg, size: .zero)
+            return (QuickCullImage.fromCGImage(cg), .full)
         }
         return nil
     }

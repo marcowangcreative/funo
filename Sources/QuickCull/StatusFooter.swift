@@ -177,7 +177,7 @@ final class StatusFooterView: NSView {
     @objc private func sendLR(_ sender: Any?) { onSendLightroom?() }
     @objc private func sendPS(_ sender: Any?) { onSendPhotoshop?() }
 
-    /// Uniform graphite app chips - a filled rounded tile with the two-letter
+    /// Uniform graphite app chips - a filled control-radius tile with the two-letter
     /// mark, drawn to match the keycap hints beside them. Identical treatment
     /// for both apps (Adobe's own icons don't match EACH OTHER: LrC is an
     /// outline, Ps a filled tile) and no Adobe artwork in our bundle.
@@ -185,7 +185,7 @@ final class StatusFooterView: NSView {
         let side: CGFloat = 16
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
             let r = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
-                                 xRadius: 3.5, yRadius: 3.5)
+                                 xRadius: Theme.controlRadius, yRadius: Theme.controlRadius)
             NSColor(calibratedWhite: 0.16, alpha: 1).setFill()
             r.fill()
             NSColor(calibratedWhite: 0.32, alpha: 1).setStroke()

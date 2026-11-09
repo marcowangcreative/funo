@@ -14,11 +14,11 @@ private final class BrassBar: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = Theme.bg3.cgColor
-        layer?.cornerRadius = 4
+        layer?.cornerRadius = Theme.controlRadius
         translatesAutoresizingMaskIntoConstraints = false
         fill.wantsLayer = true
         fill.layer?.backgroundColor = Theme.accent.cgColor
-        fill.layer?.cornerRadius = 4
+        fill.layer?.cornerRadius = Theme.controlRadius
         fill.translatesAutoresizingMaskIntoConstraints = false
         addSubview(fill)
         fillWidth = fill.widthAnchor.constraint(equalToConstant: 0)
@@ -66,7 +66,7 @@ final class FileOpProgressOverlayView: NSView {
     private func build(title: String) {
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 12
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor
@@ -205,7 +205,7 @@ enum QuitFlushOverlay {
         let panel = NSView()
         panel.wantsLayer = true
         panel.layer?.backgroundColor = Theme.bg1.cgColor
-        panel.layer?.cornerRadius = 12
+        panel.layer?.cornerRadius = Theme.panelRadius
         panel.layer?.borderWidth = 1
         panel.layer?.borderColor = Theme.line.cgColor
         panel.layer?.shadowColor = NSColor.black.cgColor
