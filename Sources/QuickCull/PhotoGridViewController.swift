@@ -398,6 +398,8 @@ final class PhotoGridViewController: NSViewController,
         var hasDate: Bool
         var seconds: TimeInterval
         var subsecMillis: Int
+        /// `path|size|mtime`. Empty until a read or cache hit records it.
+        var fileIdentity: String = ""
     }
 
     private final class CaptureReadBatch {
@@ -1007,6 +1009,8 @@ final class PhotoGridViewController: NSViewController,
         // the previous folder for the whole scan, which is the flash.
         let ticket = folderLoad.begin(to: url.standardizedFileURL.path)
         let generation = ticket.generation
+        let sameFolder = !ticket.blank
+        let previousTimes = sameFolder ? captureTimes : [:]
         if ticket.blank {
             allAssets = []
             displayedAssets = []
@@ -1036,29 +1040,38 @@ final class PhotoGridViewController: NSViewController,
                 WorkRunner.shared.setFolderLoading(false)
                 self.folderScanInFlight = false
                 self.openingStatusWork?.cancel()
-                self.captureTimes = [:]
-                self.captureReady = result.assets.isEmpty
-                self.captureReadInFlight = !result.assets.isEmpty
-                self.captureReadDone = 0
-                self.captureReadTotal = result.assets.count
-                self.allAssets = result.assets
-                self.rebuildSearchIndex()
                 self.scanMS = result.elapsed * 1000
                 self.pairedHidden = result.pairedJPEGCount
-                if self.sortKey == .capture {
-                    // Name order is not a time order. Hold the grid until the
-                    // dates are in, then sort once.
-                    self.displayedAssets = []
-                    self.collectionView.reloadData()
-                    self.emptyLabel.stringValue = result.assets.isEmpty ? "No photos in this folder" : "Reading capture times…"
-                    self.updateStatus()
-                } else {
-                    self.allAssets = self.sorted(result.assets)
+                self.captureReadDone = 0
+                self.captureReadTotal = result.assets.count
+                if sameFolder {
+                    // Watcher and undo: keep the photos on screen and the
+                    // capture times of files that have not changed. A new
+                    // folder is the only load that may scroll to the top.
+                    self.captureReadInFlight = !result.assets.isEmpty
+                    self.allAssets = result.assets
                     self.rebuildSearchIndex()
-                    self.applyFilter(keepSelection: false)
+                } else {
+                    self.captureTimes = [:]
+                    self.captureReady = result.assets.isEmpty
+                    self.captureReadInFlight = !result.assets.isEmpty
+                    self.allAssets = result.assets
+                    self.rebuildSearchIndex()
+                    if self.sortKey == .capture {
+                        // Name order is not a time order. Hold the grid until the
+                        // dates are in, then sort once.
+                        self.displayedAssets = []
+                        self.collectionView.reloadData()
+                        self.emptyLabel.stringValue = result.assets.isEmpty ? "No photos in this folder" : "Reading capture times…"
+                        self.updateStatus()
+                    } else {
+                        self.allAssets = self.sorted(result.assets)
+                        self.rebuildSearchIndex()
+                        self.applyFilter(keepSelection: false, scrollToTop: true)
+                    }
                 }
                 self.scanSidecars(self.allAssets, generation: generation)
-                self.scanCaptureDates(result.assets, generation: generation)
+                self.scanCaptureDates(result.assets, generation: generation, previous: previousTimes, sameFolder: sameFolder)
                 // Face analysis reads a big decode PER photo. On a 5k folder
                 // on an external drive it saturates I/O and starves the very
                 // thumbnails the user is looking at. Let the thumbnails win
@@ -1075,8 +1088,16 @@ final class PhotoGridViewController: NSViewController,
     /// EXIF capture times + existing XMP sidecars load in the background.
     /// Sidecar ratings/labels from Lightroom/Photo Mechanic are adopted so
     /// culls done elsewhere show up here.
-    private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int) {
-        guard !assets.isEmpty else { return }
+    private func scanCaptureDates(_ assets: [PhotoAsset], generation: Int,
+                                   previous: [String: CaptureStamp] = [:], sameFolder: Bool = false) {
+        guard !assets.isEmpty else {
+            if sameFolder {
+                allAssets = []
+                rebuildSearchIndex()
+                applyFilter(keepSelection: true)
+            }
+            return
+        }
         WorkRunner.shared.cancel(group: "exif")
         let started = Date()
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -1087,9 +1108,13 @@ final class PhotoGridViewController: NSViewController,
                 let values = try? asset.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 let size = Int64(values?.fileSize ?? 0)
                 let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-                if let record = cached.record(path: asset.url.path, size: size, mtime: mtime) {
+                let identity = CaptureDateCache.identity(path: asset.url.path, size: size, mtime: mtime)
+                if var kept = previous[asset.id], kept.fileIdentity == identity || kept.fileIdentity.isEmpty {
+                    kept.fileIdentity = identity
+                    hits[asset.id] = kept
+                } else if let record = cached.record(path: asset.url.path, size: size, mtime: mtime) {
                     hits[asset.id] = CaptureStamp(hasDate: record.hasDate, seconds: record.seconds,
-                                                  subsecMillis: record.subsecMillis)
+                                                  subsecMillis: record.subsecMillis, fileIdentity: identity)
                 } else {
                     misses.append(asset)
                 }
@@ -1099,6 +1124,11 @@ final class PhotoGridViewController: NSViewController,
                 self.captureTimes = hits
                 self.captureReadDone = hits.count
                 self.captureReadTotal = assets.count
+                if sameFolder, self.sortKey != .capture || self.captureReady {
+                    self.allAssets = self.sorted(assets)
+                    self.rebuildSearchIndex()
+                    self.applyFilter(keepSelection: true)
+                }
                 if misses.isEmpty {
                     self.finishCaptureRead(generation: generation, started: started)
                     return
@@ -1121,7 +1151,8 @@ final class PhotoGridViewController: NSViewController,
                         let identity = CaptureDateCache.identity(path: asset.url.path, size: read.size, mtime: read.mtime)
                         let record = CaptureDateRecord(identity: identity, hasDate: read.hasDate,
                                                        seconds: read.seconds, subsecMillis: read.subsecMillis)
-                        let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds, subsecMillis: read.subsecMillis)
+                        let stamp = CaptureStamp(hasDate: read.hasDate, seconds: read.seconds,
+                                                  subsecMillis: read.subsecMillis, fileIdentity: identity)
                         DispatchQueue.main.async {
                             self.noteCapturePiece(generation: generation, id: asset.id, stamp: stamp,
                                                   record: record, batch: batch, started: started, total: assets.count)
@@ -1202,7 +1233,6 @@ final class PhotoGridViewController: NSViewController,
         // folders, so pay it only when a filter could be hiding photos.
         let filterActive = rejectsOnly || starThreshold != nil || !colorFilter.isEmpty
         if filterActive {
-            preserveScrollOnNextApply = true
             applyFilter(keepSelection: true)
         }
         refreshVisibleCullStates()
@@ -1258,14 +1288,11 @@ final class PhotoGridViewController: NSViewController,
         resort(keepSelection: true)
     }
 
-    /// Reloads of the SAME folder (watcher refresh, undo, post-trash) keep
-    /// the user's scroll position - jumping to the top mid-cull because a
-    /// sidecar landed on disk is disorienting. Genuine filter/folder changes
-    /// still start at the top.
-    private var preserveScrollOnNextApply = false
-
-    private func applyFilter(keepSelection: Bool) {
+    private func applyFilter(keepSelection: Bool, anchor pinned: VisibleAnchor? = nil, scrollToTop: Bool = false) {
         let previous = keepSelection ? selectedAsset : nil
+        // Captured before the model swap. A real folder change is the only
+        // path that passes scrollToTop.
+        let anchor = scrollToTop ? nil : (pinned ?? captureVisibleAnchor())
         displayedAssets = allAssets.filter { asset in
             let store = RatingsStore.shared
             if rejectsOnly {
@@ -1284,15 +1311,9 @@ final class PhotoGridViewController: NSViewController,
             }
             return true
         }
-        let savedOrigin: NSPoint? = preserveScrollOnNextApply
-            ? scrollView.contentView.bounds.origin : nil
-        preserveScrollOnNextApply = false
         collectionView.reloadData()
-        if let savedOrigin {
-            scrollView.layoutSubtreeIfNeeded()
-            let maxY = max(0, collectionView.frame.height - scrollView.contentView.bounds.height)
-            scrollView.contentView.scroll(to: NSPoint(x: savedOrigin.x, y: min(savedOrigin.y, maxY)))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+        if let anchor {
+            restoreAnchor(anchor)
         } else {
             collectionView.scroll(NSPoint.zero)
         }
@@ -1321,6 +1342,128 @@ final class PhotoGridViewController: NSViewController,
             onSelectionChanged?(nil)
         }
         updateFilterStrip()
+        updateStatus()
+    }
+
+    /// Top visible photo plus its distance from the top of the viewport.
+    private func captureVisibleAnchor() -> VisibleAnchor? {
+        let originY = scrollView.contentView.bounds.origin.y
+        var best: (Int, CGFloat)?
+        for ip in collectionView.indexPathsForVisibleItems() where ip.item < displayedAssets.count {
+            guard let frame = collectionView.layoutAttributesForItem(at: ip)?.frame else { continue }
+            if best == nil || frame.minY < best!.1 {
+                best = (ip.item, frame.minY)
+            }
+        }
+        guard let best else { return nil }
+        return VisibleAnchor(id: displayedAssets[best.0].id, offset: Double(best.1 - originY))
+    }
+
+    private func restoreAnchor(_ anchor: VisibleAnchor) {
+        guard let index = displayedAssets.firstIndex(where: { $0.id == anchor.id }) else { return }
+        collectionView.layoutSubtreeIfNeeded()
+        let ip = IndexPath(item: index, section: 0)
+        guard let frame = collectionView.layoutAttributesForItem(at: ip)?.frame else { return }
+        let y = frame.minY - CGFloat(anchor.offset)
+        let maxY = max(0, collectionView.frame.height - scrollView.contentView.bounds.height)
+        let clamped = min(max(0, y), maxY)
+        scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: clamped))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// RAW and JPEG that share a stem leave the grid together.
+    private func companionIDs(in assets: [PhotoAsset]) -> [String: String] {
+        var byStem: [String: [String]] = [:]
+        for asset in assets {
+            let stem = asset.url.deletingPathExtension().path
+            byStem[stem, default: []].append(asset.id)
+        }
+        var map: [String: String] = [:]
+        for ids in byStem.values where ids.count == 2 {
+            map[ids[0]] = ids[1]
+            map[ids[1]] = ids[0]
+        }
+        return map
+    }
+
+    /// Drop photos f/uno itself moved, trashed, or cut. No directory rescan
+    /// and no reload, so the scroll position does not jump.
+    private func removeAssets(ids: Set<String>) {
+        let removing = GridEdit.withCompanions(ids, companions: companionIDs(in: allAssets))
+        guard allAssets.contains(where: { removing.contains($0.id) }) else { return }
+        lastSelfLoadAt = Date()
+        let anchor = captureVisibleAnchor()
+        let plan = GridEdit.removalPlan(order: displayedAssets.map(\.id), removing: removing, anchor: anchor)
+        allAssets.removeAll { removing.contains($0.id) }
+        for id in removing { captureTimes[id] = nil }
+        rebuildSearchIndex()
+        let indexPaths = Set(plan.removedIndexes.map { IndexPath(item: $0, section: 0) })
+        guard !indexPaths.isEmpty else {
+            updateStatus()
+            return
+        }
+        let remaining = displayedAssets.filter { !removing.contains($0.id) }
+        collectionView.deselectItems(at: collectionView.selectionIndexPaths)
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        collectionView.performBatchUpdates({
+            self.displayedAssets = remaining
+            self.collectionView.deleteItems(at: indexPaths)
+        }, completionHandler: { [weak self] _ in
+            guard let self else { return }
+            if let anchor = plan.anchor { self.restoreAnchor(anchor) }
+            if let id = plan.selectionID,
+               let index = self.displayedAssets.firstIndex(where: { $0.id == id }) {
+                self.select(index: index)
+            } else {
+                self.onSelectionChanged?(nil)
+            }
+            self.emptyLabel.stringValue = self.welcomeOverlay != nil ? ""
+                : (self.displayedAssets.isEmpty
+                    ? (self.allAssets.isEmpty ? "No photos in this folder" : "Nothing matches this filter")
+                    : "")
+            self.updateStatus()
+        })
+        NSAnimationContext.endGrouping()
+    }
+
+    /// A rename keeps the photo in the same cell. The id changes with the path.
+    private func replaceRenamed(_ migrations: [(String, String)]) {
+        guard !migrations.isEmpty else { return }
+        lastSelfLoadAt = Date()
+        let anchor = captureVisibleAnchor()
+        var changed: Set<IndexPath> = []
+        for (old, newID) in migrations {
+            guard let index = allAssets.firstIndex(where: { $0.id == old }) else { continue }
+            let oldAsset = allAssets[index]
+            let newURL = URL(fileURLWithPath: newID)
+            let updated = PhotoAsset(url: newURL, filename: newURL.lastPathComponent, isRAW: oldAsset.isRAW,
+                                     modificationDate: oldAsset.modificationDate, hasJPEGPair: oldAsset.hasJPEGPair)
+            allAssets[index] = updated
+            if var stamp = captureTimes.removeValue(forKey: old) {
+                // Path changed, so the old size/mtime key no longer matches.
+                // An empty identity tells the next same-folder refresh to
+                // keep this time and bind it to the new path.
+                stamp.fileIdentity = ""
+                captureTimes[updated.id] = stamp
+            }
+            if let displayed = displayedAssets.firstIndex(where: { $0.id == old }) {
+                displayedAssets[displayed] = updated
+                changed.insert(IndexPath(item: displayed, section: 0))
+            }
+        }
+        rebuildSearchIndex()
+        if !changed.isEmpty {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            collectionView.reloadItems(at: changed)
+            NSAnimationContext.endGrouping()
+        }
+        if let anchor { restoreAnchor(anchor) }
+        if let focus = migrations.first?.1,
+           let index = displayedAssets.firstIndex(where: { $0.id == focus }) {
+            select(index: index)
+        }
         updateStatus()
     }
 
@@ -1683,7 +1826,11 @@ final class PhotoGridViewController: NSViewController,
                     let skippedNote = result.skipped > 0 ? " - \(result.skipped) skipped" : ""
                     let cardNote = (cutRequested && !isCut) ? " (memory card untouched)" : ""
                     self.flashUndoable("\(isCut ? "Moved" : "Copied") \(result.primaries) photo\(result.primaries == 1 ? "" : "s") into \(folder.lastPathComponent)\(skippedNote)\(cardNote)")
-                    self.reloadCurrentFolderPreservingSelection()
+                    if isCut {
+                        self.removeAssets(ids: Set(result.records.map { $0.from.path }))
+                    } else if folder.standardizedFileURL.path == self.currentFolder?.standardizedFileURL.path {
+                        self.reloadCurrentFolderPreservingSelection()
+                    }
                 }
             }
             if collisions > 0 {
@@ -1712,7 +1859,6 @@ final class PhotoGridViewController: NSViewController,
         // async trash finished made it feel laggy and detached ("too long").
         Self.trashSound?.stop()
         Self.trashSound?.play()
-        let anchor = selectedIndex ?? 0
         let urls = assets.map { $0.url }
         flash("Moving \(urls.count) photo\(urls.count == 1 ? "" : "s") to Trash…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1720,7 +1866,7 @@ final class PhotoGridViewController: NSViewController,
             DispatchQueue.main.async {
                 FileOpsHistory.push("move to Trash", result.records)
                 self?.flashUndoable("Moved \(result.primaries) photo\(result.primaries == 1 ? "" : "s") to Trash")
-                self?.reloadCurrentFolder(selecting: anchor)
+                self?.removeAssets(ids: Set(result.records.map { $0.from.path }))
             }
         }
     }
@@ -1738,15 +1884,12 @@ final class PhotoGridViewController: NSViewController,
 
     /// Called after a drag-move to a sidebar folder completed.
     func noteFilesMoved(count: Int, to destination: URL) {
-        let anchor = selectedIndex ?? 0
         flashUndoable("Moved \(count) photo\(count == 1 ? "" : "s") to \(destination.lastPathComponent)")
-        reloadCurrentFolder(selecting: anchor)
     }
 
     func reloadCurrentFolder(selecting index: Int? = nil) {
         guard let folder = currentFolder else { return }
         pendingSelection = index
-        preserveScrollOnNextApply = true
         loadFolder(folder)
     }
 
@@ -1794,7 +1937,10 @@ final class PhotoGridViewController: NSViewController,
             // or the collection view re-applies the old index paths to
             // whatever photos now occupy those positions ("random" highlight).
             self.collectionView.deselectItems(at: self.collectionView.selectionIndexPaths)
-            self.preserveScrollOnNextApply = true
+            if let paths = note.userInfo?["paths"] as? [String], !paths.isEmpty {
+                self.removeAssets(ids: Set(paths))
+                return
+            }
             self.loadFolder(folder)
         }
     }
@@ -1891,7 +2037,6 @@ final class PhotoGridViewController: NSViewController,
     private func reloadCurrentFolderPreservingSelection() {
         pendingSelectionID = selectedAsset?.id
         guard let folder = currentFolder else { return }
-        preserveScrollOnNextApply = true
         loadFolder(folder)
     }
 
@@ -2450,7 +2595,6 @@ final class PhotoGridViewController: NSViewController,
             var migrations: [(String, String)] = []
             var renamed = 0
             var skipped = 0
-            var firstNewID: String?
 
             for (asset, newBase) in plans {
                 let parent = asset.url.deletingLastPathComponent()
@@ -2477,7 +2621,6 @@ final class PhotoGridViewController: NSViewController,
                     renamed += 1
                     let newID = parent.appendingPathComponent(newBase + "." + asset.url.pathExtension).path
                     migrations.append((asset.id, newID))
-                    if firstNewID == nil { firstNewID = newID }
                 }
             }
 
@@ -2490,9 +2633,7 @@ final class PhotoGridViewController: NSViewController,
                 var message = "Renamed \(renamed) photo\(renamed == 1 ? "" : "s")"
                 if skipped > 0 { message += " · \(skipped) skipped (name in use)" }
                 self.flashUndoable(message)
-                self.pendingSelectionID = firstNewID
-                self.pendingSelectionStem = nil
-                if let folder = self.currentFolder { self.loadFolder(folder) }
+                self.replaceRenamed(migrations)
             }
         }
     }

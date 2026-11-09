@@ -232,7 +232,10 @@ enum FileOps {
             let sources = Set(records.map { $0.from.deletingLastPathComponent().path })
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: FileOps.filesMoved, object: nil,
-                                                userInfo: ["sources": Array(sources)])
+                                                userInfo: [
+                                                    "sources": Array(sources),
+                                                    "paths": records.map { $0.from.path }
+                                                ])
             }
         }
         return OperationResult(primaries: moved, records: records, skipped: skipped)
