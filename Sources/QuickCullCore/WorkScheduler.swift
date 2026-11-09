@@ -5,8 +5,10 @@ import Darwin
 
 /// What a piece of background work is for. Lower raw value runs first.
 public enum WorkLane: Int, Comparable, Equatable, CaseIterable {
-    case visible = 0
-    case selected = 1
+    /// The photo open in the loupe. Outranks the filmstrip.
+    case selected = 0
+    /// On-screen thumbnails, including every visible filmstrip frame.
+    case visible = 1
     /// The next two or three screens. Ahead of capture dates and the rest.
     case lookahead = 2
     /// Capture-date header reads. Behind the photos on screen, beside the rest.
@@ -20,8 +22,8 @@ public enum WorkLane: Int, Comparable, Equatable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .visible: return "visible"
         case .selected: return "selected"
+        case .visible: return "visible"
         case .lookahead: return "lookahead"
         case .metadata: return "metadata"
         case .prefetch: return "prefetch"
@@ -187,6 +189,8 @@ public final class WorkScheduler {
     private var runningOnVolume: [String: Int] = [:]
     private var runningCount = 0
     private var metadataRunning = 0
+    private var visibleQueued = 0
+    private var visibleRunning = 0
     private var foregroundQueued = 0
     private var foregroundRunning = 0
     private var nextID = 1
@@ -338,7 +342,7 @@ public final class WorkScheduler {
         defer { lock.unlock() }
         if runningCount >= globalLimit { return nil }
         // On-screen photos and the next screens take the drive first.
-        if let job = takeLocked([.visible, .selected, .lookahead], now: now) {
+        if let job = takeLocked([.selected, .visible, .lookahead], now: now) {
             return job
         }
         // A few capture-date readers, then the rest of the folder shares
@@ -351,7 +355,7 @@ public final class WorkScheduler {
 
     private func takeLocked(_ lanes: [WorkLane], now: TimeInterval) -> WorkJob? {
         for lane in lanes {
-            if folderLoading && lane == .background { continue }
+            if lane == .background, folderLoading || visibleQueued > 0 || visibleRunning > 0 { continue }
             guard laneHasRoom(lane) else { continue }
             var slot = head[lane]
             var spins = 0
@@ -365,6 +369,7 @@ public final class WorkScheduler {
                     runningCount += 1
                     runningOnVolume[current.job.volume, default: 0] += 1
                     if lane == .metadata { metadataRunning += 1 }
+                    if lane == .visible { visibleRunning += 1 }
                     if lane != .background {
                         foregroundQueued -= 1
                         foregroundRunning += 1
@@ -399,6 +404,9 @@ public final class WorkScheduler {
             runningOnVolume[volume] = max(0, (runningOnVolume[volume] ?? 1) - 1)
             if slot.job.lane == .metadata {
                 metadataRunning = max(0, metadataRunning - 1)
+            }
+            if slot.job.lane == .visible {
+                visibleRunning = max(0, visibleRunning - 1)
             }
             if slot.job.lane != .background {
                 foregroundRunning = max(0, foregroundRunning - 1)
@@ -448,6 +456,9 @@ public final class WorkScheduler {
             head[lane] = slot
         }
         tail[lane] = slot
+        if slot.job.state == .queued, lane == .visible {
+            visibleQueued += 1
+        }
     }
 
     private func detach(_ slot: Slot) {
@@ -456,6 +467,9 @@ public final class WorkScheduler {
         if let next = slot.next { next.prev = slot.prev } else { tail[lane] = slot.prev }
         slot.prev = nil
         slot.next = nil
+        if slot.job.state == .queued, lane == .visible {
+            visibleQueued = max(0, visibleQueued - 1)
+        }
         if slot.job.state == .queued {
             let volume = slot.job.volume
             if var counts = queuedOnVolume[lane] {

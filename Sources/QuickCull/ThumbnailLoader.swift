@@ -47,6 +47,9 @@ final class ThumbnailLoader {
     private var fullCount = 0
     private var countedCacheKeys = Set<String>()
     private var warmToken = 0
+    /// Thumbnail keys the open filmstrip is showing. While this is set, grid
+    /// focus must not demote those decodes or keep its own cells in front.
+    private var filmstripVisibleKeys = Set<String>()
     private let cacheQueue = DispatchQueue(label: "funo.thumb.cache", qos: .userInitiated)
 
     struct Stats {
@@ -183,7 +186,48 @@ final class ThumbnailLoader {
     /// drops to low. Without this, on a slow card, requests from screens
     /// you scrolled PAST run first-come-first-served and the screen you're
     /// looking at starves blank behind them.
+    /// The loupe is open. These thumbnail URLs (visible frames plus a few
+    /// on each side) stay on the visible lane. Grid cells drop behind them.
+    func noteFilmstripVisible(_ urls: [URL]) {
+        assert(Thread.isMainThread)
+        let keys = Set(urls.map { cacheKey($0, Self.thumbnailPixelSize) })
+        filmstripVisibleKeys = keys
+        let tier = Int(Self.thumbnailPixelSize)
+        var lanes: [Int: WorkLane] = [:]
+        for (key, ticket) in pending where ticket.tier == tier && ticket.job != 0 {
+            let target: WorkLane = keys.contains(key) ? .visible : .prefetch
+            guard ticket.lane != target else { continue }
+            ticket.lane = target
+            lanes[ticket.job] = target
+        }
+        if !lanes.isEmpty { WorkRunner.shared.replaceLanes(lanes) }
+        for url in urls {
+            let key = cacheKey(url, Self.thumbnailPixelSize)
+            if cachedImage(for: url, maxPixel: Self.thumbnailPixelSize) != nil { continue }
+            if let ticket = pending[key] {
+                ticket.lane = .visible
+                if ticket.job != 0 { WorkRunner.shared.setLane(ticket.job, .visible) }
+                continue
+            }
+            request(url, maxPixel: Self.thumbnailPixelSize) { _ in }
+        }
+    }
+
+    func clearFilmstripVisible() {
+        assert(Thread.isMainThread)
+        filmstripVisibleKeys = []
+    }
+
+    /// 512 thumbnail, else the 3200 preview, else the full-res decode.
+    func anyCachedImage(for url: URL) -> NSImage? {
+        if let thumb = cachedImage(for: url, maxPixel: Self.thumbnailPixelSize) { return thumb }
+        if let preview = cachedImage(for: url, maxPixel: Self.previewPixelSize) { return preview }
+        return cachedImage(for: url, maxPixel: Self.fullPixelSize)
+    }
+
     func focusVisible(_ urls: [URL], ahead: [URL] = [], maxPixel: CGFloat) {
+        // The grid behind an open loupe must not reorder the filmstrip.
+        if !filmstripVisibleKeys.isEmpty, maxPixel <= Self.thumbnailPixelSize { return }
         let tier = Int(maxPixel)
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
         let aheadKeys = Set(ahead.map { cacheKey($0, maxPixel) })
@@ -292,9 +336,11 @@ final class ThumbnailLoader {
         let ticket = ThumbTicket()
         ticket.tier = Int(maxPixel)
         let hasWaiter = !(waiters[key]?.isEmpty ?? true)
+        // A waiting preview is the photo on screen. A prefetch of a large
+        // preview is a neighbor: it must sit below visible filmstrip thumbs.
         let lane: WorkLane = hasWaiter
             ? (maxPixel > Self.thumbnailPixelSize ? .selected : .visible)
-            : .lookahead
+            : (maxPixel > Self.thumbnailPixelSize ? .prefetch : .lookahead)
         ticket.lane = lane
         pending[key] = ticket
         // The cache file is on the internal SSD. This probe does not take a

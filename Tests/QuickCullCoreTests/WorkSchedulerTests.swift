@@ -82,6 +82,33 @@ final class WorkSchedulerTests: XCTestCase {
         XCTAssertGreaterThan(thumbs, 0)
     }
 
+    func testVisibleThumbBeatsNeighborPreviewWhichBeatsFaces() {
+        let scheduler = WorkScheduler(cardLimit: 2, externalLimit: 4, internalLimit: 4, globalLimit: 8)
+        let face = scheduler.enqueue(
+            group: "faces", name: "face", lane: .background, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 0)
+        let neighbor = scheduler.enqueue(
+            group: "thumb", name: "neighbor preview", lane: .prefetch, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 1)
+        let thumb = scheduler.enqueue(
+            group: "thumb", name: "filmstrip", lane: .visible, volume: "/Volumes/Extreme Pro",
+            pace: .external, generation: 1, now: 2)
+        XCTAssertLessThan(WorkLane.selected, WorkLane.visible)
+        XCTAssertLessThan(WorkLane.visible, WorkLane.prefetch)
+        XCTAssertLessThan(WorkLane.prefetch, WorkLane.background)
+        let first = scheduler.promoteNext(now: 3)
+        XCTAssertEqual(first?.id, thumb)
+        XCTAssertEqual(first?.lane, .visible)
+        // A face must not start while that thumbnail is still running.
+        let second = scheduler.promoteNext(now: 4)
+        XCTAssertEqual(second?.id, neighbor)
+        XCTAssertEqual(second?.lane, .prefetch)
+        XCTAssertNil(scheduler.promoteNext(now: 5))
+        scheduler.finish(thumb)
+        scheduler.finish(neighbor)
+        XCTAssertEqual(scheduler.promoteNext(now: 6)?.id, face)
+    }
+
     func testFolderLoadHoldsTheIndexWalk() {
         let scheduler = WorkScheduler()
         scheduler.setFolderLoading(true)
@@ -120,12 +147,14 @@ final class WorkSchedulerTests: XCTestCase {
         }
         XCTAssertLessThan(Date().timeIntervalSince(move), 0.05)
         var startedCount = 0
-        var sawVisible = false
+        var firstLane: WorkLane?
         while let job = scheduler.promoteNext(now: 1) {
-            if job.lane == .visible { sawVisible = true }
+            if firstLane == nil { firstLane = job.lane }
             startedCount += 1
         }
-        XCTAssertTrue(sawVisible)
+        // The open photo's preview outranks on-screen thumbnails, and both
+        // outrank the rest of the folder. The limit fills with the preview lane.
+        XCTAssertEqual(firstLane, .selected)
         XCTAssertEqual(startedCount, 6)
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
     }

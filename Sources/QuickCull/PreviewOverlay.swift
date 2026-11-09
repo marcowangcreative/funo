@@ -81,6 +81,7 @@ final class FilmstripItem: NSCollectionViewItem {
     private let colorDot = NSView()
     private let markLabel = NSTextField(labelWithString: "")
     private(set) var representedURL: URL?
+    private var thumbInFlight = false
 
     override func loadView() {
         view = NSView()
@@ -164,19 +165,37 @@ final class FilmstripItem: NSCollectionViewItem {
 
         let url = asset.url
         let rotation = RatingsStore.shared.rotation(for: url.path)
-        if let cached = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
-            thumb.image = cached
-        } else {
-            // Same cell, same file (the strip restyles on every arrow): don't
-            // blank a thumb that's already painted. A URL change, or a
-            // rotation (cache key changed, so this is a miss), still fetches.
-            if urlChanged { thumb.image = nil }
-            ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self] image in
-                guard let self, self.representedURL == url else { return }
-                guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
-                if let image { self.thumb.image = image }
-            }
+        if urlChanged { thumbInFlight = false }
+        if let exact = ThumbnailLoader.shared.cachedImage(for: url, maxPixel: ThumbnailLoader.thumbnailPixelSize) {
+            thumb.image = exact
+            thumbInFlight = false
+            return
         }
+        // A 3200 preview or full-res decode is enough to fill the slot now.
+        if let standIn = ThumbnailLoader.shared.anyCachedImage(for: url) {
+            thumb.image = standIn
+        } else if urlChanged {
+            thumb.image = nil
+        }
+        guard !thumbInFlight else { return }
+        thumbInFlight = true
+        ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self] image in
+            guard let self, self.representedURL == url else { return }
+            self.thumbInFlight = false
+            guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
+            if let image {
+                self.thumb.image = image
+            }
+            // A nil result while this frame is still showing leaves thumbInFlight
+            // clear, so the next visibility pass requests it again.
+        }
+    }
+
+    /// Scroll or a visibility pass. A frame that is still blank asks again.
+    func retryIfBlank(asset: PhotoAsset, isCurrent: Bool) {
+        guard thumb.image == nil else { return }
+        thumbInFlight = false
+        configure(asset: asset, isCurrent: isCurrent)
     }
 }
 
@@ -859,6 +878,7 @@ final class PreviewOverlayView: NSView {
         }
         refreshInfoPanel()
         refreshFilmstrip()
+        pinFilmstripThumbs()
         faceScoreRetries = 0
         updateFaceBadges()
         refreshCullPlate()
@@ -867,9 +887,9 @@ final class PreviewOverlayView: NSView {
         updateEyesReadout()
         adoptSidecarForCurrentIfPending()
 
-        // Keep the shooting rhythm: neighbors decode while you look at this
-        // one. ±2 (immediate neighbors first) covers fast arrow-key paging
-        // so the sharp preview is already waiting - no lower-res flash.
+        // Neighbors prefetch at a lane below the filmstrip. Only this
+        // frame's own preview (requested above) outranks those thumbnails.
+        // ±2 covers fast arrow-key paging so the sharp preview is waiting.
         for offset in [1, -1, 2, -2] {
             let n = index + offset
             if n >= 0, n < assets.count {
@@ -1009,7 +1029,27 @@ final class PreviewOverlayView: NSView {
                       let item = self.filmstripView.item(at: ip) as? FilmstripItem else { continue }
                 item.configure(asset: self.assets[ip.item], isCurrent: ip.item == self.index)
             }
+            self.pinFilmstripThumbs()
         }
+    }
+
+    /// Visible filmstrip frames, plus a few on each side, stay on the
+    /// visible thumbnail lane. The grid behind the loupe does not.
+    private func pinFilmstripThumbs() {
+        let visible = filmstripView.indexPathsForVisibleItems().map(\.item)
+        let lo: Int
+        let hi: Int
+        if visible.contains(index), let first = visible.min(), let last = visible.max() {
+            lo = first
+            hi = last
+        } else {
+            lo = index
+            hi = index
+        }
+        let start = max(0, lo - 4)
+        let end = min(assets.count - 1, hi + 4)
+        guard start <= end else { return }
+        ThumbnailLoader.shared.noteFilmstripVisible((start...end).map { assets[$0].url })
     }
 
     // MARK: - Culling state
@@ -1918,6 +1958,7 @@ final class PreviewOverlayView: NSView {
     }
 
     private func close() {
+        ThumbnailLoader.shared.clearFilmstripVisible()
         onClose?(index)
     }
 }
@@ -1950,6 +1991,13 @@ extension PreviewOverlayView: NSCollectionViewDataSource, NSCollectionViewDelega
             cell.configure(asset: assets[indexPath.item], isCurrent: indexPath.item == index)
         }
         return item
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, willDisplay item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        guard let cell = item as? FilmstripItem, indexPath.item < assets.count else { return }
+        cell.retryIfBlank(asset: assets[indexPath.item], isCurrent: indexPath.item == index)
+        pinFilmstripThumbs()
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
