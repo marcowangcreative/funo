@@ -132,7 +132,34 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
     var onDoubleClick: (() -> Void)?
 
     var thumbnailNeedsRequest: Bool {
-        representedURL != nil && thumbView.contentsMissing && pendingThumbURL == nil && thumbFailures < 3
+        representedURL != nil && thumbView.contentsMissing && pendingThumbURL == nil
+            && thumbFailures < ThumbRetryPolicy.failureCap
+    }
+
+    var thumbnailMissing: Bool {
+        representedURL != nil && thumbView.contentsMissing
+    }
+
+    /// queued, running on a lane, failed, cancelled, or no request.
+    func thumbnailStateLabel() -> String {
+        if thumbFailures >= ThumbRetryPolicy.failureCap { return "failed" }
+        guard let url = representedURL else { return "no request" }
+        if pendingThumbURL != nil {
+            switch ThumbnailLoader.shared.presence(for: url) {
+            case .queued: return "queued"
+            case .running(let lane): return "running \(lane)"
+            case .failed: return "failed"
+            case .cancelled: return "cancelled"
+            case .noRequest: return "queued"
+            }
+        }
+        switch ThumbnailLoader.shared.presence(for: url) {
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        case .queued: return "queued"
+        case .running(let lane): return "running \(lane)"
+        case .noRequest: return "no request"
+        }
     }
 
     func isWaitingForThumbnail(_ url: URL) -> Bool { pendingThumbURL == url }
@@ -265,20 +292,24 @@ final class PhotoItem: NSCollectionViewItem, NSTextFieldDelegate {
         refreshCullState(assetID: asset.id)
     }
 
-    func setThumbnail(_ image: NSImage?, for url: URL, rotation: Int) {
-        guard representedURL == url else { return } // cell was reused; drop stale pixels
-        // A rotation changes the cache key but not the path. An in-flight
-        // decode of the previous orientation must not paint over the new one.
-        guard RatingsStore.shared.rotation(for: url.path) == rotation else { return }
+    /// True when the cell still needs a decode because the orientation changed
+    /// under an in-flight request. The pending flag is cleared for every
+    /// delivery of this URL, including that mismatch.
+    @discardableResult
+    func setThumbnail(_ image: NSImage?, for url: URL, rotation: Int) -> Bool {
+        guard representedURL == url else { return false }
         if pendingThumbURL == url { pendingThumbURL = nil }
+        guard RatingsStore.shared.rotation(for: url.path) == rotation else { return true }
         if let image {
-            thumbFailures = 0
+            thumbFailures = ThumbRetryPolicy.decide(outcome: .ready, failures: thumbFailures, hasWaiter: true).failures
             thumbView.setImage(image)
         } else {
-            // A nil from a superseded decode must not wipe a thumb that's
-            // already on screen. Leave it missing so the repair pass retries.
-            thumbFailures += 1
+            // Nil here is a real decode failure. Cancellations are re-queued
+            // inside the loader and never arrive as nil.
+            let decision = ThumbRetryPolicy.decide(outcome: .failed, failures: thumbFailures, hasWaiter: true)
+            thumbFailures = decision.failures
         }
+        return false
     }
 
     func refreshCullState(assetID: String) {
@@ -896,6 +927,8 @@ final class PhotoGridViewController: NSViewController,
     /// something else forces a rebind. One pass per turn, only over what's
     /// actually on screen.
     private var visibleRepairScheduled = false
+    /// Runs only while a visible cell is still missing a thumbnail.
+    private var missingThumbTimer: Timer?
 
     private func scheduleVisibleRepair() {
         guard isActiveTab, !visibleRepairScheduled, !displayedAssets.isEmpty else { return }
@@ -903,19 +936,52 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.visibleRepairScheduled = false
-            guard self.isActiveTab else { return }
-            for ip in self.collectionView.indexPathsForVisibleItems() {
-                guard ip.item < self.displayedAssets.count,
-                      let item = self.collectionView.item(at: ip) as? PhotoItem else { continue }
-                let asset = self.displayedAssets[ip.item]
-                if item.representedURL != asset.url {
-                    item.configure(asset: asset)
-                    self.requestThumbnail(for: item, url: asset.url)
-                } else if item.thumbnailNeedsRequest {
-                    self.requestThumbnail(for: item, url: asset.url)
+            self.repairVisibleThumbnails()
+        }
+    }
+
+    private func repairVisibleThumbnails() {
+        guard isActiveTab else {
+            stopMissingThumbTimer()
+            return
+        }
+        var missing: [(String, String)] = []
+        var stillTrying = false
+        for ip in collectionView.indexPathsForVisibleItems() {
+            guard ip.item < displayedAssets.count,
+                  let item = collectionView.item(at: ip) as? PhotoItem else { continue }
+            let asset = displayedAssets[ip.item]
+            if item.representedURL != asset.url {
+                item.configure(asset: asset)
+                requestThumbnail(for: item, url: asset.url)
+            } else if item.thumbnailNeedsRequest {
+                requestThumbnail(for: item, url: asset.url)
+            }
+            if item.thumbnailMissing {
+                missing.append((asset.filename, item.thumbnailStateLabel()))
+                if item.thumbnailNeedsRequest || item.isWaitingForThumbnail(asset.url) {
+                    stillTrying = true
                 }
             }
         }
+        ThumbWatch.shared.setMissing(missing)
+        if stillTrying {
+            startMissingThumbTimer()
+        } else {
+            stopMissingThumbTimer()
+        }
+    }
+
+    private func startMissingThumbTimer() {
+        guard missingThumbTimer == nil else { return }
+        missingThumbTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.repairVisibleThumbnails()
+        }
+    }
+
+    private func stopMissingThumbTimer() {
+        missingThumbTimer?.invalidate()
+        missingThumbTimer = nil
     }
 
     /// One click out of any filtered view - the "my photos disappeared"
@@ -1043,9 +1109,10 @@ final class PhotoGridViewController: NSViewController,
 
         WorkRunner.shared.setFolderLoading(true)
         if !sameFolder {
-            WorkRunner.shared.cancel(group: "thumb")
-            WorkRunner.shared.cancel(group: "thumb-cache")
-            ThumbnailLoader.shared.cancelWarm()
+            // A reload of this same folder must not cancel in-flight thumbs.
+            // A real folder change drops prefetch only. A cell that is waiting
+            // keeps its job.
+            ThumbnailLoader.shared.cancelWithoutWaiters()
             ThumbnailLoader.shared.resetStats()
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1605,8 +1672,12 @@ final class PhotoGridViewController: NSViewController,
         if !force, item.isWaitingForThumbnail(url) { return }
         item.noteThumbnailRequest(url)
         ThumbnailLoader.shared.request(url, maxPixel: ThumbnailLoader.thumbnailPixelSize) { [weak self, weak item] image in
-            item?.setThumbnail(image, for: url, rotation: rotation)
+            guard let item else { return }
+            if item.setThumbnail(image, for: url, rotation: rotation) {
+                self?.requestThumbnail(for: item, url: url, force: true)
+            }
             if image != nil { self?.reportFirstThumbIfNeeded() }
+            self?.scheduleVisibleRepair()
         }
     }
 

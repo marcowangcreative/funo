@@ -37,7 +37,7 @@ final class WorkRunner {
             let late = self.scheduler.overdue(now: now)
             for job in late {
                 let started = job.startedAt ?? now
-                NSLog("funo work: \(job.name) [\(job.lane.label) \(job.group)] on \(job.volume) has been running %.0f s", now - started)
+                FunoLog.write(String(format: "funo work: %@ [%@ %@] on %@ has been running %.0f s", job.name, job.lane.label, job.group, job.volume, now - started))
                 if job.lane == .background {
                     self.scheduler.markTimedOut(job.id, now: now)
                 }

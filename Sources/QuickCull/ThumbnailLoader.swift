@@ -50,6 +50,48 @@ final class ThumbnailLoader {
     /// Thumbnail keys the open filmstrip is showing. While this is set, grid
     /// focus must not demote those decodes or keep its own cells in front.
     private var filmstripVisibleKeys = Set<String>()
+    private let presenceLock = NSLock()
+    private var presence: [String: ThumbPresence] = [:]
+
+    enum ThumbPresence: Equatable {
+        case noRequest
+        case queued
+        case running(String)
+        case failed
+        case cancelled
+    }
+
+    func presence(for url: URL, maxPixel: CGFloat = ThumbnailLoader.thumbnailPixelSize) -> ThumbPresence {
+        let key = cacheKey(url, maxPixel)
+        presenceLock.lock()
+        defer { presenceLock.unlock() }
+        return presence[key] ?? .noRequest
+    }
+
+    private func setPresence(_ value: ThumbPresence?, for key: String) {
+        presenceLock.lock()
+        if let value {
+            presence[key] = value
+        } else {
+            presence.removeValue(forKey: key)
+        }
+        presenceLock.unlock()
+    }
+
+    /// Drop prefetch work for a folder change. A job a visible cell is
+    /// waiting on is left running.
+    func cancelWithoutWaiters() {
+        assert(Thread.isMainThread)
+        var ids: [Int] = []
+        for (key, ticket) in pending where waiters[key]?.isEmpty ?? true {
+            ticket.cancelled = true
+            if ticket.job != 0 { ids.append(ticket.job) }
+            pending[key] = nil
+            setPresence(.cancelled, for: key)
+        }
+        for id in ids { WorkRunner.shared.cancel(id: id) }
+        cancelWarm()
+    }
     private let cacheQueue = DispatchQueue(label: "funo.thumb.cache", qos: .userInitiated)
 
     struct Stats {
@@ -343,6 +385,7 @@ final class ThumbnailLoader {
             : (maxPixel > Self.thumbnailPixelSize ? .prefetch : .lookahead)
         ticket.lane = lane
         pending[key] = ticket
+        setPresence(.queued, for: key)
         // The cache file is on the internal SSD. This probe does not take a
         // slot on the volume that holds the photo.
         WorkRunner.shared.submit(
@@ -352,18 +395,19 @@ final class ThumbnailLoader {
         ) { [weak self, weak ticket] isCancelled in
             guard let self, let ticket else { return }
             if isCancelled() || ticket.cancelled {
-                self.publish(key: key, ticket: ticket, image: nil, maxPixel: maxPixel)
+                self.finishCancelled(key: key, url: url, maxPixel: maxPixel, ticket: ticket)
                 return
             }
+            self.setPresence(.running(lane.label), for: key)
             if let cached = self.cache(for: maxPixel).object(forKey: key as NSString) {
-                self.publish(key: key, ticket: ticket, image: cached, maxPixel: maxPixel)
+                self.publish(key: key, url: url, ticket: ticket, image: cached, maxPixel: maxPixel, failure: nil)
                 return
             }
             if maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
                 let diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
                 if let data = CacheDB.shared.get(diskKey), let image = Self.decodeImmediate(data) {
                     self.recordCacheHit(key)
-                    self.publish(key: key, ticket: ticket, image: image, maxPixel: maxPixel)
+                    self.publish(key: key, url: url, ticket: ticket, image: image, maxPixel: maxPixel, failure: nil)
                     return
                 }
             }
@@ -394,6 +438,7 @@ final class ThumbnailLoader {
             : lane
         ticket.lane = useLane
         pending[key] = ticket
+        setPresence(.queued, for: key)
         let place = WorkRunner.shared.classify(url)
         WorkRunner.shared.submit(
             group: "thumb", name: url.lastPathComponent, lane: useLane,
@@ -402,9 +447,10 @@ final class ThumbnailLoader {
         ) { [weak self, weak ticket] isCancelled in
             guard let self, let ticket else { return }
             if isCancelled() || ticket.cancelled {
-                self.publish(key: key, ticket: ticket, image: nil, maxPixel: maxPixel)
+                self.finishCancelled(key: key, url: url, maxPixel: maxPixel, ticket: ticket)
                 return
             }
+            self.setPresence(.running(useLane.label), for: key)
             let decoded = Self.decode(url: url, maxPixel: maxPixel, userRotation: rotation)
             if let decoded {
                 self.recordDecode(decoded.kind)
@@ -420,11 +466,40 @@ final class ThumbnailLoader {
                     }
                 }
             }
-            self.publish(key: key, ticket: ticket, image: image, maxPixel: maxPixel)
+            if image == nil {
+                self.publish(key: key, url: url, ticket: ticket, image: nil, maxPixel: maxPixel, failure: "decode failed")
+            } else {
+                self.publish(key: key, url: url, ticket: ticket, image: image, maxPixel: maxPixel, failure: nil)
+            }
         }
     }
 
-    private func publish(key: String, ticket: ThumbTicket, image: NSImage?, maxPixel: CGFloat) {
+    /// A cancel is not a broken file. If a cell is still waiting, queue the
+    /// decode again and do not tell that cell the image was nil.
+    private func finishCancelled(key: String, url: URL, maxPixel: CGFloat, ticket: ThumbTicket) {
+        DispatchQueue.main.async { [weak self, weak ticket] in
+            guard let self, let ticket else { return }
+            let owns = self.pending[key] === ticket
+            let hasWaiter = !(self.waiters[key]?.isEmpty ?? true)
+            // A cancel that already dropped the slot still has to re-queue
+            // when a cell is waiting. A newer request owns the slot instead.
+            guard owns || (self.pending[key] == nil && hasWaiter) else { return }
+            let decision = ThumbRetryPolicy.decide(outcome: .cancelled, failures: 0, hasWaiter: hasWaiter)
+            self.setPresence(.cancelled, for: key)
+            self.pending[key] = nil
+            ticket.volumeQueued = false
+            ticket.cancelled = false
+            if hasWaiter {
+                FunoLog.write("funo thumb cancelled \(url.path)")
+            }
+            if decision.requeue {
+                self.setPresence(.queued, for: key)
+                self.ensureOperation(key: key, url: url, maxPixel: maxPixel)
+            }
+        }
+    }
+
+    private func publish(key: String, url: URL, ticket: ThumbTicket, image: NSImage?, maxPixel: CGFloat, failure: String?) {
         DispatchQueue.main.async { [weak self, weak ticket] in
             guard let self, let ticket else { return }
             let authoritative = ThumbnailDelivery.shouldPublish(pendingOpIsSelf: self.pending[key] === ticket)
@@ -433,6 +508,10 @@ final class ThumbnailLoader {
             if let image {
                 let cost = Int(image.size.width * image.size.height * 4)
                 self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
+                self.setPresence(nil, for: key)
+            } else if let failure {
+                self.setPresence(.failed, for: key)
+                FunoLog.write("funo thumb failed \(url.path) \(failure)")
             }
             let callbacks = self.waiters.removeValue(forKey: key) ?? []
             callbacks.forEach { $0(image) }

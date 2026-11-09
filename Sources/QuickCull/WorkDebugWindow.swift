@@ -1,6 +1,21 @@
 import AppKit
 import QuickCullCore
 
+/// Visible grid cells that still have no thumbnail, and why.
+final class ThumbWatch {
+    static let shared = ThumbWatch()
+    private(set) var lines: [String] = []
+
+    func setMissing(_ rows: [(String, String)]) {
+        lines = rows.map { "\($0.0)  \($0.1)" }
+    }
+
+    var summary: String {
+        if lines.isEmpty { return "Visible cells missing a thumbnail: 0" }
+        return "Visible cells missing a thumbnail: \(lines.count)\n" + lines.joined(separator: "\n")
+    }
+}
+
 /// One line per folder open: listing size, time to the grid, time to the
 /// first screen of thumbnails, where those pixels came from, and time to
 /// the last capture date. The debug window shows the latest one.
@@ -52,7 +67,7 @@ final class FolderMetrics {
         parts.append("full \(full)")
         if let datesMS { parts.append(String(format: "dates %.0f ms", datesMS)) }
         summary = parts.joined(separator: ", ")
-        NSLog("funo folder (\(when)): \(summary)")
+        FunoLog.write("funo folder (\(when)): \(summary)")
     }
 }
 
@@ -110,15 +125,17 @@ final class WorkDebugWindow {
         let now = Date().timeIntervalSinceReferenceDate
         let jobs = WorkRunner.shared.scheduler.live()
         let header = FolderMetrics.shared.summary
+        let missing = ThumbWatch.shared.summary
+        let jobLines: String
         if jobs.isEmpty {
-            text?.stringValue = header + "\n\nNo live jobs."
-            return
+            jobLines = "No live jobs."
+        } else {
+            jobLines = jobs.map { job in
+                let age = now - (job.startedAt ?? job.enqueuedAt)
+                return String(format: "%@  %@  %.0fs  %@  %@", job.lane.label, job.state.stateLabel, age, job.volume, job.name)
+            }.joined(separator: "\n")
         }
-        let lines = jobs.map { job in
-            let age = now - (job.startedAt ?? job.enqueuedAt)
-            return String(format: "%@  %@  %.0fs  %@  %@", job.lane.label, job.state.stateLabel, age, job.volume, job.name)
-        }
-        text?.stringValue = header + "\n\n" + lines.joined(separator: "\n")
+        text?.stringValue = header + "\n\n" + missing + "\n\n" + jobLines
     }
 }
 
