@@ -69,15 +69,15 @@ public enum GridEdit {
     /// the last photo, the survivor just before the block.
     public static func selectionAfterRemoval(order: [String], removing: Set<String>) -> String? {
         let removed = order.indices.filter { removing.contains(order[$0]) }
-        guard let first = removed.first, let last = removed.last else { return nil }
+        guard let last = removed.last else { return nil }
         let after = order.index(after: last)
         if after < order.endIndex {
             for index in after..<order.endIndex where !removing.contains(order[index]) {
                 return order[index]
             }
         }
-        if first > order.startIndex {
-            for index in stride(from: first - 1, through: order.startIndex, by: -1) where !removing.contains(order[index]) {
+        if last > order.startIndex {
+            for index in stride(from: last - 1, through: order.startIndex, by: -1) where !removing.contains(order[index]) {
                 return order[index]
             }
         }

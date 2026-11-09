@@ -54,6 +54,12 @@ final class GridEditTests: XCTestCase {
         XCTAssertEqual(plan.anchor, VisibleAnchor(id: "next", offset: 0))
     }
 
+    func testRemovingFirstAndLastKeepsTheMiddlePhoto() {
+        let plan = GridEdit.removalPlan(order: order, removing: ["a", "e"], anchor: VisibleAnchor(id: "a", offset: 0))
+        XCTAssertEqual(plan.selectionID, "d")
+        XCTAssertEqual(plan.anchor, VisibleAnchor(id: "b", offset: 0))
+    }
+
     func testRemovingEverythingLeavesNoSelection() {
         let plan = GridEdit.removalPlan(order: order, removing: Set(order), anchor: VisibleAnchor(id: "a", offset: 1))
         XCTAssertEqual(plan.remaining, [])
