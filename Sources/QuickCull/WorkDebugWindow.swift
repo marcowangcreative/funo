@@ -1,6 +1,61 @@
 import AppKit
 import QuickCullCore
 
+/// One line per folder open: listing size, time to the grid, time to the
+/// first screen of thumbnails, where those pixels came from, and time to
+/// the last capture date. The debug window shows the latest one.
+final class FolderMetrics {
+    static let shared = FolderMetrics()
+    private(set) var summary = "No folder opened yet."
+    private var files = 0
+    private var gridMS: Double?
+    private var screenMS: Double?
+    private var datesMS: Double?
+    private var cache = 0
+    private var embedded = 0
+    private var full = 0
+
+    func noteGrid(files: Int, gridMS: Double) {
+        self.files = files
+        self.gridMS = gridMS
+        screenMS = nil
+        datesMS = nil
+        cache = 0
+        embedded = 0
+        full = 0
+        publish("grid")
+    }
+
+    func noteScreen(ms: Double, cache: Int, embedded: Int, full: Int) {
+        screenMS = ms
+        self.cache = cache
+        self.embedded = embedded
+        self.full = full
+        publish("first screen")
+    }
+
+    func noteDates(files: Int, ms: Double, cache: Int, embedded: Int, full: Int) {
+        self.files = files
+        datesMS = ms
+        self.cache = cache
+        self.embedded = embedded
+        self.full = full
+        publish("dates")
+    }
+
+    private func publish(_ when: String) {
+        var parts: [String] = ["\(files) files"]
+        if let gridMS { parts.append(String(format: "grid %.0f ms", gridMS)) }
+        if let screenMS { parts.append(String(format: "first screen %.0f ms", screenMS)) }
+        parts.append("cache \(cache)")
+        parts.append("embedded \(embedded)")
+        parts.append("full \(full)")
+        if let datesMS { parts.append(String(format: "dates %.0f ms", datesMS)) }
+        summary = parts.joined(separator: ", ")
+        NSLog("funo folder (\(when)): \(summary)")
+    }
+}
+
 /// Hidden. Option-Command-J. Live jobs, so a stuck walk is visible without
 /// Instruments.
 final class WorkDebugWindow {
@@ -54,14 +109,16 @@ final class WorkDebugWindow {
     private func refresh() {
         let now = Date().timeIntervalSinceReferenceDate
         let jobs = WorkRunner.shared.scheduler.live()
+        let header = FolderMetrics.shared.summary
         if jobs.isEmpty {
-            text?.stringValue = "No live jobs."
+            text?.stringValue = header + "\n\nNo live jobs."
             return
         }
-        text?.stringValue = jobs.map { job in
+        let lines = jobs.map { job in
             let age = now - (job.startedAt ?? job.enqueuedAt)
             return String(format: "%@  %@  %.0fs  %@  %@", job.lane.label, job.state.stateLabel, age, job.volume, job.name)
-        }.joined(separator: "\n")
+        }
+        text?.stringValue = header + "\n\n" + lines.joined(separator: "\n")
     }
 }
 

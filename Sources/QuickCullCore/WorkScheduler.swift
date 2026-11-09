@@ -7,8 +7,12 @@ import Darwin
 public enum WorkLane: Int, Comparable, Equatable, CaseIterable {
     case visible = 0
     case selected = 1
-    case prefetch = 2
-    case background = 3
+    /// The next two or three screens. Ahead of capture dates and the rest.
+    case lookahead = 2
+    /// Capture-date header reads. Behind the photos on screen, beside the rest.
+    case metadata = 3
+    case prefetch = 4
+    case background = 5
 
     public static func < (lhs: WorkLane, rhs: WorkLane) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -18,19 +22,71 @@ public enum WorkLane: Int, Comparable, Equatable, CaseIterable {
         switch self {
         case .visible: return "visible"
         case .selected: return "selected"
+        case .lookahead: return "lookahead"
+        case .metadata: return "metadata"
         case .prefetch: return "prefetch"
         case .background: return "background"
         }
     }
 }
 
-/// How many reads a drive can take at once. USB, exFAT, and spinning
-/// disks thrash if they are asked for more than a couple of files at a time.
+/// How many reads a drive can take at once.
+/// A memory card is the only slow device. An external SSD is not a card.
 public enum VolumePace: Equatable {
-    case fast
-    case slow
+    case card
+    case external
+    case internalDisk
+}
 
-    public var defaultLimit: Int { self == .fast ? 6 : 2 }
+/// Pace and concurrency for a volume. Pure so tests can pin a core count.
+public enum DrivePacing {
+    /// Disk-cache reads live on the internal SSD. They must not take a slot
+    /// on the volume the photo file is on.
+    public static let cacheVolume = "cache"
+
+    public struct Limits: Equatable {
+        public var card: Int
+        public var external: Int
+        public var internalDisk: Int
+        public var global: Int
+        /// Capture-date readers that may run at once, on any pace.
+        public var metadata: Int
+
+        public init(card: Int, external: Int, internalDisk: Int, global: Int, metadata: Int) {
+            self.card = card
+            self.external = external
+            self.internalDisk = internalDisk
+            self.global = global
+            self.metadata = metadata
+        }
+    }
+
+    /// Removable media is a card. An external volume that is not removable
+    /// (a USB exFAT SSD) stays external. Anything else is internal.
+    public static func pace(removable: Bool, isInternal: Bool) -> VolumePace {
+        if removable { return .card }
+        if isInternal { return .internalDisk }
+        return .external
+    }
+
+    public static func limits(cores: Int) -> Limits {
+        let n = max(1, cores)
+        return Limits(
+            card: 2,
+            external: max(4, n - 2),
+            internalDisk: max(4, n - 1),
+            global: max(1, n - 1),
+            metadata: 4
+        )
+    }
+
+    public static func limit(_ pace: VolumePace, _ limits: Limits) -> Int {
+        switch pace {
+        case .card: return limits.card
+        case .external: return limits.external
+        case .internalDisk: return limits.internalDisk
+        }
+    }
 }
 
 public enum WorkState: Equatable {
@@ -105,9 +161,11 @@ private final class YieldFlag: @unchecked Sendable {
 /// append. The yield flag is a separate atomic the index walk can read
 /// without this lock.
 public final class WorkScheduler {
-    public var slowLimit: Int
-    public var fastLimit: Int
+    public var cardLimit: Int
+    public var externalLimit: Int
+    public var internalLimit: Int
     public var globalLimit: Int
+    public var metadataLimit: Int
     public var timeout: TimeInterval
 
     private final class Slot {
@@ -128,6 +186,7 @@ public final class WorkScheduler {
     private var groupIDs: [String: Set<Int>] = [:]
     private var runningOnVolume: [String: Int] = [:]
     private var runningCount = 0
+    private var metadataRunning = 0
     private var foregroundQueued = 0
     private var foregroundRunning = 0
     private var nextID = 1
@@ -135,10 +194,13 @@ public final class WorkScheduler {
     private var cancelledIDs: Set<Int> = []
     private let yield = YieldFlag()
 
-    public init(slowLimit: Int = 2, fastLimit: Int = 6, globalLimit: Int = 8, timeout: TimeInterval = 20) {
-        self.slowLimit = slowLimit
-        self.fastLimit = fastLimit
+    public init(cardLimit: Int = 2, externalLimit: Int = 6, internalLimit: Int = 6,
+                globalLimit: Int = 8, metadataLimit: Int = 4, timeout: TimeInterval = 20) {
+        self.cardLimit = cardLimit
+        self.externalLimit = externalLimit
+        self.internalLimit = internalLimit
         self.globalLimit = globalLimit
+        self.metadataLimit = metadataLimit
         self.timeout = timeout
     }
 
@@ -275,20 +337,34 @@ public final class WorkScheduler {
         lock.lock()
         defer { lock.unlock() }
         if runningCount >= globalLimit { return nil }
-        for lane in WorkLane.allCases.sorted() {
+        // On-screen photos and the next screens take the drive first.
+        if let job = takeLocked([.visible, .selected, .lookahead], now: now) {
+            return job
+        }
+        // A few capture-date readers, then the rest of the folder shares
+        // whatever slots are left. Dates never fill the drive by themselves.
+        if metadataRunning < metadataLimit, let job = takeLocked([.metadata], now: now) {
+            return job
+        }
+        return takeLocked([.prefetch, .background], now: now)
+    }
+
+    private func takeLocked(_ lanes: [WorkLane], now: TimeInterval) -> WorkJob? {
+        for lane in lanes {
             if folderLoading && lane == .background { continue }
             guard laneHasRoom(lane) else { continue }
             var slot = head[lane]
             var spins = 0
             let volumeCount = queuedOnVolume[lane]?.count ?? 0
             while let current = slot {
-                let limit = current.job.pace == .slow ? slowLimit : fastLimit
+                let limit = limit(for: current.job.pace)
                 if (runningOnVolume[current.job.volume] ?? 0) < limit {
                     detach(current)
                     current.job.state = .running
                     current.job.startedAt = now
                     runningCount += 1
                     runningOnVolume[current.job.volume, default: 0] += 1
+                    if lane == .metadata { metadataRunning += 1 }
                     if lane != .background {
                         foregroundQueued -= 1
                         foregroundRunning += 1
@@ -304,6 +380,14 @@ public final class WorkScheduler {
         return nil
     }
 
+    private func limit(for pace: VolumePace) -> Int {
+        switch pace {
+        case .card: return cardLimit
+        case .external: return externalLimit
+        case .internalDisk: return internalLimit
+        }
+    }
+
     public func finish(_ id: Int) {
         lock.lock()
         defer { lock.unlock() }
@@ -313,6 +397,9 @@ public final class WorkScheduler {
             runningCount = max(0, runningCount - 1)
             let volume = slot.job.volume
             runningOnVolume[volume] = max(0, (runningOnVolume[volume] ?? 1) - 1)
+            if slot.job.lane == .metadata {
+                metadataRunning = max(0, metadataRunning - 1)
+            }
             if slot.job.lane != .background {
                 foregroundRunning = max(0, foregroundRunning - 1)
             }
@@ -404,8 +491,8 @@ public final class WorkScheduler {
     private func laneHasRoom(_ lane: WorkLane) -> Bool {
         guard let counts = queuedOnVolume[lane] else { return false }
         for (volume, waiting) in counts where waiting > 0 {
-            let pace = volumePace[volume] ?? .fast
-            let limit = pace == .slow ? slowLimit : fastLimit
+            let pace = volumePace[volume] ?? .internalDisk
+            let limit = limit(for: pace)
             if (runningOnVolume[volume] ?? 0) < limit { return true }
         }
         return false

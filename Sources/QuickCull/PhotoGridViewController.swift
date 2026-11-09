@@ -441,6 +441,11 @@ final class PhotoGridViewController: NSViewController,
     private var firstThumbMS: Double?
     private var scanStartedAt: Date?
     private var scanMS: Double = 0
+    private var gridLogged = false
+    private var screenLogged = false
+    private var datesLogged = false
+    private var screenFilled = 0
+    private var screenTarget = 0
     private var pairedHidden = 0
 
     var onOpenPreview: ((Int) -> Void)?
@@ -1019,6 +1024,11 @@ final class PhotoGridViewController: NSViewController,
         }
         firstThumbMS = nil
         scanStartedAt = Date()
+        gridLogged = false
+        screenLogged = false
+        datesLogged = false
+        screenFilled = 0
+        screenTarget = 0
         emptyLabel.stringValue = ""
         // Only surface "Opening…" if the scan is actually slow (a cold load).
         // Fast, cached, or empty folders finish first and jump straight to the
@@ -1032,7 +1042,12 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: openingWork)
 
         WorkRunner.shared.setFolderLoading(true)
-        WorkRunner.shared.cancel(group: "thumb")
+        if !sameFolder {
+            WorkRunner.shared.cancel(group: "thumb")
+            WorkRunner.shared.cancel(group: "thumb-cache")
+            ThumbnailLoader.shared.cancelWarm()
+            ThumbnailLoader.shared.resetStats()
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = FolderScanner.scan(url)
             DispatchQueue.main.async {
@@ -1044,32 +1059,22 @@ final class PhotoGridViewController: NSViewController,
                 self.pairedHidden = result.pairedJPEGCount
                 self.captureReadDone = 0
                 self.captureReadTotal = result.assets.count
-                if sameFolder {
-                    // Watcher and undo: keep the photos on screen and the
-                    // capture times of files that have not changed. A new
-                    // folder is the only load that may scroll to the top.
-                    self.captureReadInFlight = !result.assets.isEmpty
-                    self.allAssets = result.assets
-                    self.rebuildSearchIndex()
-                } else {
+                self.captureReadInFlight = !result.assets.isEmpty
+                if !sameFolder {
                     self.captureTimes = [:]
                     self.captureReady = result.assets.isEmpty
-                    self.captureReadInFlight = !result.assets.isEmpty
-                    self.allAssets = result.assets
-                    self.rebuildSearchIndex()
-                    if self.sortKey == .capture {
-                        // Name order is not a time order. Hold the grid until the
-                        // dates are in, then sort once.
-                        self.displayedAssets = []
-                        self.collectionView.reloadData()
-                        self.emptyLabel.stringValue = result.assets.isEmpty ? "No photos in this folder" : "Reading capture times…"
-                        self.updateStatus()
-                    } else {
-                        self.allAssets = self.sorted(result.assets)
-                        self.rebuildSearchIndex()
-                        self.applyFilter(keepSelection: false, scrollToTop: true)
-                    }
                 }
+                // Show the grid as soon as the listing is in. A capture-time
+                // sort that is not ready yet uses filename order, and the
+                // real order is applied once, in place, when the dates land.
+                if self.sortKey == .capture && !self.captureReady {
+                    self.allAssets = self.nameSorted(result.assets)
+                } else {
+                    self.allAssets = self.sorted(result.assets)
+                }
+                self.rebuildSearchIndex()
+                self.applyFilter(keepSelection: sameFolder, scrollToTop: !sameFolder)
+                self.noteGridShown()
                 self.scanSidecars(self.allAssets, generation: generation)
                 self.scanCaptureDates(result.assets, generation: generation, previous: previousTimes, sameFolder: sameFolder)
                 // Face analysis reads a big decode PER photo. On a 5k folder
@@ -1124,11 +1129,6 @@ final class PhotoGridViewController: NSViewController,
                 self.captureTimes = hits
                 self.captureReadDone = hits.count
                 self.captureReadTotal = assets.count
-                if sameFolder, self.sortKey != .capture || self.captureReady {
-                    self.allAssets = self.sorted(assets)
-                    self.rebuildSearchIndex()
-                    self.applyFilter(keepSelection: true)
-                }
                 if misses.isEmpty {
                     self.finishCaptureRead(generation: generation, started: started)
                     return
@@ -1137,7 +1137,7 @@ final class PhotoGridViewController: NSViewController,
                 for asset in misses {
                     let place = WorkRunner.shared.classify(asset.url)
                     WorkRunner.shared.submit(
-                        group: "exif", name: asset.filename, lane: .prefetch,
+                        group: "exif", name: asset.filename, lane: .metadata,
                         volume: place.volume, pace: place.pace, generation: generation
                     ) { isCancelled in
                         if isCancelled() {
@@ -1180,10 +1180,10 @@ final class PhotoGridViewController: NSViewController,
         guard folderLoad.accepts(generation) else { return }
         captureReady = true
         captureReadInFlight = false
-        NSLog("funo: capture times %.0f ms for %d files", Date().timeIntervalSince(started) * 1000, captureReadTotal)
         if sortKey == .capture {
             resort(keepSelection: true)
         }
+        noteDatesReady()
         updateStatus()
     }
 
@@ -1240,6 +1240,10 @@ final class PhotoGridViewController: NSViewController,
     }
 
     // MARK: - Sorting
+
+    private func nameSorted(_ assets: [PhotoAsset]) -> [PhotoAsset] {
+        assets.sorted { nameOrdered($0, before: $1) }
+    }
 
     private func sorted(_ assets: [PhotoAsset]) -> [PhotoAsset] {
         switch sortKey {
@@ -1317,6 +1321,17 @@ final class PhotoGridViewController: NSViewController,
         } else {
             collectionView.scroll(NSPoint.zero)
         }
+        collectionView.layoutSubtreeIfNeeded()
+        if !screenLogged {
+            let visible = collectionView.indexPathsForVisibleItems().filter { $0.item < displayedAssets.count }.count
+            if visible > 0 { screenTarget = visible }
+            if screenTarget > 0, screenFilled >= screenTarget { logFirstScreen() }
+        }
+        let screen = max(screenTarget, 48)
+        ThumbnailLoader.shared.warmFolder(
+            displayedAssets.map(\.url),
+            leading: min(displayedAssets.count, screen * 4),
+            maxPixel: ThumbnailLoader.thumbnailPixelSize)
         // The welcome overlay owns the empty screen - never stack
         // "No photos in this folder" on top of it.
         emptyLabel.stringValue = welcomeOverlay != nil ? ""
@@ -1509,9 +1524,41 @@ final class PhotoGridViewController: NSViewController,
     }
 
     private func reportFirstThumbIfNeeded() {
-        guard firstThumbMS == nil, let started = scanStartedAt else { return }
-        firstThumbMS = Date().timeIntervalSince(started) * 1000
-        updateStatus()
+        guard let started = scanStartedAt else { return }
+        if firstThumbMS == nil {
+            firstThumbMS = Date().timeIntervalSince(started) * 1000
+            updateStatus()
+        }
+        guard !screenLogged else { return }
+        if screenTarget == 0 {
+            let visible = collectionView.indexPathsForVisibleItems().filter { $0.item < displayedAssets.count }.count
+            if visible > 0 { screenTarget = visible }
+        }
+        screenFilled += 1
+        if screenTarget > 0, screenFilled >= screenTarget { logFirstScreen() }
+    }
+
+    private func noteGridShown() {
+        guard !gridLogged, let started = scanStartedAt else { return }
+        gridLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        FolderMetrics.shared.noteGrid(files: allAssets.count, gridMS: ms)
+    }
+
+    private func logFirstScreen() {
+        guard !screenLogged, let started = scanStartedAt else { return }
+        screenLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        let stats = ThumbnailLoader.shared.stats()
+        FolderMetrics.shared.noteScreen(ms: ms, cache: stats.cache, embedded: stats.embedded, full: stats.full)
+    }
+
+    private func noteDatesReady() {
+        guard !datesLogged, let started = scanStartedAt else { return }
+        datesLogged = true
+        let ms = Date().timeIntervalSince(started) * 1000
+        let stats = ThumbnailLoader.shared.stats()
+        FolderMetrics.shared.noteDates(files: allAssets.count, ms: ms, cache: stats.cache, embedded: stats.embedded, full: stats.full)
     }
 
     // MARK: - NSCollectionViewDataSource
@@ -1612,7 +1659,11 @@ final class PhotoGridViewController: NSViewController,
                 warm(lo - ahead, lo - 1)
                 warm(hi + 1, hi + behind)
             }
-            ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
+            let aheadEnd = min(count - 1, hi + ahead)
+            let aheadURLs = aheadEnd >= hi + 1
+                ? (hi + 1...aheadEnd).map { self.displayedAssets[$0].url }
+                : []
+            ThumbnailLoader.shared.focusVisible(visibleURLs, ahead: aheadURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
         }
     }
 

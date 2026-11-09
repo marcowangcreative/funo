@@ -6,7 +6,7 @@ import QuickCullCore
 final class WorkRunner {
     static let shared = WorkRunner()
 
-    let scheduler = WorkScheduler()
+    let scheduler: WorkScheduler
     private let pump = DispatchQueue(label: "funo.work.pump")
     private let pool: OperationQueue
     private var bodies: [Int: ((@escaping () -> Bool) -> Void)] = [:]
@@ -17,9 +17,13 @@ final class WorkRunner {
     private var laneFlushScheduled = false
 
     private init() {
+        let limits = DrivePacing.limits(cores: ProcessInfo.processInfo.activeProcessorCount)
+        scheduler = WorkScheduler(
+            cardLimit: limits.card, externalLimit: limits.external, internalLimit: limits.internalDisk,
+            globalLimit: limits.global, metadataLimit: limits.metadata)
         pool = OperationQueue()
         pool.name = "funo.work"
-        pool.maxConcurrentOperationCount = 8
+        pool.maxConcurrentOperationCount = limits.global
         pool.qualityOfService = .userInitiated
     }
 
@@ -50,9 +54,10 @@ final class WorkRunner {
         }
     }
 
-    /// Internal disks get six reads. Anything that can be unplugged, including
-    /// USB, exFAT, and spinning drives, gets two so the heads and the bus
-    /// are not thrashed.
+    /// Three paces. A real card (`volumeIsRemovable`) gets 2 reads. An
+    /// external SSD that is not removable media — including exFAT — gets
+    /// max(4, cores-2). The internal disk gets max(4, cores-1). Treating
+    /// every external SSD as a card starved the cores and read as load lag.
     func classify(_ url: URL) -> (volume: String, pace: VolumePace) {
         let dir = url.deletingLastPathComponent().path
         paceLock.lock()
@@ -64,8 +69,9 @@ final class WorkRunner {
         let volume = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.path ?? "/"
         let values = try? URL(fileURLWithPath: volume).resourceValues(
             forKeys: [.volumeIsRemovableKey, .volumeIsInternalKey])
-        let slow = (values?.volumeIsRemovable ?? false) || (values?.volumeIsInternal == false)
-        let result = (volume, slow ? VolumePace.slow : VolumePace.fast)
+        let removable = values?.volumeIsRemovable ?? false
+        let isInternal = values?.volumeIsInternal ?? true
+        let result = (volume, DrivePacing.pace(removable: removable, isInternal: isInternal))
         paceLock.lock()
         paceMemo[dir] = result
         paceLock.unlock()

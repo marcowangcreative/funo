@@ -301,7 +301,7 @@ final class FaceAnalyzer {
         let place = WorkRunner.shared.classify(url)
         WorkRunner.shared.submit(
             group: "faces", name: url.lastPathComponent, lane: .background,
-            volume: place.volume, pace: .slow, generation: gen,
+            volume: place.volume, pace: place.pace == .internalDisk ? .internalDisk : .card, generation: gen,
             onQueued: { ticket.job = $0 }
         ) { [weak self] isCancelled in
             guard let self, !isCancelled() else { return }
