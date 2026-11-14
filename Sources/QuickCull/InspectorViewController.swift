@@ -427,8 +427,9 @@ final class InspectorViewController: NSViewController {
     /// BRIGHT - the Leica info-card trick: hierarchy by brightness, not
     /// size. Empty key = plain value (focal length, lens name).
     static func exifSummaryParts(for url: URL) -> [(String, String)] {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+        guard let source = ImageIODecode.makeSource(url: url) else { return [] }
+        defer { ImageIODecode.dropCache(source) }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             return []
         }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
@@ -452,8 +453,9 @@ final class InspectorViewController: NSViewController {
     }
 
     static func exifRows(for url: URL) -> [(String, String)] {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+        guard let source = ImageIODecode.makeSource(url: url) else { return [] }
+        defer { ImageIODecode.dropCache(source) }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             return []
         }
         var rows: [(String, String)] = []

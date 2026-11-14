@@ -10,6 +10,12 @@ import ImageIO
 ///   2. Ask ImageIO for an EMBEDDED thumbnail only (no full decode).
 ///   3. If that's missing or too small, force-generate one (full decode,
 ///      but downsampled during decode - never a 60MP bitmap in memory).
+///   4. Whatever comes back is copied into an 8-bit buffer no larger than
+///      the size that was asked for, then ImageIO's own cache is dropped.
+///      The previous cache kept those full frames: NSCache does not enforce
+///      its cost limit on macOS, so a Release-speed scroll retained every
+///      one of them (tens of GB). The caches below evict before insert
+///      returns.
 final class ThumbnailLoader {
 
     static let shared = ThumbnailLoader()
@@ -21,24 +27,23 @@ final class ThumbnailLoader {
     /// 100% zoom - full native resolution (CR3s: the 6000×4000 embedded JPEG).
     static let fullPixelSize: CGFloat = 8192
 
-    /// Three tiers so they can't starve each other: a zooming session's
-    /// ~96 MB full-res bitmaps must never evict the grid's thumbnails
-    /// (that eviction is what makes other apps feel like they "come back
-    /// slow" after heavy use).
-    private let thumbCache = NSCache<NSString, NSImage>()   // grid thumbs
-    private let previewCache = NSCache<NSString, NSImage>() // fit-to-screen previews
-    private let fullCache = NSCache<NSString, NSImage>()    // 100% zoom decodes
+    /// Hard ceilings, enforced on insert. See BoundedCostCache.
+    ///
+    /// Thumbs: a 512px bitmap is ~0.5–1 MB, so 160 MB is a couple of
+    /// screens of scrollback — flicking back does not re-decode.
+    /// Previews: a 3200px frame is ~15–30 MB. Eight covers the loupe's
+    /// ±2 window plus a little scrollback.
+    /// Full-res: at most three zoomed frames, and never more than ~360 MB.
+    private let thumbCache = BoundedCostCache<NSImage>(costLimit: 160 * 1_024 * 1_024, countLimit: 250)
+    private let previewCache = BoundedCostCache<NSImage>(costLimit: 240 * 1_024 * 1_024, countLimit: 8)
+    private let fullCache = BoundedCostCache<NSImage>(costLimit: 360 * 1_024 * 1_024, countLimit: 3)
 
     /// Pending operations keyed by cache key. Touched from the main thread only.
     private var pending: [String: Operation] = [:]
 
-    private init() {
-        thumbCache.totalCostLimit = 500 * 1_024 * 1_024   // thousands of thumbs
-        previewCache.totalCostLimit = 500 * 1_024 * 1_024 // ~12 screen-size previews
-        fullCache.countLimit = 3                          // current + neighbors, hard cap
-    }
+    private init() {}
 
-    private func cache(for maxPixel: CGFloat) -> NSCache<NSString, NSImage> {
+    private func cache(for maxPixel: CGFloat) -> BoundedCostCache<NSImage> {
         if maxPixel <= Self.thumbnailPixelSize { return thumbCache }
         if maxPixel <= Self.previewPixelSize { return previewCache }
         return fullCache
@@ -52,14 +57,28 @@ final class ThumbnailLoader {
     }
 
     func cachedImage(for url: URL, maxPixel: CGFloat) -> NSImage? {
-        cache(for: maxPixel).object(forKey: cacheKey(url, maxPixel) as NSString)
+        cache(for: maxPixel).value(for: cacheKey(url, maxPixel))
+    }
+
+    /// "thumbs 40 MB, previews 48 MB, full 0 MB" — for the memory log.
+    func cacheSummary() -> String {
+        func mb(_ bytes: Int) -> String { String(format: "%.0f MB", Double(bytes) / 1_048_576) }
+        let thumbs = thumbCache.currentCost
+        let previews = previewCache.currentCost
+        let full = fullCache.currentCost
+        return "image-cache \(mb(thumbs + previews + full)) (thumbs \(mb(thumbs)), previews \(mb(previews)), full \(mb(full)), \(thumbCache.count + previewCache.count + fullCache.count) images)"
+    }
+
+    /// Throttled resident-memory line. No-op unless FUNO_MEMORY_LOG=1.
+    func logMemory(_ context: String) {
+        MemoryFootprint.log(context: context, cacheSummary: cacheSummary())
     }
 
     /// Testing aid: drop every decoded image held in memory.
     func clearMemoryCaches() {
-        thumbCache.removeAllObjects()
-        previewCache.removeAllObjects()
-        fullCache.removeAllObjects()
+        thumbCache.removeAll()
+        previewCache.removeAll()
+        fullCache.removeAll()
     }
 
     /// Waiters per cache key: every caller wanting this decode gets called
@@ -119,15 +138,18 @@ final class ThumbnailLoader {
 
     func request(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
         let key = cacheKey(url, maxPixel)
-        if let hit = cache(for: maxPixel).object(forKey: key as NSString) {
+        if let hit = cache(for: maxPixel).value(for: key) {
             completion(hit)
             return
         }
         waiters[key, default: []].append(completion)
         // A visible caller is waiting - make sure an already-queued op
         // (e.g. from a prefetch) doesn't languish behind the backlog.
-        if let existing = pending[key], existing.queuePriority.rawValue < Operation.QueuePriority.high.rawValue {
-            existing.queuePriority = .high
+        if let existing = pending[key] {
+            let wanted: Operation.QueuePriority = maxPixel > Self.thumbnailPixelSize ? .veryHigh : .high
+            if existing.queuePriority.rawValue < wanted.rawValue {
+                existing.queuePriority = wanted
+            }
         }
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
@@ -135,21 +157,59 @@ final class ThumbnailLoader {
     /// Warm the cache without registering a waiter - cancellable freely.
     func prefetch(_ url: URL, maxPixel: CGFloat) {
         let key = cacheKey(url, maxPixel)
-        guard cache(for: maxPixel).object(forKey: key as NSString) == nil else { return }
+        guard cache(for: maxPixel).value(for: key) == nil else { return }
         ensureOperation(key: key, url: url, maxPixel: maxPixel)
     }
 
     /// The scroll position moved: THESE files are on screen now. Their
-    /// pending thumbnail decodes jump the line; every other queued thumb
-    /// drops to low. Without this, on a slow card, requests from screens
-    /// you scrolled PAST run first-come-first-served and the screen you're
-    /// looking at starves blank behind them.
-    func focusVisible(_ urls: [URL], maxPixel: CGFloat) {
+    /// pending thumbnail decodes jump the line. Prefetches outside
+    /// `prefetchWindow` are cancelled — a fast scroll used to leave a
+    /// decode queued for every cell that briefly appeared, and in Release
+    /// those all finished and stayed resident.
+    func focusVisible(_ urls: [URL], prefetchWindow: [URL], maxPixel: CGFloat) {
+        assert(Thread.isMainThread)
         let tier = "\(Int(maxPixel))"
         let visibleKeys = Set(urls.map { cacheKey($0, maxPixel) })
-        for (key, op) in pending where op.name == tier {
-            op.queuePriority = visibleKeys.contains(key) ? .high : .low
+        let keepKeys = Set(prefetchWindow.map { cacheKey($0, maxPixel) })
+        let keys = Array(pending.keys)
+        for key in keys {
+            guard let op = pending[key], op.name == tier else { continue }
+            if visibleKeys.contains(key) {
+                op.queuePriority = .high
+            } else if keepKeys.contains(key) {
+                if op.queuePriority.rawValue < Operation.QueuePriority.normal.rawValue {
+                    op.queuePriority = .normal
+                }
+            } else if waiters[key]?.isEmpty ?? true {
+                op.cancel()
+                pending[key] = nil
+            } else {
+                op.queuePriority = .low
+            }
         }
+        if maxPixel <= Self.thumbnailPixelSize {
+            thumbCache.touch(visibleKeys)
+        }
+    }
+
+    /// Only these preview-sized decodes are still relevant (the loupe's
+    /// current frame and its immediate neighbors, or the single grid
+    /// selection). Everything else at that tier is cancelled, including
+    /// in-flight requests whose waiter will see nil and ignore it because
+    /// the photo is no longer on screen. Arrowing through a folder used to
+    /// queue one ~30 MB preview per keystroke and never cancel them.
+    func notePreviewWindow(_ urls: [URL]) {
+        assert(Thread.isMainThread)
+        let keep = Set(urls.map { cacheKey($0, Self.previewPixelSize) })
+        cancelTier(Int(Self.previewPixelSize), except: keep, dropWaiters: true)
+    }
+
+    /// Navigation landed back at fit. A zoomed full-res decode for a photo
+    /// we've already left is the biggest single buffer we allocate
+    /// (~100 MB); don't finish it.
+    func cancelFullResDecodes() {
+        assert(Thread.isMainThread)
+        cancelTier(Int(Self.fullPixelSize), except: [], dropWaiters: true)
     }
 
     /// Cancel a decode that scrolled out of relevance - unless a visible
@@ -161,21 +221,46 @@ final class ThumbnailLoader {
         pending[key] = nil
     }
 
+    private func cancelTier(_ tierPixel: Int, except keep: Set<String>, dropWaiters: Bool) {
+        let tier = "\(tierPixel)"
+        var stranded: [(NSImage?) -> Void] = []
+        for key in Array(pending.keys) {
+            guard let op = pending[key], op.name == tier, !keep.contains(key) else { continue }
+            if !dropWaiters && !(waiters[key]?.isEmpty ?? true) { continue }
+            op.cancel()
+            pending[key] = nil
+            if dropWaiters, let callbacks = waiters.removeValue(forKey: key) {
+                stranded.append(contentsOf: callbacks)
+            }
+        }
+        guard !stranded.isEmpty else { return }
+        // Async so a waiter that re-enters the loader (a retry) can't
+        // mutate `pending` under this loop.
+        DispatchQueue.main.async {
+            stranded.forEach { $0(nil) }
+        }
+    }
+
     private func ensureOperation(key: String, url: URL, maxPixel: CGFloat) {
         guard pending[key] == nil else { return }
         let userRotation = RatingsStore.shared.rotation(for: url.path)
 
         let op = BlockOperation()
         op.name = "\(Int(maxPixel))" // tier tag for focusVisible()
-        // Priority tiers: the big preview the user is LOOKING AT preempts
-        // the thumbnail backlog (critical on slow cards, where hundreds of
-        // queued thumbs used to starve the sharp render for minutes).
-        if maxPixel > Self.thumbnailPixelSize {
+        // Priority: a preview someone is LOOKING AT preempts the thumbnail
+        // backlog. A speculative preview (grid selection, loupe neighbor)
+        // does not — those used to be .veryHigh, so arrowing the contact
+        // sheet starved the thumbs you were scrolling and flooded RAM with
+        // screen-sized bitmaps.
+        let hasWaiter = !(waiters[key]?.isEmpty ?? true)
+        if hasWaiter && maxPixel > Self.thumbnailPixelSize {
             op.queuePriority = .veryHigh
-        } else if !(waiters[key]?.isEmpty ?? true) {
+        } else if hasWaiter {
             op.queuePriority = .high   // visible cell
+        } else if maxPixel > Self.thumbnailPixelSize {
+            op.queuePriority = .normal // nearby preview prefetch
         } else {
-            op.queuePriority = .normal // prefetch
+            op.queuePriority = .normal // thumbnail prefetch
         }
         op.addExecutionBlock { [weak self, weak op] in
             guard let op, !op.isCancelled else {
@@ -195,39 +280,59 @@ final class ThumbnailLoader {
                 return
             }
 
-            // Disk cache (grid thumbnails only): second open of a folder
-            // skips decoding entirely.
-            // Disk-cache thumbnails AND previews (not the 8192 full-res -
-            // too big, rarely revisited). The LRU cache bounds the growth,
-            // so a revisited photo in expanded view is sharp INSTANTLY with
-            // no lower-res buffer flash.
-            var diskKey: String?
-            if maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
-                diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
-            }
-            var image: NSImage?
-            if let diskKey, let data = CacheDB.shared.get(diskKey) {
-                image = NSImage(data: data)
-            }
-            if image == nil {
-                image = Self.decode(url: url, maxPixel: maxPixel, userRotation: userRotation)
-                if let image, let diskKey,
-                   let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            // One pool per image. Release builds otherwise keep every
+            // autoreleased ImageIO/AppKit temporary alive until the
+            // operation queue drains its thread pool — and Release fills
+            // that queue much faster than Debug. The bitmap is retained
+            // into `decoded` before the pool drains; returning it directly
+            // from the pool can drop it under optimization.
+            var decoded: DecodedImage?
+            autoreleasepool {
+                // Disk cache (grid thumbnails AND previews, not the 8192
+                // full-res — too big, rarely revisited). The LRU bounds the
+                // RAM copy, so a revisited photo in expanded view is sharp
+                // INSTANTLY with no lower-res buffer flash.
+                var diskKey: String?
+                if maxPixel <= Self.previewPixelSize, let identity = CacheDB.identity(for: url) {
+                    diskKey = identity + "|t\(Int(maxPixel))|r\(userRotation)"
+                }
+                if let diskKey, let data = CacheDB.shared.get(diskKey),
+                   let cached = Self.imageFromDiskJPEG(data, maxPixel: maxPixel) {
+                    decoded = cached
+                    return
+                }
+                guard let fresh = Self.decode(url: url, maxPixel: maxPixel, userRotation: userRotation) else {
+                    return
+                }
+                if let diskKey, let cg = fresh.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
                     let rep = NSBitmapImageRep(cgImage: cg)
                     if let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.82]) {
                         CacheDB.shared.set(diskKey, jpeg)
                     }
                 }
+                decoded = fresh
+            }
+            // Cancelled while we were decoding (the user already scrolled
+            // past). Drop the bitmap on the floor instead of caching it.
+            if op.isCancelled {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.pending[key] === op else { return }
+                    self.pending[key] = nil
+                    let stranded = self.waiters.removeValue(forKey: key) ?? []
+                    stranded.forEach { $0(nil) }
+                }
+                return
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.pending[key] === op { self.pending[key] = nil }
-                if let image {
-                    let cost = Int(image.size.width * image.size.height * 4)
-                    self.cache(for: maxPixel).setObject(image, forKey: key as NSString, cost: cost)
+                let authoritative = self.pending[key] === op
+                if authoritative { self.pending[key] = nil }
+                if authoritative, let decoded {
+                    self.cache(for: maxPixel).insert(decoded.image, for: key, cost: decoded.cost)
                 }
+                guard authoritative else { return }
                 let callbacks = self.waiters.removeValue(forKey: key) ?? []
-                callbacks.forEach { $0(image) }
+                callbacks.forEach { $0(decoded?.image) }
             }
         }
         pending[key] = op
@@ -236,11 +341,44 @@ final class ThumbnailLoader {
 
     // MARK: - Decoding (background threads)
 
-    private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> NSImage? {
+    private struct DecodedImage {
+        let image: NSImage
+        let cost: Int
+    }
+
+    /// A disk blob is a JPEG we wrote earlier. Old blobs (from before the
+    /// cache started downsampling) can be full-frame; scale them on the
+    /// way back in instead of trusting the file.
+    private static func imageFromDiskJPEG(_ data: Data, maxPixel: CGFloat) -> DecodedImage? {
+        guard let source = ImageIODecode.makeSource(data: data) else { return nil }
+        defer { ImageIODecode.dropCache(source) }
+        guard let cg = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: false),
+              let fitted = ImageIODecode.materialized(cg, maxPixel: maxPixel) else {
+            return nil
+        }
+        let image = NSImage(cgImage: fitted, size: NSSize(width: fitted.width, height: fitted.height))
+        return DecodedImage(image: image, cost: ImageIODecode.byteCost(fitted))
+    }
+
+    private static func decode(url: URL, maxPixel: CGFloat, userRotation: Int = 0) -> DecodedImage? {
         guard let image = decodeOriented(url: url, maxPixel: maxPixel) else { return nil }
-        guard userRotation != 0 else { return image }
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-        return NSImage(cgImage: ImageTransform.rotate(cg, degreesCW: userRotation), size: .zero)
+        guard userRotation != 0 else {
+            let cost = byteCost(of: image)
+            return DecodedImage(image: image, cost: cost)
+        }
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return DecodedImage(image: image, cost: byteCost(of: image))
+        }
+        let rotated = ImageTransform.rotate(cg, degreesCW: userRotation)
+        let turned = NSImage(cgImage: rotated, size: NSSize(width: rotated.width, height: rotated.height))
+        return DecodedImage(image: turned, cost: ImageIODecode.byteCost(rotated))
+    }
+
+    private static func byteCost(of image: NSImage) -> Int {
+        if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return ImageIODecode.byteCost(cg)
+        }
+        return max(1, Int((image.size.width * image.size.height * 4).rounded()))
     }
 
     /// Decode with EXIF/container orientation applied (no user rotation yet).
@@ -254,46 +392,28 @@ final class ThumbnailLoader {
             return image
         }
 
-        let sourceOptions: [CFString: Any] = [
-            kCGImageSourceShouldCache: false
-        ]
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
-            return nil
-        }
+        guard let source = ImageIODecode.makeSource(url: url) else { return nil }
+        defer { ImageIODecode.dropCache(source) }
 
         // Pass 1: embedded preview only. This is the Photo Mechanic trick -
-        // the camera already made us a JPEG; just use it.
-        let embeddedOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel
-        ]
-        if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, embeddedOptions as CFDictionary) {
-            let biggestSide = CGFloat(max(cg.width, cg.height))
-            // Acceptance bar scales with the COST of rejecting:
-            // · JPEG/HEIC: pass 2 is a cheap direct decode, so demand at
-            //   least half the requested size. (The old flat 240px bar let
-            //   a JPEG's 320px EXIF thumbnail stand in for a 3200px screen
-            //   preview - "perfectly fine JPEGs render blurry.")
-            // · RAW: pass 2 is a full develop (seconds on some formats) -
-            //   accept any real preview ≥1280px; a 2× upscale beats a
-            //   beach ball, and face-aware focus judges sharpness anyway.
-            let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
-            let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
-            if biggestSide >= bar {
-                return NSImage(cgImage: cg, size: .zero)
+        // the camera already made us a JPEG; just use it. If ImageIO hands
+        // it back larger than we asked (it often ignores the max-pixel
+        // ceiling for an existing preview), scale it ourselves. That is a
+        // blit, not a RAW develop.
+        let isRAW = PhotoAsset.rawExtensions.contains(url.pathExtension.lowercased())
+        let bar = isRAW ? min(maxPixel * 0.5, 1280) : maxPixel * 0.5
+        if let embedded = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: true) {
+            let biggestSide = CGFloat(max(embedded.width, embedded.height))
+            if biggestSide >= bar, let fitted = ImageIODecode.materialized(embedded, maxPixel: maxPixel) {
+                return NSImage(cgImage: fitted, size: NSSize(width: fitted.width, height: fitted.height))
             }
         }
 
-        // Pass 2: no usable embedded preview - decode, but downsample on the way in.
-        let forcedOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel
-        ]
-        if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, forcedOptions as CFDictionary) {
-            return NSImage(cgImage: cg, size: .zero)
+        // Pass 2: no usable embedded preview - decode, downsampled on the way in.
+        guard let forced = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: false),
+              let fitted = ImageIODecode.materialized(forced, maxPixel: maxPixel) else {
+            return nil
         }
-        return nil
+        return NSImage(cgImage: fitted, size: NSSize(width: fitted.width, height: fitted.height))
     }
 }

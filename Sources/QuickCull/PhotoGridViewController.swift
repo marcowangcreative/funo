@@ -535,6 +535,12 @@ final class PhotoGridViewController: NSViewController,
         scrollView.hasVerticalScroller = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrollView)
+        // Resident-memory log while scrolling (FUNO_MEMORY_LOG=1). The
+        // notification also fires during layout; the logger throttles itself.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(gridDidScroll(_:)),
+                                               name: NSView.boundsDidChangeNotification,
+                                               object: scrollView.contentView)
 
         // The status line renders in the WINDOW footer (StatusFooterView) -
         // this grid feeds it via onStatusChanged when it's the active tab.
@@ -889,8 +895,12 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var dates: [String: Date] = [:]
             for asset in assets {
-                if let date = FolderScanner.captureDate(of: asset.url) {
-                    dates[asset.id] = date
+                // Per file. One pool for the whole folder kept every
+                // ImageIO source alive until the end in Release builds.
+                autoreleasepool {
+                    if let date = FolderScanner.captureDate(of: asset.url) {
+                        dates[asset.id] = date
+                    }
                 }
             }
             DispatchQueue.main.async {
@@ -1074,7 +1084,17 @@ final class PhotoGridViewController: NSViewController,
         let rejected = allAssets.filter { RatingsStore.shared.isRejected($0.id) }.count
         if rated > 0 || rejected > 0 { parts.append("\(rated) rated · \(rejected) rejected") }
         if aiTotal > 0, aiDone < aiTotal { parts.append("scanning faces \(aiDone)/\(aiTotal)") }
+        if MemoryFootprint.loggingEnabled {
+            let mb = Double(MemoryFootprint.physFootprint()) / 1_048_576
+            parts.append(String(format: "mem %.0f MB", mb))
+            parts.append(ThumbnailLoader.shared.cacheSummary())
+        }
         pushStatus(parts.joined(separator: "   ·   "))
+    }
+
+    /// Scroll-driven memory readout. No-op unless FUNO_MEMORY_LOG=1.
+    @objc private func gridDidScroll(_ note: Notification) {
+        ThumbnailLoader.shared.logMemory("scroll")
     }
 
     private var statusUpdateScheduled = false
@@ -1140,9 +1160,21 @@ final class PhotoGridViewController: NSViewController,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
             self.focusPassScheduled = false
-            let visibleURLs = self.collectionView.indexPathsForVisibleItems()
+            let visibleIPs = self.collectionView.indexPathsForVisibleItems()
+            let visibleURLs = visibleIPs
                 .compactMap { $0.item < self.displayedAssets.count ? self.displayedAssets[$0.item].url : nil }
-            ThumbnailLoader.shared.focusVisible(visibleURLs, maxPixel: ThumbnailLoader.thumbnailPixelSize)
+            let indexes = visibleIPs.map(\.item)
+            let lo = indexes.min() ?? 0
+            let hi = indexes.max() ?? 0
+            // One or two screens either side of what's visible. Further
+            // prefetches are cancelled so a fling doesn't decode the folder.
+            let margin = 48
+            let start = max(0, lo - margin)
+            let end = min(self.displayedAssets.count, hi + margin + 1)
+            let window = start < end ? self.displayedAssets[start..<end].map(\.url) : []
+            ThumbnailLoader.shared.focusVisible(visibleURLs, prefetchWindow: window,
+                                                maxPixel: ThumbnailLoader.thumbnailPixelSize)
+            ThumbnailLoader.shared.logMemory("scroll")
         }
     }
 
@@ -1150,7 +1182,13 @@ final class PhotoGridViewController: NSViewController,
 
     func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
         guard isActiveTab else { return } // frozen background tab
-        for ip in indexPaths where ip.item < displayedAssets.count {
+        // NSCollectionView will hand us index paths far ahead of the
+        // viewport. Decoding those is what made a fast scroll build a
+        // queue for the whole folder. Keep a window around what's on screen.
+        let visible = collectionView.indexPathsForVisibleItems().map(\.item)
+        let lo = (visible.min() ?? 0) - 48
+        let hi = (visible.max() ?? 0) + 48
+        for ip in indexPaths where ip.item < displayedAssets.count && ip.item >= lo && ip.item <= hi {
             ThumbnailLoader.shared.prefetch(displayedAssets[ip.item].url, maxPixel: ThumbnailLoader.thumbnailPixelSize)
         }
     }
@@ -1580,6 +1618,9 @@ final class PhotoGridViewController: NSViewController,
         if !FileOps.isOnRemovableVolume(url) {
             ThumbnailLoader.shared.prefetch(url, maxPixel: ThumbnailLoader.previewPixelSize)
         }
+        // One screen-sized preview, not one per keystroke. The previous
+        // selection's decode is cancelled here.
+        ThumbnailLoader.shared.notePreviewWindow([url])
         FaceAnalyzer.shared.prioritize(displayedAssets[index].id)
         onSelectionChanged?(displayedAssets[index])
     }
@@ -1612,6 +1653,7 @@ final class PhotoGridViewController: NSViewController,
             if !FileOps.isOnRemovableVolume(url) {
                 ThumbnailLoader.shared.prefetch(url, maxPixel: ThumbnailLoader.previewPixelSize)
             }
+            ThumbnailLoader.shared.notePreviewWindow([url])
             onSelectionChanged?(displayedAssets[ip.item])
         }
     }

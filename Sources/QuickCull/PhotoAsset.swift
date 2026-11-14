@@ -107,8 +107,9 @@ enum FolderScanner {
     /// Exact capture time from EXIF (header read only). nil → caller falls
     /// back to the file's modification date.
     static func captureDate(of url: URL) -> Date? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        guard let source = ImageIODecode.makeSource(url: url) else { return nil }
+        defer { ImageIODecode.dropCache(source) }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
               let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String else {
             return nil

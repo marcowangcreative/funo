@@ -464,28 +464,34 @@ final class FaceAnalyzer {
     /// Also used by the inspector to cut face crops (same orientation as the
     /// rects were computed in).
     static func analysisDecode(url: URL, maxPixel: CGFloat) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
-            return nil
-        }
-        let embedded: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel
-        ]
-        let embeddedResult = CGImageSourceCreateThumbnailAtIndex(source, 0, embedded as CFDictionary)
+        // Own pool + an explicit ImageIO cache drop. This runs once per
+        // photo in the folder; without the drop, ImageIO retained a
+        // full-frame decode for every file and a 1,000-photo shoot climbed
+        // into the tens of GB. The returned CGImage is an independent
+        // 8-bit buffer no larger than maxPixel.
+        // Assign to a variable that outlives the pool. Returning a CGImage
+        // straight out of autoreleasepool can drop it when the pool drains
+        // (Release extends lifetimes differently than Debug).
+        var result: CGImage?
+        autoreleasepool {
+            guard let source = ImageIODecode.makeSource(url: url) else { return }
+            defer { ImageIODecode.dropCache(source) }
 
-        // QUALITY FLOOR: ImageIO sometimes hands back the RAW's tiny 160px
-        // thumbnail instead of the big preview. Faces analyzed at that size
-        // silently vanish (the "found 2 of 25" bug). If the embedded result
-        // is too small to trust, pay for a real decode.
-        if let cg = embeddedResult, CGFloat(max(cg.width, cg.height)) >= min(1200, maxPixel * 0.4) {
-            return cg
+            let embeddedResult = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: true)
+
+            // QUALITY FLOOR: ImageIO sometimes hands back the RAW's tiny 160px
+            // thumbnail instead of the big preview. Faces analyzed at that size
+            // silently vanish (the "found 2 of 25" bug). If the embedded result
+            // is too small to trust, pay for a real decode.
+            let chosen: CGImage?
+            if let cg = embeddedResult, CGFloat(max(cg.width, cg.height)) >= min(1200, maxPixel * 0.4) {
+                chosen = cg
+            } else {
+                chosen = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: false) ?? embeddedResult
+            }
+            guard let chosen else { return }
+            result = ImageIODecode.materialized(chosen, maxPixel: maxPixel)
         }
-        let forced: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, forced as CFDictionary) ?? embeddedResult
+        return result
     }
 }
