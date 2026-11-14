@@ -758,12 +758,21 @@ final class PreviewOverlayView: NSView {
         // Keep the shooting rhythm: neighbors decode while you look at this
         // one. ±2 (immediate neighbors first) covers fast arrow-key paging
         // so the sharp preview is already waiting - no lower-res flash.
+        // Anything outside that window — including a full-res zoom decode
+        // for a frame we've already left — is cancelled. Arrowing a whole
+        // shoot used to leave every one of those decodes running.
+        var previewWindow = [url]
         for offset in [1, -1, 2, -2] {
             let n = index + offset
             if n >= 0, n < assets.count {
-                ThumbnailLoader.shared.prefetch(assets[n].url, maxPixel: ThumbnailLoader.previewPixelSize)
+                let neighbor = assets[n].url
+                ThumbnailLoader.shared.prefetch(neighbor, maxPixel: ThumbnailLoader.previewPixelSize)
+                previewWindow.append(neighbor)
             }
         }
+        ThumbnailLoader.shared.notePreviewWindow(previewWindow)
+        ThumbnailLoader.shared.cancelFullResDecodes()
+        ThumbnailLoader.shared.logMemory("preview")
     }
 
     private func display(_ image: NSImage) {

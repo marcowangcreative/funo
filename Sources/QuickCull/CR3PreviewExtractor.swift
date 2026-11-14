@@ -15,29 +15,43 @@ enum CR3PreviewExtractor {
     /// Returns the full-size embedded JPEG bytes, or nil if the container
     /// doesn't match expectations (then the normal ImageIO path takes over).
     static func fullSizeJPEGData(from url: URL) -> Data? {
-        // Memory-map: we touch only the moov header pages + the JPEG range.
-        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
+        // Memory-map inside a pool, then copy JUST the JPEG bytes out.
+        // `Data.subdata` / slicing can share the mapped file. If a cached
+        // CGImage kept that slice, every CR3 scrolled would stay mapped
+        // (tens of MB each). The pool unmaps before we return.
+        autoreleasepool { () -> Data? in
+            guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
 
-        var candidates: [(offset: Int, size: Int)] = []
+            var candidates: [(offset: Int, size: Int)] = []
 
-        forEachBox(in: data, from: 0, to: data.count) { type, start, end in
-            guard type == "moov" else { return }
-            forEachBox(in: data, from: start, to: end) { t2, s2, e2 in
-                guard t2 == "trak" else { return }
-                if let sample = sampleLocation(in: data, trakStart: s2, trakEnd: e2) {
-                    candidates.append(sample)
+            forEachBox(in: data, from: 0, to: data.count) { type, start, end in
+                guard type == "moov" else { return }
+                forEachBox(in: data, from: start, to: end) { t2, s2, e2 in
+                    guard t2 == "trak" else { return }
+                    if let sample = sampleLocation(in: data, trakStart: s2, trakEnd: e2) {
+                        candidates.append(sample)
+                    }
                 }
             }
-        }
 
-        for (offset, size) in candidates {
-            guard size > 200_000,                 // skip thumbnail-sized tracks
-                  offset + size <= data.count,
-                  data[offset] == 0xFF, data[offset + 1] == 0xD8 // JPEG SOI
-            else { continue }
-            return data.subdata(in: offset..<(offset + size))
+            for (offset, size) in candidates {
+                guard size > 200_000,                 // skip thumbnail-sized tracks
+                      offset + size <= data.count,
+                      data[offset] == 0xFF, data[offset + 1] == 0xD8 // JPEG SOI
+                else { continue }
+                var copy = Data(count: size)
+                var copied = false
+                copy.withUnsafeMutableBytes { dst in
+                    data.withUnsafeBytes { src in
+                        guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress else { return }
+                        dstBase.copyMemory(from: srcBase.advanced(by: offset), byteCount: size)
+                        copied = true
+                    }
+                }
+                return copied ? copy : nil
+            }
+            return nil
         }
-        return nil
     }
 
     /// Decode the full-size embedded JPEG downsampled to `maxPixel`.
@@ -45,26 +59,34 @@ enum CR3PreviewExtractor {
     /// rotation flag on the CR3 container - so portrait frames must be
     /// rotated using the container's orientation or they display sideways.
     static func decodePreview(url: URL, maxPixel: CGFloat) -> NSImage? {
-        guard let jpeg = fullSizeJPEGData(from: url),
-              let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true, // honors a tag if one exists
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel
-        ]
-        guard var cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-
-        // If the JPEG itself had no orientation, fall back to the container's.
-        let jpegProps = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let jpegHasOrientation = jpegProps?[kCGImagePropertyOrientation] != nil
-        if !jpegHasOrientation {
-            let containerOrientation = ImageTransform.containerOrientation(of: url)
-            let degrees = ImageTransform.degreesCW(fromEXIFOrientation: containerOrientation)
-            if degrees != 0 {
-                cg = ImageTransform.rotate(cg, degreesCW: degrees)
+        // The image is retained by `image` before the pool drains. Returning
+        // it directly from the pool can free it in Release.
+        var image: NSImage?
+        autoreleasepool {
+            // JPEG bytes only — the mapped CR3 is already released.
+            guard let jpeg = fullSizeJPEGData(from: url),
+                  let source = ImageIODecode.makeSource(data: jpeg) else { return }
+            defer { ImageIODecode.dropCache(source) }
+            guard var cg = ImageIODecode.thumbnail(source: source, maxPixel: maxPixel, embeddedOnly: false) else {
+                return
             }
+
+            // If the JPEG itself had no orientation, fall back to the container's.
+            let jpegProps = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            let jpegHasOrientation = jpegProps?[kCGImagePropertyOrientation] != nil
+            if !jpegHasOrientation {
+                let containerOrientation = ImageTransform.containerOrientation(of: url)
+                let degrees = ImageTransform.degreesCW(fromEXIFOrientation: containerOrientation)
+                if degrees != 0 {
+                    cg = ImageTransform.rotate(cg, degreesCW: degrees)
+                }
+            }
+            // Own 8-bit buffer at or under maxPixel. The thumbnail CGImage
+            // can otherwise keep ImageIO's decode of the 6000×4000 JPEG.
+            guard let fitted = ImageIODecode.materialized(cg, maxPixel: maxPixel) else { return }
+            image = NSImage(cgImage: fitted, size: NSSize(width: fitted.width, height: fitted.height))
         }
-        return NSImage(cgImage: cg, size: .zero)
+        return image
     }
 
     // MARK: - ISO-BMFF plumbing

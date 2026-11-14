@@ -153,9 +153,9 @@ final class ShooterStore {
     /// Camera body serial + model from a photo's header (cheap: metadata
     /// only - the model rides in the same read, zero extra I/O).
     static func cameraInfo(of url: URL) -> (serial: String, model: String?)? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL,
-                [kCGImageSourceShouldCache: false] as CFDictionary),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
+        guard let source = ImageIODecode.makeSource(url: url) else { return nil }
+        defer { ImageIODecode.dropCache(source) }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         guard let serial = exif?[kCGImagePropertyExifBodySerialNumber] as? String, !serial.isEmpty else { return nil }

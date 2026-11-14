@@ -22,8 +22,9 @@ enum ImageTransform {
 
     /// The orientation flag from a file's metadata (cheap header read).
     static func containerOrientation(of url: URL) -> Int {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+        guard let source = ImageIODecode.makeSource(url: url) else { return 1 }
+        defer { ImageIODecode.dropCache(source) }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             return 1
         }
         if let value = props[kCGImagePropertyOrientation] as? UInt32 { return Int(value) }
